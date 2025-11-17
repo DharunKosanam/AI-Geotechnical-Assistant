@@ -58,9 +58,10 @@ const GroupIcon = () => (
 );
 
 interface Thread {
-  id: string;
+  _id?: string; // MongoDB ID (optional)
+  threadId: string; // Changed from 'id' to 'threadId'
   name: string;
-  isGroup: boolean; // 添加 isGroup 属性
+  isGroup: boolean;
 }
 
 interface ThreadListProps {
@@ -113,7 +114,7 @@ const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListPr
   const deleteThread = async (threadId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     
-    const threadToDelete = threads.find(thread => thread.id === threadId);
+    const threadToDelete = threads.find(thread => thread.threadId === threadId);
     if (!threadToDelete) return;
   
     try {
@@ -135,9 +136,9 @@ const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListPr
   
       // 2. 删除成功后更新本地状态
       setThreads((prevThreads) => {
-        const updatedThreads = prevThreads.filter((thread) => thread.id !== threadId);
+        const updatedThreads = prevThreads.filter((thread) => thread.threadId !== threadId);
         if (threadId === currentThreadId && updatedThreads.length > 0) {
-          const newCurrentThreadId = updatedThreads[0].id;
+          const newCurrentThreadId = updatedThreads[0].threadId;
           onThreadSelect(newCurrentThreadId, updatedThreads[0].isGroup);
         }
         return updatedThreads;
@@ -167,7 +168,7 @@ const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListPr
       if (response.ok) {
         setThreads((prevThreads) =>
           prevThreads.map((thread) =>
-            thread.id === threadId ? { ...thread, name: newThreadName } : thread
+            thread.threadId === threadId ? { ...thread, name: newThreadName } : thread
           )
         );
         setEditingThreadId(null);
@@ -183,9 +184,9 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
   e.stopPropagation();
   
   // 显示 threadId 信息
-  const thread = threads.find(t => t.id === threadId);
+  const thread = threads.find(t => t.threadId === threadId);
   if (thread) {
-    setShowThreadInfo(thread);
+    setShowThreadInfo({ id: thread.threadId, name: thread.name, isGroup: thread.isGroup });
     setIsModalOpen(true);
   }
 
@@ -202,7 +203,7 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
       if (response.ok) {
         setThreads((prevThreads) =>
           prevThreads.map((thread) =>
-            thread.id === threadId ? { ...thread, isGroup: true } : thread
+            thread.threadId === threadId ? { ...thread, isGroup: true } : thread
           )
         );
       }
@@ -218,20 +219,20 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
       <h3>Conversation History</h3>
       {threads.map((thread) => (
         <div
-          key={thread.id}
-          className={`${styles.threadItem} ${thread.id === currentThreadId ? styles.active : ''}`}
-          onClick={() => onThreadSelect(thread.id, thread.isGroup)} // 传递 isGroup
+          key={thread.threadId}
+          className={`${styles.threadItem} ${thread.threadId === currentThreadId ? styles.active : ''}`}
+          onClick={() => onThreadSelect(thread.threadId, thread.isGroup)} // 传递 isGroup
         >
-          {editingThreadId === thread.id ? (
+          {editingThreadId === thread.threadId ? (
             <input
               type="text"
               value={newThreadName}
               onChange={(e) => setNewThreadName(e.target.value)}
-              onBlur={() => updateThreadName(thread.id)}
+              onBlur={() => updateThreadName(thread.threadId)}
               onKeyDown={(e) => {  // 添加这个事件处理
                 if (e.key === 'Enter') {
                   e.preventDefault();
-                  updateThreadName(thread.id);
+                  updateThreadName(thread.threadId);
                 }
               }}
               className={styles.threadNameInput}
@@ -244,7 +245,7 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
                 className={styles.editBtn}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setEditingThreadId(thread.id);
+                  setEditingThreadId(thread.threadId);
                   setNewThreadName(thread.name);
                 }}
               >
@@ -252,7 +253,7 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
               </button>
               <button
                 className={`${styles.groupBtn} ${thread.isGroup ? styles.active : ''}`}
-                onClick={(e) => toggleGroupStatus(thread.id, thread.isGroup, e)}
+                onClick={(e) => toggleGroupStatus(thread.threadId, thread.isGroup, e)}
               >
                 <GroupIcon />
               </button>
@@ -260,7 +261,7 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
           )}
           <button 
             className={styles.deleteBtn}
-            onClick={(e) => deleteThread(thread.id, e)}
+            onClick={(e) => deleteThread(thread.threadId, e)}
           >
             <TrashIcon />
           </button>

@@ -1,45 +1,64 @@
 import { openai } from "@/app/openai";
-import fs from 'fs';
-import path from 'path';
+import { getDatabase } from "@/lib/mongodb";
 
-const THREADS_FILE = path.join(process.cwd(), 'userThreads.json');
+const USER_ID = 'default-user'; // Hardcoded user ID
 
-// 获取所有对话线程ID列表
+// Get conversation history from MongoDB
 export async function GET() {
-  if(!fs.existsSync(THREADS_FILE)) {
-    const defaultData = { nickname: '', threads: [] };
-    fs.writeFileSync(THREADS_FILE, JSON.stringify(defaultData, null, 2));
-    return Response.json(defaultData);
+  try {
+    const db = await getDatabase();
+    const conversations = await db
+      .collection('conversations')
+      .find({ userId: USER_ID })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return Response.json({ threads: conversations });
+  } catch (error) {
+    console.error('Error fetching conversations:', error);
+    return Response.json(
+      { error: error.message || 'Failed to fetch conversations', threads: [] },
+      { status: 500 }
+    );
   }
-  const data = JSON.parse(fs.readFileSync(THREADS_FILE, 'utf8'));
-  return Response.json(data);
 }
 
-// 保存新的 thread ID 和名称
+// Save new conversation to MongoDB
 export async function POST(request) {
-  const { threadId, name, isGroup = false } = await request.json();
-  
   try {
-    // 初始化数据结构
-    let data = { nickname: '', threads: [] };
+    const { threadId, name, isGroup = false } = await request.json();
     
-    // 如果文件存在，读取现有数据
-    if(fs.existsSync(THREADS_FILE)) {
-      data = JSON.parse(fs.readFileSync(THREADS_FILE, 'utf8'));
+    if (!threadId) {
+      return Response.json(
+        { error: 'Thread ID is required' },
+        { status: 400 }
+      );
+    }
+
+    const db = await getDatabase();
+    const conversationsCollection = db.collection('conversations');
+    
+    // Check if thread already exists
+    const existingThread = await conversationsCollection.findOne({ 
+      userId: USER_ID, 
+      threadId 
+    });
+    
+    if (existingThread) {
+      return Response.json({ success: true, message: 'Thread already exists' });
     }
     
-    // 检查是否已存在该线程
-    if (!data.threads.some(thread => thread.id === threadId)) {
-      // 添加新线程
-      data.threads.push({ 
-        id: threadId, 
-        name: name || new Date().toLocaleString(),
-        ...(isGroup && { isGroup: true })
-      });
-      
-      // 保存更新后的数据
-      fs.writeFileSync(THREADS_FILE, JSON.stringify(data, null, 2));
-    }
+    // Insert new conversation
+    const conversation = {
+      userId: USER_ID,
+      threadId,
+      name: name || new Date().toLocaleString(),
+      isGroup,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    await conversationsCollection.insertOne(conversation);
     
     return Response.json({ success: true });
   } catch (error) {
@@ -51,53 +70,92 @@ export async function POST(request) {
   }
 }
 
-// 更新线程名称或群组状态
-// 修改 PUT 函数
+// Update conversation name or group status
 export async function PUT(request) {
-  const { threadId, newName, isGroup, nickname } = await request.json();
-  let data = { nickname: '', threads: [] };
-  
-  if(fs.existsSync(THREADS_FILE)) {
-    data = JSON.parse(fs.readFileSync(THREADS_FILE, 'utf8'));
-  }
-
-  if (nickname !== undefined) {
-    // 更新昵称
-    data.nickname = nickname;
-  } else if (threadId) {
-    // 更新线程信息
-    data.threads = data.threads.map(thread => 
-      thread.id === threadId ? 
-      { ...thread, name: newName ?? thread.name, isGroup: isGroup ?? thread.isGroup } 
-      : thread
+  try {
+    const { threadId, newName, isGroup, nickname } = await request.json();
+    
+    const db = await getDatabase();
+    const conversationsCollection = db.collection('conversations');
+    
+    if (nickname !== undefined) {
+      // For now, ignore nickname updates since we're using hardcoded user
+      return Response.json({ success: true, message: 'Nickname not implemented yet' });
+    }
+    
+    if (!threadId) {
+      return Response.json(
+        { error: 'Thread ID is required' },
+        { status: 400 }
+      );
+    }
+    
+    // Build update object
+    const updateFields: {
+      updatedAt: Date;
+      name?: string;
+      isGroup?: boolean;
+    } = {
+      updatedAt: new Date()
+    };
+    
+    if (newName !== undefined) {
+      updateFields.name = newName;
+    }
+    
+    if (isGroup !== undefined) {
+      updateFields.isGroup = isGroup;
+    }
+    
+    const result = await conversationsCollection.updateOne(
+      { userId: USER_ID, threadId },
+      { $set: updateFields }
+    );
+    
+    if (result.matchedCount === 0) {
+      return Response.json(
+        { error: 'Thread not found' },
+        { status: 404 }
+      );
+    }
+    
+    return Response.json({ success: true });
+  } catch (error) {
+    console.error('Update thread error:', error);
+    return Response.json(
+      { error: error.message || 'Failed to update thread' },
+      { status: 500 }
     );
   }
-
-  fs.writeFileSync(THREADS_FILE, JSON.stringify(data, null, 2));
-  return Response.json({ success: true });
 }
 
-// 删除线程
+// Delete conversation
 export async function DELETE(request: Request) {
   try {
     const { threadId, isGroup } = await request.json();
     
-    // 1. 如果不是群组线程，则从 OpenAI 删除
+    if (!threadId) {
+      return Response.json({ error: 'Thread ID is required' }, { status: 400 });
+    }
+    
+    // If not a group thread, try to delete from OpenAI
     if (!isGroup) {
       try {
         await openai.beta.threads.del(threadId);
       } catch (openaiError) {
-        console.error('OpenAI thread deletion failed:', openaiError);
+        // Thread might not exist (404) - that's fine, we still want to remove it from database
+        if (openaiError.status !== 404 && openaiError.statusCode !== 404) {
+          console.error('OpenAI thread deletion failed:', openaiError);
+        }
       }
     }
     
-    // 2. 所有线程都需要从本地存储中删除
-    let data = { threads: [] };
-    if (fs.existsSync(THREADS_FILE)) {
-      data = JSON.parse(fs.readFileSync(THREADS_FILE, 'utf8'));
-      data.threads = data.threads.filter(thread => thread.id !== threadId);
-      fs.writeFileSync(THREADS_FILE, JSON.stringify(data, null, 2));
-    }
+    // Delete from MongoDB
+    const db = await getDatabase();
+    await db.collection('conversations').deleteOne({ 
+      userId: USER_ID, 
+      threadId 
+    });
     
     return Response.json({ success: true });
   } catch (error) {

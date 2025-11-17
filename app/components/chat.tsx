@@ -69,9 +69,11 @@ const Chat = ({
   const threadListRef = useRef(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinThreadInput, setJoinThreadInput] = useState('');
-  // 添加一个状态来控制是否需要滚动
+  
   const [shouldScroll, setShouldScroll] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  // Track if this is a new thread that hasn't had a message sent yet
+  const [isNewThread, setIsNewThread] = useState(false);
 
   // 添加一个生成默认名称的函数
   const getDefaultThreadName = () => {
@@ -109,7 +111,7 @@ const Chat = ({
       // 修改这里，现在需要访问 data.threads
       if (data.threads && data.threads.length > 0) {
         // 如果有历史线程，使用最新的一个
-        const latestThreadId = data.threads[data.threads.length - 1].id;
+        const latestThreadId = data.threads[data.threads.length - 1].threadId;
         setThreadId(latestThreadId);
         loadThread(latestThreadId); // 加载最新的历史消息
         return;
@@ -121,6 +123,7 @@ const Chat = ({
       });
       const threadData = await res.json();
       setThreadId(threadData.threadId);
+      setIsNewThread(true); // Mark as new thread so first message will generate title
   
       const defaultName = new Date().toLocaleString();
       await fetch(`/api/assistants/threads/history`, {
@@ -134,10 +137,10 @@ const Chat = ({
         }
       });
   
-      // 重置消息列表
+      
       setMessages([]);
       
-      // 刷新线程列表
+      
       if (threadListRef.current) {
         await threadListRef.current.fetchThreads();
       }
@@ -145,36 +148,147 @@ const Chat = ({
     createThread();
   }, []); 
 
-  const sendMessage = async (text) => {
-    const response = await fetch(
-      `/api/assistants/threads/${threadId}/messages`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          content: text,
-        }),
-      }
-    );
-    const stream = AssistantStream.fromReadableStream(response.body);
-    handleReadableStream(stream);
-  };
-
-  const submitActionResult = async (runId, toolCallOutputs) => {
-    const response = await fetch(
-      `/api/assistants/threads/${threadId}/actions`,
-      {
+  const generateAndUpdateTitle = async (firstMessage: string) => {
+    try {
+      const response = await fetch(`/api/assistants/threads/${threadId}/title`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          runId: runId,
-          toolCallOutputs: toolCallOutputs,
+          message: firstMessage,
         }),
+      });
+
+      if (!response.ok) {
+        console.error("Failed to generate title");
+        return;
       }
-    );
-    const stream = AssistantStream.fromReadableStream(response.body);
-    handleReadableStream(stream);
+
+      const data = await response.json();
+      const title = data.title;
+
+      // Update thread name in history
+      await fetch(`/api/assistants/threads/history`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          threadId: threadId,
+          newName: title,
+        }),
+      });
+
+      // Refresh thread list to show updated title
+      if (threadListRef.current) {
+        await threadListRef.current.fetchThreads();
+      }
+    } catch (error) {
+      console.error("Error generating title:", error);
+    }
+  };
+
+  const sendMessage = async (text) => {
+    const isFirstMessage = isNewThread && messages.length === 0;
+    
+    try {
+      const response = await fetch(
+        `/api/assistants/threads/${threadId}/messages`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            content: text,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        let errorMessage = `Failed to send message (Status: ${response.status})`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+          if (errorData.details) {
+            console.error("Error details:", errorData.details);
+          }
+        } catch {
+          const errorText = await response.text();
+          errorMessage = errorText || errorMessage;
+        }
+        console.error(`Failed to send message. Status: ${response.status}`);
+        console.error(`Response: ${errorMessage}`);
+        appendMessage("assistant", `\n\n[Error: ${errorMessage}]`);
+        setInputDisabled(false);
+        return;
+      }
+
+      if (!response.body) {
+        console.error("Response body is null");
+        appendMessage("assistant", "\n\n[Error: No response from server]");
+        setInputDisabled(false);
+        return;
+      }
+
+      // Generate title for first message in new thread
+      if (isFirstMessage) {
+        setIsNewThread(false);
+        // Generate title asynchronously after starting the stream
+        generateAndUpdateTitle(text).catch(error => {
+          console.error("Error generating title:", error);
+        });
+      }
+
+      const stream = AssistantStream.fromReadableStream(response.body);
+      handleReadableStream(stream);
+    } catch (error) {
+      console.error("Error sending message:", error);
+      appendMessage("assistant", `\n\n[Error: ${error.message || "Failed to send message"}]`);
+      setInputDisabled(false);
+    }
+  };
+
+  const submitActionResult = async (runId, toolCallOutputs) => {
+    try {
+      const response = await fetch(
+        `/api/assistants/threads/${threadId}/actions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            runId: runId,
+            toolCallOutputs: toolCallOutputs,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Failed to submit action. Status: ${response.status}`);
+        console.error(`Response: ${errorText}`);
+        appendMessage("assistant", `\n\n[Error: Failed to submit action. Status ${response.status}]`);
+        setInputDisabled(false);
+        return;
+      }
+
+      if (!response.body) {
+        console.error("Response body is null");
+        appendMessage("assistant", "\n\n[Error: No response from server]");
+        setInputDisabled(false);
+        return;
+      }
+
+      const stream = AssistantStream.fromReadableStream(response.body);
+      handleReadableStream(stream);
+    } catch (error) {
+      console.error("Error submitting action:", error);
+      appendMessage("assistant", `\n\n[Error: ${error.message || "Failed to submit action"}]`);
+      setInputDisabled(false);
+    }
   };
 
   const handleSubmit = (e) => {
@@ -248,7 +362,36 @@ const Chat = ({
     setInputDisabled(false);
   };
 
+  // handleRunFailed - handle failed runs
+  const handleRunFailed = (event) => {
+    console.error("Run failed:", event);
+    setInputDisabled(false);
+    if (event.data?.last_error) {
+      appendMessage("assistant", `\n\n[Error: ${event.data.last_error.message || "The assistant run failed. Please try again."}]`);
+    } else {
+      appendMessage("assistant", "\n\n[Error: The assistant run failed. Please try again.]");
+    }
+  };
+
+  // handleRunCancelled - handle cancelled runs
+  const handleRunCancelled = () => {
+    console.warn("Run was cancelled");
+    setInputDisabled(false);
+  };
+
   const handleReadableStream = (stream: AssistantStream) => {
+    // Add error handler to catch stream errors including "Final run has not been received"
+    stream.on("error", (error) => {
+      console.error("Stream error:", error);
+      setInputDisabled(false);
+      // Show user-friendly error message
+      if (error.message && error.message.includes("Final run has not been received")) {
+        appendMessage("assistant", "\n\n[Error: The connection was interrupted. Please try sending your message again.]");
+      } else {
+        appendMessage("assistant", `\n\n[Error: ${error.message || "An error occurred. Please try again."}]`);
+      }
+    });
+
     // messages
     stream.on("textCreated", handleTextCreated);
     stream.on("textDelta", handleTextDelta);
@@ -265,6 +408,17 @@ const Chat = ({
       if (event.event === "thread.run.requires_action")
         handleRequiresAction(event);
       if (event.event === "thread.run.completed") handleRunCompleted();
+      if (event.event === "thread.run.failed") handleRunFailed(event);
+      if (event.event === "thread.run.cancelled") handleRunCancelled();
+    });
+
+    // Handle stream end - safety net to re-enable input if completion event is missed
+    stream.on("end", () => {
+      console.log("Stream ended");
+      // Small delay to allow completion event to fire first
+      setTimeout(() => {
+        setInputDisabled(false);
+      }, 100);
     });
   };
 
@@ -317,9 +471,46 @@ const Chat = ({
       setThreadId(threadId);
       // use new history endpoint to retrieve messages
       const response = await fetch(`/api/assistants/threads/${threadId}/history`);
+      
+      if (response.status === 404) {
+        // Thread not found - likely created with different API key or deleted
+        const errorData = await response.json();
+        console.warn('Thread not found:', errorData.error);
+        
+        // Remove invalid thread from the list
+        try {
+          await fetch('/api/assistants/threads/history', {
+            method: 'DELETE',
+            body: JSON.stringify({ 
+              threadId: threadId,
+              isGroup: false // Assume not a group thread for cleanup
+            }),
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          });
+          
+          // Refresh thread list
+          if (threadListRef.current) {
+            await threadListRef.current.fetchThreads();
+          }
+        } catch (deleteError) {
+          console.error('Failed to remove invalid thread:', deleteError);
+        }
+        
+        // Clear the invalid thread and create a new one
+        setMessages([]);
+        setThreadId(null);
+        
+        // Create a new thread automatically
+        await createNewThread();
+        return;
+      }
+      
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
+      
       const data = await response.json();
       const messages = data.messages.map(msg => ({
         role: msg.role,
@@ -327,10 +518,15 @@ const Chat = ({
       }))
       .reverse();
       setMessages(messages);
+      // If thread has messages, it's not a new thread
+      setIsNewThread(messages.length === 0);
       // 加载历史消息时不触发滚动
       setShouldScroll(false);      
     } catch (error) {
       console.error('Failed loading history conversation:', error);
+      // On error, create a new thread to continue working
+      setMessages([]);
+      await createNewThread();
     }
   }
   const createNewThread = async () => {
@@ -345,6 +541,7 @@ const Chat = ({
       setThreadId(data.threadId);
       setMessages([]); 
       setIsGroupConversation(false); // 添加这行，确保新对话不是群组对话
+      setIsNewThread(true); // Mark as new thread so first message will generate title
   
       // 3. 保存到历史记录
       const defaultName = getDefaultThreadName();

@@ -26,30 +26,82 @@ const FileViewer = () => {
   }, []);
 
   const fetchFiles = async () => {
-    const resp = await fetch("/api/assistants/files", {
-      method: "GET",
-    });
-    const data = await resp.json();
-    setFiles(data);
+    try {
+      const resp = await fetch("/api/assistants/files", {
+        method: "GET",
+      });
+      
+      if (!resp.ok) {
+        console.error(`Failed to fetch files. Status: ${resp.status}`);
+        setFiles([]);
+        return;
+      }
+      
+      // Read response as text first to handle empty responses
+      const responseText = await resp.text();
+      
+      if (!responseText || responseText.trim() === '') {
+        console.warn("Empty response from files API");
+        setFiles([]);
+        return;
+      }
+      
+      try {
+        const data = JSON.parse(responseText);
+        setFiles(data);
+      } catch (jsonError) {
+        console.error("Failed to parse JSON response:", jsonError);
+        console.error(`Response text: ${responseText}`);
+        setFiles([]);
+      }
+    } catch (error) {
+      console.error("Error fetching files:", error);
+      setFiles([]);
+    }
   };
 
   const handleFileDelete = async (fileId) => {
-    await fetch("/api/assistants/files", {
-      method: "DELETE",
-      body: JSON.stringify({ fileId }),
-    });
-    await fetchFiles();
+    try {
+      const resp = await fetch("/api/assistants/files", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ fileId }),
+      });
+      
+      if (!resp.ok) {
+        console.error(`Failed to delete file. Status: ${resp.status}`);
+        return;
+      }
+      
+      await fetchFiles();
+    } catch (error) {
+      console.error("Error deleting file:", error);
+    }
   };
 
   const handleFileUpload = async (event) => {
-    const data = new FormData();
-    if (event.target.files.length < 0) return;
-    data.append("file", event.target.files[0]);
-    await fetch("/api/assistants/files", {
-      method: "POST",
-      body: data,
-    });
-    await fetchFiles();
+    try {
+      if (event.target.files.length === 0) return;
+      
+      const data = new FormData();
+      data.append("file", event.target.files[0]);
+      
+      const resp = await fetch("/api/assistants/files", {
+        method: "POST",
+        body: data,
+      });
+      
+      if (!resp.ok) {
+        console.error(`Failed to upload file. Status: ${resp.status}`);
+        return;
+      }
+      
+      await fetchFiles();
+    } catch (error) {
+      console.error("Error uploading file:", error);
+    }
   };
 
   return (

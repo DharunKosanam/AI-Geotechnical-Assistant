@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "csv-parser": "^3.0.0",
+    "dotenv": "^17.2.3",
     "next": "^14.2.18",
     "openai": "^4.46.0",
     "react": "^18",

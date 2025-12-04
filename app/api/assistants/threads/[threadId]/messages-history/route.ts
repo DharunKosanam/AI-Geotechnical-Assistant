@@ -2,6 +2,11 @@ import { openai } from "@/app/openai";
 
 export const runtime = "nodejs";
 
+// Type guard to filter text content blocks
+function isTextContent(content: any): content is { type: "text"; text: { value: string } } {
+  return content.type === "text";
+}
+
 // Get message history for a thread (for SWR polling)
 export async function GET(request, { params }) {
   try {
@@ -26,8 +31,13 @@ export async function GET(request, { params }) {
     const messages = threadMessages.data.map((message) => ({
       role: message.role,
       text: message.content
-        .filter((content) => content.type === "text")
-        .map((content) => content.text.value)
+        .map((content) => {
+          if (content.type === "text") {
+            return content.text.value;
+          }
+          return "";
+        })
+        .filter((text) => text !== "")
         .join("\n"),
     }));
 

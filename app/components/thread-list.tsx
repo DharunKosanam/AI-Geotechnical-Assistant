@@ -109,7 +109,7 @@ const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListPr
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [editingThreadId]);
+  }, [editingThreadId, newThreadName]);
 
   const deleteThread = async (threadId: string, e: React.MouseEvent) => {
     e.stopPropagation();

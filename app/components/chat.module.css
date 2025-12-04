@@ -195,3 +195,45 @@
   background: #0070f3;
   color: white;
 }
+
+/* Welcome Message Styles */
+.welcomeContainer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  width: 100%;
+}
+
+.welcomeMessage {
+  text-align: center;
+  padding: 40px;
+  max-width: 600px;
+}
+
+.welcomeMessage h1 {
+  font-size: 2.5em;
+  margin-bottom: 20px;
+  color: #000;
+  font-weight: 600;
+}
+
+.welcomeMessage p {
+  font-size: 1.3em;
+  color: #666;
+  margin-bottom: 30px;
+  line-height: 1.6;
+}
+
+.welcomeHints {
+  margin-top: 40px;
+  padding: 20px;
+  background-color: #f7f7f7;
+  border-radius: 12px;
+}
+
+.welcomeHints p {
+  font-size: 0.95em;
+  color: #888;
+  margin: 0;
+}

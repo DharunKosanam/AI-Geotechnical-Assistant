@@ -33,22 +33,70 @@ export async function POST(request, { params }) {
       );
     }
 
+    // STEP 1: Check for active runs and cancel them to prevent race condition
+    try {
+      console.log("Checking for active runs on thread:", threadId);
+      const runs = await openai.beta.threads.runs.list(threadId, {
+        limit: 5, // Check last 5 runs
+      });
+
+      // Find any active runs
+      const activeRun = runs.data.find(run => 
+        run.status === 'in_progress' || 
+        run.status === 'queued' || 
+        run.status === 'requires_action'
+      );
+
+      if (activeRun) {
+        console.log(`⚠️  Found active run (${activeRun.status}): ${activeRun.id}. Cancelling...`);
+        
+        try {
+          await openai.beta.threads.runs.cancel(threadId, activeRun.id);
+          console.log(`✅ Cancelled run ${activeRun.id}`);
+          
+          // Wait 1 second for cancellation to process
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (cancelError) {
+          console.warn("Could not cancel run:", cancelError.message);
+          // Continue anyway - the run might have completed naturally
+        }
+      }
+    } catch (checkError) {
+      console.warn("Error checking for active runs:", checkError.message);
+      // Continue anyway - better to try than to fail completely
+    }
+
+    // STEP 2: Now add the message
     try {
       await openai.beta.threads.messages.create(threadId, {
         role: "user",
         content: content,
       });
+      console.log("✅ Message added to thread successfully");
     } catch (createError) {
-      console.error("Error creating message:", createError);
+      console.error("❌ Error creating message:", createError);
       
-      // Handle specific OpenAI errors
-      if (createError.code === 'invalid_api_key' || createError.type === 'invalid_request_error') {
+      // Handle 401 errors with explicit logging
+      if (createError.status === 401 || createError.code === 'invalid_api_key') {
+        console.error("🔑 API KEY INVALID OR MISSING!");
+        console.error("Please check your OPENAI_API_KEY in the .env file");
         return Response.json(
           { 
             error: "Invalid API key. Please check your OPENAI_API_KEY in the .env file.",
             details: createError.message 
           },
           { status: 401 }
+        );
+      }
+      
+      if (createError.type === 'invalid_request_error') {
+        console.error("Invalid request:", createError.message);
+        return Response.json(
+          { 
+            error: "Invalid request to OpenAI API",
+            details: createError.message 
+          },
+          { status: 400 }
         );
       }
       
@@ -62,12 +110,36 @@ export async function POST(request, { params }) {
         );
       }
       
+      // Handle the "can't add message while run is active" error
+      if (createError.status === 400 && createError.message?.includes('run')) {
+        console.error("Race condition detected - active run still present");
+        return Response.json(
+          { 
+            error: "AI is still processing. Please wait a moment and try again.",
+            details: createError.message 
+          },
+          { status: 400 }
+        );
+      }
+      
       throw createError; // Re-throw to be caught by outer catch
     }
 
+    // STEP 3: Start the streaming run
     try {
+      console.log("Starting streaming run for thread:", threadId);
+      
       const stream = openai.beta.threads.runs.stream(threadId, {
         assistant_id: assistantId,
+        // OPTIMIZATION: Truncate history to save tokens (only keep last 10 messages)
+        truncation_strategy: {
+          type: "last_messages",
+          last_messages: 10,
+        },
+        // OPTIMIZATION: Limit response length to prevent expensive run-on answers
+        max_completion_tokens: 1000,
+        // OPTIMIZATION: Use faster, cheaper model if high reasoning not required
+        // model: "gpt-4o-mini", // Uncomment to use cheaper model
       });
 
       return new Response(stream.toReadableStream(), {
@@ -78,10 +150,12 @@ export async function POST(request, { params }) {
         },
       });
     } catch (streamError) {
-      console.error("Error creating stream:", streamError);
+      console.error("❌ Error creating stream:", streamError);
       
-      // Handle specific OpenAI errors
-      if (streamError.code === 'invalid_api_key' || streamError.type === 'invalid_request_error') {
+      // Handle 401 errors with explicit logging
+      if (streamError.status === 401 || streamError.code === 'invalid_api_key') {
+        console.error("🔑 API KEY INVALID OR MISSING!");
+        console.error("Please check your OPENAI_API_KEY in the .env file");
         return Response.json(
           { 
             error: "Invalid API key. Please check your OPENAI_API_KEY in the .env file.",
@@ -91,13 +165,29 @@ export async function POST(request, { params }) {
         );
       }
       
+      if (streamError.type === 'invalid_request_error') {
+        console.error("Invalid request:", streamError.message);
+        return Response.json(
+          { 
+            error: "Invalid request to OpenAI API",
+            details: streamError.message 
+          },
+          { status: 400 }
+        );
+      }
+      
       throw streamError; // Re-throw to be caught by outer catch
     }
   } catch (error) {
-    console.error("Error in messages route:", error);
+    console.error("❌ Error in messages route:", error);
+    console.error("Error type:", error.constructor.name);
+    console.error("Error status:", error.status);
     
-    // Handle specific OpenAI API errors
-    if (error.code === 'invalid_api_key' || error.type === 'invalid_request_error') {
+    // Handle 401 errors with explicit logging
+    if (error.status === 401 || error.statusCode === 401 || error.code === 'invalid_api_key') {
+      console.error("🔑 API KEY INVALID OR MISSING!");
+      console.error("Please check your OPENAI_API_KEY in the .env file");
+      console.error("Error details:", error.message);
       return Response.json(
         { 
           error: "Invalid API key. Please check your OPENAI_API_KEY in the .env file.",
@@ -107,13 +197,14 @@ export async function POST(request, { params }) {
       );
     }
     
-    if (error.status === 401 || error.statusCode === 401) {
+    if (error.type === 'invalid_request_error') {
+      console.error("Invalid request error:", error.message);
       return Response.json(
         { 
-          error: "Authentication failed. Please check your OpenAI API key.",
+          error: "Invalid request to OpenAI API",
           details: error.message 
         },
-        { status: 401 }
+        { status: 400 }
       );
     }
     

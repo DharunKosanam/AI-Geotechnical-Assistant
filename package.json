@@ -11,11 +11,13 @@
   "dependencies": {
     "csv-parser": "^3.0.0",
     "dotenv": "^17.2.3",
+    "mongodb": "^6.3.0",
     "next": "^14.2.18",
     "openai": "^4.46.0",
     "react": "^18",
     "react-dom": "^18",
     "react-markdown": "^9.0.1",
+    "swr": "^2.2.5",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

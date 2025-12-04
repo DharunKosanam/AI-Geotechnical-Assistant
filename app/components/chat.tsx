@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
+import useSWR from "swr";
 import styles from "./chat.module.css";
 import { AssistantStream } from "openai/lib/AssistantStream";
 import Markdown from "react-markdown";
@@ -52,6 +53,20 @@ const Message = ({ role, text }: MessageProps) => {
   }
 };
 
+const WelcomeMessage = () => {
+  return (
+    <div className={styles.welcomeContainer}>
+      <div className={styles.welcomeMessage}>
+        <h1>Hello! 👋</h1>
+        <p>How can I assist you with your geotechnical reports today?</p>
+        <div className={styles.welcomeHints}>
+          <p>💡 Start a new conversation or select a previous chat from the sidebar.</p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 type ChatProps = {
   functionCallHandler?: (
     toolCall: RequiredActionFunctionToolCall
@@ -89,63 +104,41 @@ const Chat = ({
   }, [shouldScroll]);
 
 
-  // 定期轮询API获取最新消息
+  // SWR fetcher function for message history
+  const fetcher = async (url: string) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Failed to fetch messages');
+    return res.json();
+  };
+
+  // SWR polling for real-time message updates (for group conversations)
+  const { data: messageData } = useSWR(
+    isGroupConversation && threadId ? `/api/assistants/threads/${threadId}/messages-history` : null,
+    fetcher,
+    {
+      refreshInterval: 3000, // Poll every 3 seconds
+      revalidateOnFocus: true,
+      revalidateOnReconnect: true,
+    }
+  );
+
+  // Update messages when SWR fetches new data
   useEffect(() => {
-    if (!isGroupConversation) return;
+    if (messageData?.messages && isGroupConversation) {
+      console.log("SWR: New messages received", messageData.messages.length);
+      setMessages(messageData.messages);
+      setShouldScroll(true);
+    }
+  }, [messageData, isGroupConversation]);
 
-    const intervalId = setInterval(async () => {
-      if (threadId) {
-        await loadThread(threadId);
-      }
-    }, 1000);
-
-    return () => clearInterval(intervalId); // 清除定时器
-  }, [threadId, isGroupConversation]);
-
+  // REMOVED: Auto-select behavior
+  // On initial load, threadId remains null to show welcome state
+  // User must click a thread or start typing to create new thread
   useEffect(() => {
-    const createThread = async () => {
-      // 1. 先检查是否有历史线程
-      const response = await fetch('/api/assistants/threads/history');
-      const data = await response.json();
-      
-      // 修改这里，现在需要访问 data.threads
-      if (data.threads && data.threads.length > 0) {
-        // 如果有历史线程，使用最新的一个
-        const latestThreadId = data.threads[data.threads.length - 1].threadId;
-        setThreadId(latestThreadId);
-        loadThread(latestThreadId); // 加载最新的历史消息
-        return;
-      }
-      
-      // 2. 如果没有历史线程，才创建新的
-      const res = await fetch(`/api/assistants/threads`, {
-        method: "POST",
-      });
-      const threadData = await res.json();
-      setThreadId(threadData.threadId);
-      setIsNewThread(true); // Mark as new thread so first message will generate title
-  
-      const defaultName = new Date().toLocaleString();
-      await fetch(`/api/assistants/threads/history`, {
-        method: "POST",
-        body: JSON.stringify({ 
-          threadId: threadData.threadId, 
-          name: defaultName 
-        }),
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      });
-  
-      
-      setMessages([]);
-      
-      
-      if (threadListRef.current) {
-        await threadListRef.current.fetchThreads();
-      }
-    };
-    createThread();
+    // Only load thread list, don't auto-select
+    if (threadListRef.current) {
+      threadListRef.current.fetchThreads();
+    }
   }, []); 
 
   const generateAndUpdateTitle = async (firstMessage: string) => {
@@ -189,12 +182,13 @@ const Chat = ({
     }
   };
 
-  const sendMessage = async (text) => {
+  const sendMessage = async (text, targetThreadId = null) => {
+    const actualThreadId = targetThreadId || threadId;
     const isFirstMessage = isNewThread && messages.length === 0;
     
     try {
       const response = await fetch(
-        `/api/assistants/threads/${threadId}/messages`,
+        `/api/assistants/threads/${actualThreadId}/messages`,
         {
           method: "POST",
           headers: {
@@ -291,17 +285,116 @@ const Chat = ({
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!userInput.trim()) return;
-    sendMessage(userInput);
-    setMessages((prevMessages) => [
-      ...prevMessages,
-      { role: "user", text: userInput },
-    ]);
-    setUserInput("");
-    setInputDisabled(true);
-    setShouldScroll(true);
+    
+    // If no thread exists, create one first
+    if (!threadId) {
+      try {
+        // 1. Create new thread
+        const res = await fetch(`/api/assistants/threads`, {
+          method: "POST",
+        });
+        const data = await res.json();
+        const newThreadId = data.threadId;
+        
+        // 2. Set thread ID
+        setThreadId(newThreadId);
+        setIsNewThread(true);
+        
+        // 3. Save to history with default name
+        const defaultName = getDefaultThreadName();
+        await fetch(`/api/assistants/threads/history`, {
+          method: "POST",
+          body: JSON.stringify({ 
+            threadId: newThreadId,
+            name: defaultName,
+            isGroup: false
+          }),
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+        
+        // 4. Refresh thread list
+        if (threadListRef.current) {
+          await threadListRef.current.fetchThreads();
+        }
+        
+        // 5. Now send the message with the new threadId
+        // Need to use newThreadId directly since state may not have updated yet
+        const firstMessageText = userInput; // Save for title generation
+        
+        setMessages([{ role: "user", text: userInput }]);
+        setUserInput("");
+        setInputDisabled(true);
+        setShouldScroll(true);
+        
+        // Send message immediately with new thread ID
+        await sendMessage(userInput, newThreadId);
+        
+        // 6. Generate title for the new thread
+        try {
+          console.log("Generating title for new thread:", newThreadId);
+          const titleResponse = await fetch(`/api/assistants/threads/${newThreadId}/title`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              message: firstMessageText,
+            }),
+          });
+
+          if (titleResponse.ok) {
+            const titleData = await titleResponse.json();
+            const generatedTitle = titleData.title;
+            console.log("Generated title:", generatedTitle);
+
+            // Update thread name in history
+            await fetch(`/api/assistants/threads/history`, {
+              method: "PUT",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                threadId: newThreadId,
+                newName: generatedTitle,
+              }),
+            });
+
+            // Refresh thread list to show updated title
+            if (threadListRef.current) {
+              await threadListRef.current.fetchThreads();
+            }
+            
+            console.log("✅ Thread title updated successfully");
+          } else {
+            console.error("Failed to generate title, status:", titleResponse.status);
+          }
+        } catch (titleError) {
+          console.error("Error generating title:", titleError);
+          // Don't fail the whole operation if title generation fails
+        }
+        
+        setIsNewThread(false); // Mark thread as no longer new
+        
+      } catch (error) {
+        console.error('Failed to create thread:', error);
+        return;
+      }
+    } else {
+      // Thread exists, just send message normally
+      sendMessage(userInput);
+      setMessages((prevMessages) => [
+        ...prevMessages,
+        { role: "user", text: userInput },
+      ]);
+      setUserInput("");
+      setInputDisabled(true);
+      setShouldScroll(true);
+    }
   };
 
   /* Stream Event Handlers */
@@ -529,41 +622,14 @@ const Chat = ({
       await createNewThread();
     }
   }
-  const createNewThread = async () => {
-    try {
-      // 1. 创建新线程
-      const res = await fetch(`/api/assistants/threads`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      
-      // 2. 设置本地状态
-      setThreadId(data.threadId);
-      setMessages([]); 
-      setIsGroupConversation(false); // 添加这行，确保新对话不是群组对话
-      setIsNewThread(true); // Mark as new thread so first message will generate title
-  
-      // 3. 保存到历史记录
-      const defaultName = getDefaultThreadName();
-      await fetch(`/api/assistants/threads/history`, {
-        method: "POST",
-        body: JSON.stringify({ 
-          threadId: data.threadId,
-          name: defaultName,
-          isGroup: false
-        }),
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      });
-  
-      // 4. 刷新线程列表
-      if (threadListRef.current) {
-        await threadListRef.current.fetchThreads();
-      }
-    } catch (error) {
-      console.error('Failed to create new thread:', error);
-    }
+  const createNewThread = () => {
+    // Simply reset to welcome state
+    // Thread will be created when user sends first message
+    setThreadId(null);
+    setMessages([]); 
+    setIsGroupConversation(false);
+    setIsNewThread(true);
+    setUserInput("");
   };
 
   const handleThreadSelect = (threadId: string, isGroup: boolean) => {
@@ -615,10 +681,16 @@ const Chat = ({
       </div>
     <div className={styles.chatContainer}>
       <div className={styles.messages}>
-        {messages.map((msg, index) => (
-          <Message key={index} role={msg.role} text={msg.text} />
-        ))}
-        <div ref={messagesEndRef} />
+        {!threadId ? (
+          <WelcomeMessage />
+        ) : (
+          <>
+            {messages.map((msg, index) => (
+              <Message key={index} role={msg.role} text={msg.text} />
+            ))}
+            <div ref={messagesEndRef} />
+          </>
+        )}
       </div>
       <form
         onSubmit={handleSubmit}

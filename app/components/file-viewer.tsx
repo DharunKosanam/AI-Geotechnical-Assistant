@@ -27,6 +27,7 @@ const FileViewer = () => {
 
   const fetchFiles = async () => {
     try {
+      console.log("Fetching files...");
       const resp = await fetch("/api/assistants/files", {
         method: "GET",
       });
@@ -48,6 +49,7 @@ const FileViewer = () => {
       
       try {
         const data = JSON.parse(responseText);
+        console.log("Fetched files:", data);
         setFiles(data);
       } catch (jsonError) {
         console.error("Failed to parse JSON response:", jsonError);
@@ -83,24 +85,55 @@ const FileViewer = () => {
 
   const handleFileUpload = async (event) => {
     try {
-      if (event.target.files.length === 0) return;
+      const selectedFiles = event.target.files;
+      if (selectedFiles.length === 0) return;
       
+      console.log(`Starting upload of ${selectedFiles.length} file(s)...`);
+      
+      // Create FormData and append ALL selected files
       const data = new FormData();
-      data.append("file", event.target.files[0]);
+      for (let i = 0; i < selectedFiles.length; i++) {
+        data.append("files", selectedFiles[i]); // Note: "files" (plural)
+        console.log(`  - Added: ${selectedFiles[i].name}`);
+      }
       
       const resp = await fetch("/api/assistants/files", {
         method: "POST",
         body: data,
       });
       
+      console.log("Upload response status:", resp.status);
+      
       if (!resp.ok) {
-        console.error(`Failed to upload file. Status: ${resp.status}`);
+        const errorData = await resp.json();
+        console.error(`Failed to upload files. Status: ${resp.status}`, errorData);
+        alert(`Upload failed: ${errorData.error || 'Unknown error'}`);
+        // Reset file input even on error
+        event.target.value = "";
         return;
       }
       
+      const result = await resp.json();
+      console.log("Upload successful!", result);
+      
+      if (result.filesUploaded) {
+        console.log(`✅ ${result.filesUploaded} file(s) uploaded and indexed successfully`);
+      }
+      
+      // Reset file input to allow re-uploading
+      event.target.value = "";
+      
+      // Files are now guaranteed to be processed and ready
+      // Refresh the list immediately - no delay needed!
+      console.log("Refreshing file list...");
       await fetchFiles();
+      console.log("File list refreshed!");
+      
     } catch (error) {
-      console.error("Error uploading file:", error);
+      console.error("Error uploading files:", error);
+      alert("Upload failed. Please try again.");
+      // Reset file input on error
+      event.target.value = "";
     }
   };
 

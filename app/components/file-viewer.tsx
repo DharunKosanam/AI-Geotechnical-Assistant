@@ -20,6 +20,7 @@ const TrashIcon = () => (
 
 const FileViewer = () => {
   const [files, setFiles] = useState([]);
+  const [optimisticFiles, setOptimisticFiles] = useState([]); // Track optimistically added files
 
   useEffect(() => {
       fetchFiles();
@@ -34,7 +35,7 @@ const FileViewer = () => {
       
       if (!resp.ok) {
         console.error(`Failed to fetch files. Status: ${resp.status}`);
-        setFiles([]);
+        // Don't clear optimistic files on error
         return;
       }
       
@@ -42,8 +43,8 @@ const FileViewer = () => {
       const responseText = await resp.text();
       
       if (!responseText || responseText.trim() === '') {
-        console.warn("Empty response from files API");
-        setFiles([]);
+        console.warn("Empty response from files API - keeping optimistic files");
+        // Don't clear optimistic files if API returns empty (race condition)
         return;
       }
       
@@ -51,19 +52,38 @@ const FileViewer = () => {
         const data = JSON.parse(responseText);
         console.log("Fetched files:", data);
         setFiles(data);
+        
+        // Remove optimistic files that now exist in the API response
+        setOptimisticFiles(prevOptimistic => {
+          return prevOptimistic.filter(optimisticFile => {
+            // Keep optimistic file if it's not yet in the API response
+            const existsInApi = data.some(apiFile => 
+              apiFile.filename === optimisticFile.filename
+            );
+            if (existsInApi) {
+              console.log(`Optimistic file confirmed: ${optimisticFile.filename}`);
+            }
+            return !existsInApi;
+          });
+        });
       } catch (jsonError) {
         console.error("Failed to parse JSON response:", jsonError);
         console.error(`Response text: ${responseText}`);
-        setFiles([]);
       }
     } catch (error) {
       console.error("Error fetching files:", error);
-      setFiles([]);
     }
   };
 
   const handleFileDelete = async (fileId) => {
     try {
+      // Check if this is an optimistic file (temp ID)
+      if (fileId.startsWith('temp-')) {
+        console.log("Removing optimistic file:", fileId);
+        setOptimisticFiles(prev => prev.filter(f => f.file_id !== fileId));
+        return;
+      }
+      
       const resp = await fetch("/api/assistants/files", {
         method: "DELETE",
         headers: {
@@ -77,7 +97,11 @@ const FileViewer = () => {
         return;
       }
       
-      await fetchFiles();
+      // Optimistically remove from UI
+      setFiles(prev => prev.filter(f => f.file_id !== fileId));
+      
+      // Refresh in background
+      fetchFiles();
     } catch (error) {
       console.error("Error deleting file:", error);
     }
@@ -92,9 +116,12 @@ const FileViewer = () => {
       
       // Create FormData and append ALL selected files
       const data = new FormData();
+      const filesList = []; // Track files for optimistic update
+      
       for (let i = 0; i < selectedFiles.length; i++) {
         data.append("files", selectedFiles[i]); // Note: "files" (plural)
         console.log(`  - Added: ${selectedFiles[i].name}`);
+        filesList.push(selectedFiles[i]);
       }
       
       const resp = await fetch("/api/assistants/files", {
@@ -116,18 +143,22 @@ const FileViewer = () => {
       const result = await resp.json();
       console.log("Upload successful!", result);
       
-      if (result.filesUploaded) {
-        console.log(`✅ ${result.filesUploaded} file(s) uploaded and indexed successfully`);
-      }
+      // ✅ OPTIMISTIC UPDATE: Add files to UI immediately
+      const newOptimisticFiles = filesList.map((file, idx) => ({
+        file_id: `temp-${Date.now()}-${idx}`, // Temporary ID
+        filename: file.name,
+        status: "✓ Uploaded" // Success checkmark
+      }));
+      
+      console.log("Adding optimistic files:", newOptimisticFiles);
+      setOptimisticFiles(prev => [...prev, ...newOptimisticFiles]);
       
       // Reset file input to allow re-uploading
       event.target.value = "";
       
-      // Files are now guaranteed to be processed and ready
-      // Refresh the list immediately - no delay needed!
-      console.log("Refreshing file list...");
-      await fetchFiles();
-      console.log("File list refreshed!");
+      // Refresh the list in background (will merge with optimistic files)
+      console.log("Refreshing file list in background...");
+      fetchFiles();
       
     } catch (error) {
       console.error("Error uploading files:", error);
@@ -137,17 +168,20 @@ const FileViewer = () => {
     }
   };
 
+  // Merge optimistic files with real files
+  const allFiles = [...optimisticFiles, ...files];
+  
   return (
     <div className={styles.fileViewer}>
       <div
         className={`${styles.filesList} ${
-          files.length !== 0 ? styles.grow : ""
+          allFiles.length !== 0 ? styles.grow : ""
         }`}
       >
-        {files.length === 0 ? (
+        {allFiles.length === 0 ? (
           <div className={styles.title}>Attach files to test file search</div>
         ) : (
-          files.map((file) => (
+          allFiles.map((file) => (
             <div key={file.file_id} className={styles.fileEntry}>
               <div className={styles.fileName}>
                 <span className={styles.fileName}>{file.filename}</span>

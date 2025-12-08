@@ -53,71 +53,27 @@ export async function POST(request) {
     console.log(`Step 3: All ${fileIds.length} file(s) uploaded successfully!`);
     console.log(`File IDs: ${fileIds.join(", ")}`);
 
-    // Step 4: Add ALL files to Vector Store using BATCH API with polling
-    console.log(`Step 4: Adding ${fileIds.length} file(s) to Vector Store using BATCH API...`);
-    console.log("        (This may take a few seconds depending on file sizes)");
+    // Step 4: Add files to Vector Store (Fire and Forget - NO POLLING)
+    console.log(`Step 4: Adding ${fileIds.length} file(s) to Vector Store (fire and forget)...`);
     
-    const fileBatch = await openai.beta.vectorStores.fileBatches.createAndPoll(
+    // Create batch without waiting for indexing to complete
+    await openai.beta.vectorStores.fileBatches.create(
       vectorStoreId,
       { file_ids: fileIds }
     );
     
-    console.log("Step 4: Batch processing complete!");
-    console.log(`  Status: ${fileBatch.status}`);
-    console.log(`  Total files: ${fileBatch.file_counts.total}`);
-    console.log(`  Completed: ${fileBatch.file_counts.completed}`);
-    console.log(`  Failed: ${fileBatch.file_counts.failed}`);
-    console.log(`  In progress: ${fileBatch.file_counts.in_progress}`);
+    console.log("✅ SUCCESS: Files uploaded and queued for indexing!");
+    console.log("   Note: Indexing happens in background (may take 15-30 seconds)");
+    console.log("========== END POST /api/assistants/files ==========\n");
     
-    // Step 5: Check final status
-    if (fileBatch.status === 'completed') {
-      console.log("✅ SUCCESS: All files are ready and indexed in Vector Store");
-      console.log("========== END POST /api/assistants/files ==========\n");
-      
-      return Response.json({ 
-        success: true, 
-        filesUploaded: fileBatch.file_counts.completed,
-        filesFailed: fileBatch.file_counts.failed,
-        fileIds: fileIds,
-        status: fileBatch.status
-      });
-      
-    } else if (fileBatch.status === 'failed') {
-      console.error("❌ FAILED: Batch processing failed");
-      
-      return Response.json(
-        { 
-          error: "Batch file processing failed", 
-          filesCompleted: fileBatch.file_counts.completed,
-          filesFailed: fileBatch.file_counts.failed
-        },
-        { status: 500 }
-      );
-      
-    } else if (fileBatch.status === 'cancelled') {
-      console.error("❌ CANCELLED: Batch processing was cancelled");
-      
-      return Response.json(
-        { error: "Batch file processing was cancelled" },
-        { status: 500 }
-      );
-      
-    } else {
-      // Unexpected status or partial completion
-      console.warn("⚠️ BATCH STATUS:", fileBatch.status);
-      console.warn(`Completed: ${fileBatch.file_counts.completed}, Failed: ${fileBatch.file_counts.failed}`);
-      
-      return Response.json(
-        { 
-          success: fileBatch.file_counts.completed > 0,
-          filesUploaded: fileBatch.file_counts.completed,
-          filesFailed: fileBatch.file_counts.failed,
-          status: fileBatch.status,
-          warning: "Some files may have failed to process"
-        },
-        { status: fileBatch.file_counts.completed > 0 ? 200 : 500 }
-      );
-    }
+    // Return immediately - indexing happens in background
+    return Response.json({ 
+      success: true, 
+      filesUploaded: fileIds.length,
+      fileIds: fileIds,
+      status: "queued",
+      message: "Files uploaded successfully. Indexing in progress..."
+    });
     
   } catch (error) {
     console.error("\n========== ERROR in POST /api/assistants/files ==========");

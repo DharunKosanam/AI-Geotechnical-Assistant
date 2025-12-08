@@ -65,8 +65,8 @@ interface Thread {
 }
 
 interface ThreadListProps {
-  currentThreadId: string;
-  onThreadSelect: (threadId: string, isGroup: boolean) => void; // 更新类型定义
+  currentThreadId: string | null;
+  onThreadSelect: (threadId: string | null, isGroup: boolean) => void;
 }
 
 const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListProps, ref) => {
@@ -116,14 +116,16 @@ const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListPr
     
     const threadToDelete = threads.find(thread => thread.threadId === threadId);
     if (!threadToDelete) return;
+    
+    const isActiveThread = threadId === currentThreadId;
   
     try {
-      // 1. 对所有线程都发送删除请求到后端
+      // 1. Send delete request to backend
       const response = await fetch('/api/assistants/threads/history', {
         method: 'DELETE',
         body: JSON.stringify({ 
           threadId,
-          isGroup: threadToDelete.isGroup // 传递isGroup标志
+          isGroup: threadToDelete.isGroup
         }),
         headers: {
           'Content-Type': 'application/json',
@@ -134,18 +136,19 @@ const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListPr
         throw new Error('Failed to delete thread');
       }
   
-      // 2. 删除成功后更新本地状态
+      // 2. Update local state after successful deletion
       setThreads((prevThreads) => {
-        const updatedThreads = prevThreads.filter((thread) => thread.threadId !== threadId);
-        if (threadId === currentThreadId && updatedThreads.length > 0) {
-          const newCurrentThreadId = updatedThreads[0].threadId;
-          onThreadSelect(newCurrentThreadId, updatedThreads[0].isGroup);
-        }
-        return updatedThreads;
+        return prevThreads.filter((thread) => thread.threadId !== threadId);
       });
+      
+      // 3. If we deleted the active thread, show the welcome screen
+      // If we deleted an inactive thread, keep the current view unchanged
+      if (isActiveThread) {
+        onThreadSelect(null, false);
+      }
   
     } catch (error) {
-      console.error('删除线程失败:', error);
+      console.error('Failed to delete thread:', error);
     }
     await fetchThreads();
   };

@@ -1,13 +1,15 @@
 import { openai } from "@/app/openai";
 
 // upload files (batch) to assistant's vector store
+// NOTE: This uploads ONLY to OPENAI_VECTOR_STORE_ID (user uploads shown in UI)
+// It does NOT upload to OPENAI_KNOWLEDGE_STORE_ID (hidden knowledge base)
 export async function POST(request) {
   console.log("\n========== POST /api/assistants/files (BATCH) ==========");
   
   try {
-    // Step 1: Validate Vector Store ID
+    // Step 1: Validate Vector Store ID (USER UPLOADS ONLY)
     const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID;
-    console.log("Step 1: Vector Store ID from env:", vectorStoreId);
+    console.log("Step 1: Vector Store ID from env (user uploads):", vectorStoreId);
     
     if (!vectorStoreId) {
       console.error("ERROR: Vector Store ID not found in environment variables");
@@ -132,13 +134,15 @@ export async function POST(request) {
 }
 
 // list files in assistant's vector store
+// NOTE: This ONLY queries OPENAI_VECTOR_STORE_ID (user uploads shown in UI)
+// It does NOT query OPENAI_KNOWLEDGE_STORE_ID (hidden knowledge base)
 export async function GET() {
   console.log("\n========== GET /api/assistants/files ==========");
   
   try {
-    // Step 1: Validate Vector Store ID
+    // Step 1: Validate Vector Store ID (USER UPLOADS ONLY)
     const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID;
-    console.log("Step 1: Vector Store ID from env:", vectorStoreId);
+    console.log("Step 1: Vector Store ID from env (user uploads):", vectorStoreId);
     
     if (!vectorStoreId) {
       console.error("ERROR: Vector Store ID not found in environment variables");
@@ -218,9 +222,11 @@ export async function GET() {
 }
 
 // delete file from assistant's vector store
+// NOTE: This deletes ONLY from OPENAI_VECTOR_STORE_ID (user uploads shown in UI)
+// It does NOT delete from OPENAI_KNOWLEDGE_STORE_ID (hidden knowledge base)
 export async function DELETE(request) {
   try {
-    // Check if OPENAI_VECTOR_STORE_ID is defined
+    // Check if OPENAI_VECTOR_STORE_ID is defined (USER UPLOADS ONLY)
     if (!process.env.OPENAI_VECTOR_STORE_ID) {
       console.error("Vector Store ID not found in environment variables");
       return Response.json(

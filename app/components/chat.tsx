@@ -632,10 +632,19 @@ const Chat = ({
     setUserInput("");
   };
 
-  const handleThreadSelect = (threadId: string, isGroup: boolean) => {
-    setThreadId(threadId);
-    setIsGroupConversation(isGroup);
-    loadThread(threadId);
+  const handleThreadSelect = (threadId: string | null, isGroup: boolean) => {
+    if (threadId === null) {
+      // Show welcome screen - clear the current thread
+      setThreadId("");
+      setMessages([]);
+      setIsGroupConversation(false);
+      setIsNewThread(false);
+    } else {
+      // Load the selected thread
+      setThreadId(threadId);
+      setIsGroupConversation(isGroup);
+      loadThread(threadId);
+    }
   };
 
   const handleJoinTeam = async () => {

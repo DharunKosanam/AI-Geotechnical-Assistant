@@ -1,11 +1,7 @@
 import { openai } from "@/app/openai";
+import { OpenAI } from "openai";
 
 export const runtime = "nodejs";
-
-// Type guard to filter text content blocks
-function isTextContent(content: any): content is { type: "text"; text: { value: string } } {
-  return content.type === "text";
-}
 
 // Get message history for a thread (for SWR polling)
 export async function GET(request, { params }) {
@@ -27,19 +23,19 @@ export async function GET(request, { params }) {
       limit: 50, // Limit to last 50 messages for performance
     });
 
-    // Transform messages to simpler format
-    const messages = threadMessages.data.map((message) => ({
-      role: message.role,
-      text: message.content
-        .map((content) => {
-          if (content.type === "text") {
-            return content.text.value;
-          }
-          return "";
-        })
-        .filter((text) => text !== "")
-        .join("\n"),
-    }));
+    // Transform messages to simpler format with Type Guard
+    const messages = threadMessages.data.map((message) => {
+      // Safe filtering with Type Guard
+      const textContent = message.content
+        .filter((c): c is OpenAI.Beta.Threads.Messages.TextContentBlock => c.type === 'text')
+        .map((c) => c.text.value)
+        .join('\n');
+
+      return {
+        role: message.role,
+        text: textContent,
+      };
+    });
 
     return Response.json({ messages });
 

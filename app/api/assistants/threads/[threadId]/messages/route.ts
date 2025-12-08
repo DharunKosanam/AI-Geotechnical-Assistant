@@ -125,11 +125,16 @@ export async function POST(request, { params }) {
       throw createError; // Re-throw to be caught by outer catch
     }
 
-    // STEP 3: Start the streaming run
+    // STEP 3: Prepare vector store for file_search tool
+    // NOTE: Knowledge Base (OPENAI_KNOWLEDGE_STORE_ID) is already attached to the Assistant
+    // via OpenAI Dashboard, so we ONLY need to attach the user's file store here.
+    // OpenAI API allows maximum 1 vector store in the array.
+
+    // STEP 4: Start the streaming run
     try {
       console.log("Starting streaming run for thread:", threadId);
       
-      const stream = openai.beta.threads.runs.stream(threadId, {
+      const runConfig: any = {
         assistant_id: assistantId,
         // OPTIMIZATION: Truncate history to save tokens (only keep last 10 messages)
         truncation_strategy: {
@@ -140,7 +145,20 @@ export async function POST(request, { params }) {
         max_completion_tokens: 1000,
         // OPTIMIZATION: Use faster, cheaper model if high reasoning not required
         // model: "gpt-4o-mini", // Uncomment to use cheaper model
-      });
+      };
+
+      // Only add tool_resources if user vector store exists
+      // This overrides/attaches the user's file store for this specific run
+      if (process.env.OPENAI_VECTOR_STORE_ID) {
+        console.log("Attaching user vector store:", process.env.OPENAI_VECTOR_STORE_ID);
+        runConfig.tool_resources = {
+          file_search: {
+            vector_store_ids: [process.env.OPENAI_VECTOR_STORE_ID]
+          }
+        };
+      }
+      
+      const stream = openai.beta.threads.runs.stream(threadId, runConfig);
 
       return new Response(stream.toReadableStream(), {
         headers: {

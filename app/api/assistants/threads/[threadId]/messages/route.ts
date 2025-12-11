@@ -125,17 +125,41 @@ export async function POST(request, { params }) {
       throw createError; // Re-throw to be caught by outer catch
     }
 
-    // STEP 3: Prepare vector store for file_search tool
-    // NOTE: Knowledge Base (OPENAI_KNOWLEDGE_STORE_ID) is already attached to the Assistant
-    // via OpenAI Dashboard, so we ONLY need to attach the user's file store here.
-    // OpenAI API allows maximum 1 vector store in the array.
+    // STEP 3: UPDATE THREAD to attach User's Vector Store (Thread Attachment Pattern)
+    // This ensures the AI searches BOTH:
+    // - Thread resources (User Uploads - OPENAI_VECTOR_STORE_ID)
+    // - Assistant resources (Knowledge Base - OPENAI_KNOWLEDGE_STORE_ID, already attached to Assistant)
+    // OpenAI's ranking algorithm automatically determines which files have the best answers.
+    
+    if (process.env.OPENAI_VECTOR_STORE_ID) {
+      try {
+        console.log("📎 Attaching User Vector Store to thread:", process.env.OPENAI_VECTOR_STORE_ID);
+        await openai.beta.threads.update(threadId, {
+          tool_resources: {
+            file_search: {
+              vector_store_ids: [process.env.OPENAI_VECTOR_STORE_ID]
+            }
+          }
+        });
+        console.log("✅ Thread updated with user vector store");
+      } catch (updateError) {
+        console.warn("⚠️  Could not attach user vector store to thread:", updateError.message);
+        // Continue anyway - the assistant's knowledge base will still be available
+      }
+    } else {
+      console.log("ℹ️  No user vector store configured (OPENAI_VECTOR_STORE_ID not set)");
+    }
 
-    // STEP 4: Start the streaming run
+    // STEP 4: Start the streaming run (CLEAN - no tool_resources override)
     try {
       console.log("Starting streaming run for thread:", threadId);
       
       const runConfig: any = {
         assistant_id: assistantId,
+        // Enable file_search tool for this run
+        tools: [{ type: "file_search" }],
+        // Use faster, cheaper model for most queries
+        model: "gpt-4o-mini",
         // OPTIMIZATION: Truncate history to save tokens (only keep last 10 messages)
         truncation_strategy: {
           type: "last_messages",
@@ -143,20 +167,12 @@ export async function POST(request, { params }) {
         },
         // OPTIMIZATION: Limit response length to prevent expensive run-on answers
         max_completion_tokens: 1000,
-        // OPTIMIZATION: Use faster, cheaper model if high reasoning not required
-        // model: "gpt-4o-mini", // Uncomment to use cheaper model
       };
 
-      // Only add tool_resources if user vector store exists
-      // This overrides/attaches the user's file store for this specific run
-      if (process.env.OPENAI_VECTOR_STORE_ID) {
-        console.log("Attaching user vector store:", process.env.OPENAI_VECTOR_STORE_ID);
-        runConfig.tool_resources = {
-          file_search: {
-            vector_store_ids: [process.env.OPENAI_VECTOR_STORE_ID]
-          }
-        };
-      }
+      // NOTE: We do NOT set tool_resources here!
+      // This allows the run to search BOTH:
+      // 1. Thread's vector store (User Uploads) - attached above
+      // 2. Assistant's vector store (Knowledge Base) - already attached to Assistant
       
       const stream = openai.beta.threads.runs.stream(threadId, runConfig);
 

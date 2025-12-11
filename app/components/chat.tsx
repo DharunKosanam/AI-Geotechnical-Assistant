@@ -9,6 +9,7 @@ import Markdown from "react-markdown";
 import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistants";
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
 import ThreadList from "./thread-list";
+import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
 
 type MessageProps = {
   role: "user" | "assistant" | "code";
@@ -187,18 +188,17 @@ const Chat = ({
     const isFirstMessage = isNewThread && messages.length === 0;
     
     try {
-      const response = await fetch(
-        `/api/assistants/threads/${actualThreadId}/messages`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            content: text,
-          }),
-        }
-      );
+      // Get API endpoint based on configuration (Python or Next.js)
+      const endpoint = API_ENDPOINTS.sendMessage(actualThreadId);
+      const requestBody = getMessageRequestBody(text, actualThreadId);
+      
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
+      });
 
       if (!response.ok) {
         let errorMessage = `Failed to send message (Status: ${response.status})`;

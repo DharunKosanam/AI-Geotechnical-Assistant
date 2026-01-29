@@ -5,3 +5,7 @@ motor
 python-dotenv
 pydantic
 pydantic-settings
+python-multipart
+Pillow
+img2pdf
+httpx

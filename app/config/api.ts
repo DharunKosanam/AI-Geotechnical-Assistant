@@ -24,20 +24,73 @@ export const API_ENDPOINTS = {
     return `/api/assistants/threads/${threadId}/messages`;
   },
   
-  // Thread management (still using Next.js for now)
-  createThread: () => `/api/assistants/threads`,
-  getThreadHistory: () => `/api/assistants/threads/history`,
-  updateThread: () => `/api/assistants/threads/history`,
-  deleteThread: () => `/api/assistants/threads/history`,
+  // Thread management
+  createThread: () => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads`;
+    }
+    return `/api/assistants/threads`;
+  },
   
-  // Thread title generation (still using Next.js)
-  generateTitle: (threadId: string) => `/api/assistants/threads/${threadId}/title`,
+  getThreadHistory: () => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/history`;
+    }
+    return `/api/assistants/threads/history`;
+  },
   
-  // Tool actions (still using Next.js)
-  submitActions: (threadId: string) => `/api/assistants/threads/${threadId}/actions`,
+  updateThread: () => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/history`;
+    }
+    return `/api/assistants/threads/history`;
+  },
   
-  // Messages history (still using Next.js)
-  getMessages: (threadId: string) => `/api/assistants/threads/${threadId}/messages-history`,
+  deleteThread: () => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/history`;
+    }
+    return `/api/assistants/threads/history`;
+  },
+  
+  createThreadHistory: () => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/history`;
+    }
+    return `/api/assistants/threads/history`;
+  },
+  
+  // Thread title generation
+  generateTitle: (threadId: string) => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/${threadId}/title`;
+    }
+    return `/api/assistants/threads/${threadId}/title`;
+  },
+  
+  // Tool actions
+  submitActions: (threadId: string) => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/${threadId}/actions`;
+    }
+    return `/api/assistants/threads/${threadId}/actions`;
+  },
+  
+  // Messages history - this is the critical endpoint for loading thread messages
+  getMessages: (threadId: string) => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/${threadId}/messages-history`;
+    }
+    return `/api/assistants/threads/${threadId}/messages-history`;
+  },
+  
+  // Alias for getMessages (some components use this)
+  getThreadMessages: (threadId: string) => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/assistants/threads/${threadId}/history`;
+    }
+    return `/api/assistants/threads/${threadId}/history`;
+  },
 };
 
 /**

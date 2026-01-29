@@ -51,13 +51,16 @@ const FileViewer = () => {
       try {
         const data = JSON.parse(responseText);
         console.log("Fetched files:", data);
-        setFiles(data);
+        
+        // Handle both response formats: {files: [...]} and [...]
+        const filesList = Array.isArray(data) ? data : (data.files || []);
+        setFiles(filesList);
         
         // Remove optimistic files that now exist in the API response
         setOptimisticFiles(prevOptimistic => {
           return prevOptimistic.filter(optimisticFile => {
             // Keep optimistic file if it's not yet in the API response
-            const existsInApi = data.some(apiFile => 
+            const existsInApi = filesList.some(apiFile => 
               apiFile.filename === optimisticFile.filename
             );
             if (existsInApi) {

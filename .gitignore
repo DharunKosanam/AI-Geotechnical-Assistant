@@ -36,3 +36,28 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 openai-v4.29.0-beta.1.tgz
+
+# Python
+python_backend/__pycache__/
+python_backend/**/__pycache__/
+python_backend/**/*.pyc
+python_backend/**/*.pyo
+python_backend/**/*.pyd
+python_backend/.Python
+python_backend/venv/
+python_backend/env/
+python_backend/.venv
+*.py[cod]
+*$py.class
+
+# Temporary files
+*.log
+*.tmp
+*_backup.*
+*_old.*
+main_new.py
+main_old_backup.py
+
+# Documentation (temporary)
+QUICK_*.md
+*_REFERENCE.md

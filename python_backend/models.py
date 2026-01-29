@@ -4,7 +4,7 @@ These mirror the TypeScript interfaces from the Next.js app.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Any, Dict
 from datetime import datetime
 
 
@@ -37,4 +37,51 @@ class ErrorResponse(BaseModel):
     """Standard error response"""
     error: str
     details: Optional[str] = None
+
+
+class ThreadCreateResponse(BaseModel):
+    """Response model for thread creation"""
+    threadId: str
+
+
+class ThreadHistoryResponse(BaseModel):
+    """Response model for thread history list"""
+    threads: List[Dict[str, Any]]
+
+
+class UpdateThreadRequest(BaseModel):
+    """Request model for updating thread metadata"""
+    threadId: str
+    newName: Optional[str] = None
+    isGroup: Optional[bool] = None
+
+
+class DeleteThreadRequest(BaseModel):
+    """Request model for deleting a thread"""
+    threadId: str
+    isGroup: Optional[bool] = None
+
+
+class CreateThreadHistoryRequest(BaseModel):
+    """Request model for creating a thread in history"""
+    threadId: str
+    name: str
+    isGroup: bool = False
+
+
+class TitleGenerationRequest(BaseModel):
+    """Request model for generating thread title"""
+    message: Optional[str] = None  # Frontend sends 'message'
+    content: Optional[str] = None  # Fallback for backward compatibility
+    
+    @property
+    def text(self) -> str:
+        """Get the message text from either field"""
+        return self.message or self.content or ""
+
+
+class SubmitActionsRequest(BaseModel):
+    """Request model for submitting tool actions"""
+    toolCallOutputs: List[Dict[str, Any]]
+    runId: str
 

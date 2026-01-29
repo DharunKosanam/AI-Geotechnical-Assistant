@@ -14,39 +14,106 @@ import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config
 type MessageProps = {
   role: "user" | "assistant" | "code";
   text: string;
+  annotations?: any[];
 };
 
 const UserMessage = ({ text }: { text: string }) => {
-  return <div className={styles.userMessage}>{text}</div>;
+  return (
+    <div className={styles.messageRow} style={{ justifyContent: 'flex-end' }}>
+      <div className={styles.messageContent}>
+        <div className={styles.messageLabel}>You</div>
+        <div className={styles.userMessage}>{text}</div>
+      </div>
+    </div>
+  );
 };
 
-const AssistantMessage = ({ text }: { text: string }) => {
+const AssistantMessage = ({ text, annotations }: { text: string; annotations?: any[] }) => {
+  // Replace citation annotations like 【6:0†source】 with actual filenames
+  const replaceCitationsWithFilenames = (text: string, annotations?: any[]) => {
+    // Regex to match citation patterns: 【number:number†source】
+    const citationRegex = /【(\d+):(\d+)†([^】]+)】/g;
+    
+    // Create a map of citation text to filename
+    const citationMap = new Map<string, string>();
+    if (annotations && Array.isArray(annotations)) {
+      annotations.forEach((annotation: any) => {
+        if (annotation.type === 'file_citation' && annotation.file_citation) {
+          const filename = annotation.file_citation.filename || 'Unknown File';
+          citationMap.set(annotation.text, filename);
+        }
+      });
+    }
+    
+    // Replace all citations with filename-based references
+    const cleanedText = text.replace(citationRegex, (match) => {
+      // Try to find the filename from annotations
+      const filename = citationMap.get(match);
+      
+      if (filename) {
+        // Return styled citation with filename
+        return ` _(Source: ${filename})_ `;
+      } else {
+        // Fallback if filename not found
+        return ` _(Source: Referenced File)_ `;
+      }
+    });
+
+    return cleanedText;
+  };
+
+  const processedText = replaceCitationsWithFilenames(text, annotations);
+
   return (
-    <div className={styles.assistantMessage}>
-      <Markdown>{text}</Markdown>
+    <div className={styles.messageRow} style={{ justifyContent: 'flex-start' }}>
+      <div className={styles.messageContent}>
+        <div className={styles.messageLabel}>AI Assistant</div>
+        <div className={styles.assistantMessage}>
+          <Markdown
+            components={{
+              // Style emphasis/italic elements (our citations) with smaller gray text
+              em: ({node, ...props}) => (
+                <em style={{ 
+                  color: '#6b7280', 
+                  fontSize: '0.875em',
+                  fontStyle: 'italic',
+                  fontWeight: '500'
+                }} {...props} />
+              )
+            }}
+          >
+            {processedText}
+          </Markdown>
+        </div>
+      </div>
     </div>
   );
 };
 
 const CodeMessage = ({ text }: { text: string }) => {
   return (
-    <div className={styles.codeMessage}>
-      {text.split("\n").map((line, index) => (
-        <div key={index}>
-          <span>{`${index + 1}. `}</span>
-          {line}
+    <div className={styles.messageRow} style={{ justifyContent: 'flex-start' }}>
+      <div className={styles.messageContent}>
+        <div className={styles.messageLabel}>Code Output</div>
+        <div className={styles.codeMessage}>
+          {text.split("\n").map((line, index) => (
+            <div key={index}>
+              <span>{`${index + 1}. `}</span>
+              {line}
+            </div>
+          ))}
         </div>
-      ))}
+      </div>
     </div>
   );
 };
 
-const Message = ({ role, text }: MessageProps) => {
+const Message = ({ role, text, annotations }: MessageProps) => {
   switch (role) {
     case "user":
       return <UserMessage text={text} />;
     case "assistant":
-      return <AssistantMessage text={text} />;
+      return <AssistantMessage text={text} annotations={annotations} />;
     case "code":
       return <CodeMessage text={text} />;
     default:
@@ -90,17 +157,24 @@ const Chat = ({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Track if this is a new thread that hasn't had a message sent yet
   const [isNewThread, setIsNewThread] = useState(false);
+  // Track polling interval for real-time updates
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // Track last message count to detect new messages
+  const lastMessageCountRef = useRef<number>(0);
 
   // 添加一个生成默认名称的函数
   const getDefaultThreadName = () => {
     return new Date().toLocaleString();
   };
 
-  // 修改滚动效果
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
     if (shouldScroll) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      setShouldScroll(false);
+      // Use setTimeout to ensure DOM has updated
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        setShouldScroll(false);
+      }, 100);
     }
   }, [shouldScroll]);
 
@@ -142,9 +216,15 @@ const Chat = ({
     }
   }, []); 
 
-  const generateAndUpdateTitle = async (firstMessage: string) => {
+  const generateAndUpdateTitle = async (firstMessage: string, targetThreadId: string) => {
     try {
-      const response = await fetch(`/api/assistants/threads/${threadId}/title`, {
+      if (!targetThreadId) {
+        console.error("Cannot generate title: threadId is null or undefined");
+        return;
+      }
+
+      const titleEndpoint = API_ENDPOINTS.generateTitle(targetThreadId);
+      const response = await fetch(titleEndpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -163,13 +243,14 @@ const Chat = ({
       const title = data.title;
 
       // Update thread name in history
-      await fetch(`/api/assistants/threads/history`, {
+      const updateEndpoint = API_ENDPOINTS.updateThread();
+      await fetch(updateEndpoint, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          threadId: threadId,
+          threadId: targetThreadId,
           newName: title,
         }),
       });
@@ -180,6 +261,115 @@ const Chat = ({
       }
     } catch (error) {
       console.error("Error generating title:", error);
+    }
+  };
+
+  const handleSSEStream = async (readableStream: ReadableStream) => {
+    try {
+      const reader = readableStream.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          console.log("Stream ended");
+          setInputDisabled(false);
+          break;
+        }
+
+        // Decode the chunk and add to buffer
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE messages (separated by double newlines)
+        const messages = buffer.split('\n\n');
+        
+        // Keep the last incomplete message in the buffer
+        buffer = messages.pop() || '';
+
+        for (const message of messages) {
+          if (!message.trim()) continue;
+
+          // Parse SSE message
+          const lines = message.split('\n');
+          let eventType = '';
+          let data = '';
+
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              eventType = line.substring(6).trim();
+            } else if (line.startsWith('data:')) {
+              data = line.substring(5).trim();
+            }
+          }
+
+          if (!data) continue;
+
+          // Handle [DONE] signal from OpenAI
+          if (data === '[DONE]') {
+            console.log("Stream completed with [DONE] signal");
+            setInputDisabled(false);
+            continue;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            
+            // Handle different event types
+            if (eventType === 'thread.message.created' || parsed.object === 'thread.message') {
+              // Message created
+              if (parsed.role === 'assistant') {
+                appendMessage("assistant", "");
+                setShouldScroll(true);
+              }
+            } else if (eventType === 'thread.message.delta' || parsed.object === 'thread.message.delta') {
+              // Message delta - update the last message
+              if (parsed.delta?.content) {
+                for (const content of parsed.delta.content) {
+                  if (content.type === 'text' && content.text?.value) {
+                    appendToLastMessage(content.text.value);
+                  }
+                }
+              }
+            } else if (eventType === 'thread.run.completed' || parsed.status === 'completed') {
+              // Run completed
+              console.log("Run completed");
+              setInputDisabled(false);
+            } else if (eventType === 'thread.run.failed' || parsed.status === 'failed') {
+              // Run failed
+              console.error("Run failed:", parsed);
+              setInputDisabled(false);
+              const errorMsg = parsed.last_error?.message || "The assistant run failed. Please try again.";
+              appendMessage("assistant", `\n\n[Error: ${errorMsg}]`);
+            } else if (eventType === 'thread.run.requires_action') {
+              // Handle required actions (tool calls)
+              if (parsed.required_action?.type === 'submit_tool_outputs') {
+                const toolCalls = parsed.required_action.submit_tool_outputs.tool_calls;
+                const toolCallOutputs = await Promise.all(
+                  toolCalls.map(async (toolCall: RequiredActionFunctionToolCall) => {
+                    const result = await functionCallHandler(toolCall);
+                    return { output: result, tool_call_id: toolCall.id };
+                  })
+                );
+                setInputDisabled(true);
+                await submitActionResult(parsed.id, toolCallOutputs);
+              }
+            } else if (parsed.error) {
+              // Error in response
+              console.error("Stream error:", parsed.error);
+              appendMessage("assistant", `\n\n[Error: ${parsed.error}]`);
+              setInputDisabled(false);
+            }
+          } catch (parseError) {
+            console.error("Error parsing SSE data:", parseError, "Data:", data);
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error reading SSE stream:", error);
+      appendMessage("assistant", `\n\n[Error: ${error.message || "Failed to read stream"}]`);
+      setInputDisabled(false);
     }
   };
 
@@ -230,13 +420,18 @@ const Chat = ({
       if (isFirstMessage) {
         setIsNewThread(false);
         // Generate title asynchronously after starting the stream
-        generateAndUpdateTitle(text).catch(error => {
+        generateAndUpdateTitle(text, actualThreadId).catch(error => {
           console.error("Error generating title:", error);
         });
       }
 
-      const stream = AssistantStream.fromReadableStream(response.body);
-      handleReadableStream(stream);
+      // Parse SSE stream manually for Python backend
+      if (isPythonBackend()) {
+        await handleSSEStream(response.body);
+      } else {
+        const stream = AssistantStream.fromReadableStream(response.body);
+        handleReadableStream(stream);
+      }
     } catch (error) {
       console.error("Error sending message:", error);
       appendMessage("assistant", `\n\n[Error: ${error.message || "Failed to send message"}]`);
@@ -293,7 +488,8 @@ const Chat = ({
     if (!threadId) {
       try {
         // 1. Create new thread
-        const res = await fetch(`/api/assistants/threads`, {
+        const createEndpoint = API_ENDPOINTS.createThread();
+        const res = await fetch(createEndpoint, {
           method: "POST",
         });
         const data = await res.json();
@@ -305,7 +501,8 @@ const Chat = ({
         
         // 3. Save to history with default name
         const defaultName = getDefaultThreadName();
-        await fetch(`/api/assistants/threads/history`, {
+        const historyEndpoint = API_ENDPOINTS.createThreadHistory();
+        await fetch(historyEndpoint, {
           method: "POST",
           body: JSON.stringify({ 
             threadId: newThreadId,
@@ -337,7 +534,8 @@ const Chat = ({
         // 6. Generate title for the new thread
         try {
           console.log("Generating title for new thread:", newThreadId);
-          const titleResponse = await fetch(`/api/assistants/threads/${newThreadId}/title`, {
+          const titleEndpoint = API_ENDPOINTS.generateTitle(newThreadId);
+          const titleResponse = await fetch(titleEndpoint, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -353,7 +551,8 @@ const Chat = ({
             console.log("Generated title:", generatedTitle);
 
             // Update thread name in history
-            await fetch(`/api/assistants/threads/history`, {
+            const updateEndpoint = API_ENDPOINTS.updateThread();
+            await fetch(updateEndpoint, {
               method: "PUT",
               headers: {
                 "Content-Type": "application/json",
@@ -559,11 +758,14 @@ const Chat = ({
     });
   }
 
-  const loadThread = async (threadId: string) => {
+  const loadThread = async (threadId: string, isInitialLoad = true) => {
     try {
-      setThreadId(threadId);
+      if (isInitialLoad) {
+        setThreadId(threadId);
+      }
       // use new history endpoint to retrieve messages
-      const response = await fetch(`/api/assistants/threads/${threadId}/history`);
+      const endpoint = API_ENDPOINTS.getThreadMessages(threadId);
+      const response = await fetch(endpoint);
       
       if (response.status === 404) {
         // Thread not found - likely created with different API key or deleted
@@ -572,7 +774,8 @@ const Chat = ({
         
         // Remove invalid thread from the list
         try {
-          await fetch('/api/assistants/threads/history', {
+          const deleteEndpoint = API_ENDPOINTS.deleteThread();
+          await fetch(deleteEndpoint, {
             method: 'DELETE',
             body: JSON.stringify({ 
               threadId: threadId,
@@ -605,23 +808,79 @@ const Chat = ({
       }
       
       const data = await response.json();
-      const messages = data.messages.map(msg => ({
+      const newMessages = data.messages.map(msg => ({
         role: msg.role,
-        text: msg.content[0]?.text?.value || ''
-      }))
-      .reverse();
-      setMessages(messages);
-      // If thread has messages, it's not a new thread
-      setIsNewThread(messages.length === 0);
-      // 加载历史消息时不触发滚动
-      setShouldScroll(false);      
+        text: msg.content[0]?.text?.value || '',
+        annotations: msg.content[0]?.text?.annotations || []
+      }));
+      // Messages are already in chronological order (oldest first) from backend
+      
+      // Only update if there are new messages (to prevent flickering)
+      if (newMessages.length !== lastMessageCountRef.current || isInitialLoad) {
+        const hadNewMessages = newMessages.length > lastMessageCountRef.current;
+        setMessages(newMessages);
+        lastMessageCountRef.current = newMessages.length;
+        
+        // If thread has messages, it's not a new thread
+        setIsNewThread(newMessages.length === 0);
+        
+        // Scroll to bottom on initial load or when new messages arrive
+        if (newMessages.length > 0) {
+          setShouldScroll(true);
+        }
+      }
     } catch (error) {
       console.error('Failed loading history conversation:', error);
       // On error, create a new thread to continue working
-      setMessages([]);
-      await createNewThread();
+      if (isInitialLoad) {
+        setMessages([]);
+        await createNewThread();
+      }
     }
   }
+  
+  // Polling function to check for new messages
+  const pollForNewMessages = async (threadId: string) => {
+    if (!threadId) {
+      return;
+    }
+    
+    try {
+      await loadThread(threadId, false);
+    } catch (error) {
+      console.error('Polling error:', error);
+    }
+  }
+  
+  // Effect to manage polling for real-time updates
+  // Only poll when actively waiting for AI response to reduce server load
+  useEffect(() => {
+    // Clear any existing polling interval
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    
+    // Only start polling when waiting for AI response (inputDisabled = true)
+    // This prevents constant polling when idle
+    if (threadId && !isNewThread && inputDisabled) {
+      console.log(`🔄 Starting polling while waiting for AI response: ${threadId}`);
+      
+      // Poll every 2 seconds only while waiting for response
+      pollingIntervalRef.current = setInterval(() => {
+        pollForNewMessages(threadId);
+      }, 2000);
+    }
+    
+    // Cleanup function
+    return () => {
+      if (pollingIntervalRef.current) {
+        console.log(`⏹️ Stopping polling for thread: ${threadId}`);
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    };
+  }, [threadId, isNewThread, inputDisabled]); // Added inputDisabled dependency
   const createNewThread = () => {
     // Simply reset to welcome state
     // Thread will be created when user sends first message
@@ -630,6 +889,7 @@ const Chat = ({
     setIsGroupConversation(false);
     setIsNewThread(true);
     setUserInput("");
+    lastMessageCountRef.current = 0;
   };
 
   const handleThreadSelect = (threadId: string | null, isGroup: boolean) => {
@@ -639,10 +899,12 @@ const Chat = ({
       setMessages([]);
       setIsGroupConversation(false);
       setIsNewThread(false);
+      lastMessageCountRef.current = 0;
     } else {
       // Load the selected thread
       setThreadId(threadId);
       setIsGroupConversation(isGroup);
+      lastMessageCountRef.current = 0; // Reset message count for new thread
       loadThread(threadId);
     }
   };
@@ -652,7 +914,8 @@ const Chat = ({
     
     try {
       const defaultName = getDefaultThreadName();
-      const response = await fetch('/api/assistants/threads/history', {
+      const historyEndpoint = API_ENDPOINTS.createThreadHistory();
+      const response = await fetch(historyEndpoint, {
         method: 'POST',
         body: JSON.stringify({ 
           threadId: joinThreadInput,
@@ -695,7 +958,7 @@ const Chat = ({
         ) : (
           <>
             {messages.map((msg, index) => (
-              <Message key={index} role={msg.role} text={msg.text} />
+              <Message key={index} role={msg.role} text={msg.text} annotations={msg.annotations} />
             ))}
             <div ref={messagesEndRef} />
           </>

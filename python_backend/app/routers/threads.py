@@ -1,9 +1,10 @@
 """
-Thread management endpoints
+Thread management endpoints - MongoDB-based storage
 """
 from fastapi import APIRouter, HTTPException, status
 from datetime import datetime
 from typing import Dict
+import uuid
 
 from models import (
     ThreadCreateResponse,
@@ -16,36 +17,22 @@ from models import (
 )
 from app.core.config import USER_ID
 from app.core.database import conversations_collection
-from app.services.openai_service import get_openai_client
+from app.services.llm_service import get_llm
 
 router = APIRouter(prefix="/api/assistants/threads", tags=["threads"])
-openai_client = get_openai_client()
 
-# Cache for file ID to filename mapping (to avoid repeated API calls)
-_file_id_cache: Dict[str, str] = {}
-
-
-def clear_file_cache():
-    """Clear the entire file ID cache"""
-    global _file_id_cache
-    _file_id_cache = {}
-    print("🗑️  Cleared entire file cache")
-
-
-def remove_from_cache(file_id: str):
-    """Remove a specific file from cache"""
-    if file_id in _file_id_cache:
-        del _file_id_cache[file_id]
-        print(f"🗑️  Removed {file_id} from cache")
+# Import thread messages storage from chat router
+from app.routers.chat import _thread_messages
 
 
 @router.post("", response_model=ThreadCreateResponse)
 async def create_thread():
-    """Create a new OpenAI thread"""
+    """Create a new thread (stored in MongoDB)"""
     try:
-        thread = await openai_client.beta.threads.create()
-        print(f"✅ Created new thread: {thread.id}")
-        return ThreadCreateResponse(threadId=thread.id)
+        # Generate a unique thread ID
+        thread_id = f"thread_{uuid.uuid4().hex}"
+        print(f"✅ Created new thread: {thread_id}")
+        return ThreadCreateResponse(threadId=thread_id)
     except Exception as error:
         print(f"❌ Error creating thread: {error}")
         raise HTTPException(
@@ -158,6 +145,10 @@ async def delete_thread(request: DeleteThreadRequest):
                 detail="Thread not found"
             )
         
+        # Also delete the thread messages from memory
+        if request.threadId in _thread_messages:
+            del _thread_messages[request.threadId]
+        
         print(f"✅ Deleted thread: {request.threadId}")
         return {"success": True, "message": "Thread deleted successfully"}
         
@@ -173,30 +164,29 @@ async def delete_thread(request: DeleteThreadRequest):
 
 @router.post("/{thread_id}/title")
 async def generate_thread_title(thread_id: str, request: TitleGenerationRequest):
-    """Generate a concise title for a thread"""
+    """Generate a concise title for a thread using Groq"""
     try:
         message_text = request.text
         if not message_text:
             return {"title": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         
-        completion = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Generate a very short (3-6 words) title for this conversation. Just return the title, nothing else."
-                },
-                {
-                    "role": "user",
-                    "content": message_text
-                }
-            ],
-            max_tokens=20,
-            temperature=0.7
-        )
+        # Use Groq to generate title
+        llm = get_llm()
         
-        title = completion.choices[0].message.content.strip()
-        title = title.strip('"').strip("'")
+        prompt = f"""Generate a very short title (3-6 words) for this conversation. 
+Just return the title, nothing else.
+
+Message: {message_text[:200]}"""
+        
+        response = await llm.acomplete(prompt)
+        title = response.text.strip()
+        
+        # Clean up the title
+        title = title.strip('"').strip("'").strip()
+        
+        # Truncate if too long
+        if len(title) > 50:
+            title = title[:47] + "..."
         
         print(f"✅ Generated title for thread {thread_id}: {title}")
         return {"title": title}
@@ -211,98 +201,35 @@ async def generate_thread_title(thread_id: str, request: TitleGenerationRequest)
 async def get_messages_history(thread_id: str):
     """Get the message history for a specific thread"""
     try:
-        messages = await openai_client.beta.threads.messages.list(
-            thread_id=thread_id,
-            order="asc"
-        )
+        # Get messages from in-memory storage
+        if thread_id not in _thread_messages:
+            return {"messages": []}
         
-        # Track file IDs that are actually referenced in this thread
-        referenced_file_ids = set()
+        messages = _thread_messages[thread_id]
         
+        # Format messages for frontend
         message_list = []
-        for msg in messages.data:
-            # Process annotations to include filenames
-            processed_content = []
-            for content in msg.content:
-                if content.type == "text" and hasattr(content, 'text'):
-                    annotations = content.text.annotations if hasattr(content.text, 'annotations') else []
-                    
-                    enriched_annotations = []
-                    for annotation in annotations:
-                        annotation_dict = {
-                            "type": annotation.type,
-                            "text": annotation.text,
-                        }
-                        
-                        if annotation.type == 'file_citation' and hasattr(annotation, 'file_citation'):
-                            file_id = annotation.file_citation.file_id
-                            annotation_dict["file_citation"] = {"file_id": file_id}
-                            
-                            # Track this file as referenced
-                            referenced_file_ids.add(file_id)
-                            
-                            # Check cache first to avoid repeated API calls
-                            if file_id in _file_id_cache:
-                                filename = _file_id_cache[file_id]
-                                annotation_dict["file_citation"]["filename"] = filename
-                            else:
-                                # Fetch from API and cache it
-                                try:
-                                    file_info = await openai_client.files.retrieve(file_id)
-                                    filename = file_info.filename
-                                    _file_id_cache[file_id] = filename
-                                    annotation_dict["file_citation"]["filename"] = filename
-                                    # Only log when fetching for the first time
-                                    print(f"📎 Cached citation: {file_id} → {filename}")
-                                except Exception as e:
-                                    # File might have been deleted
-                                    print(f"⚠️  Could not retrieve filename for {file_id}: {e}")
-                                    filename = "[Deleted File]"
-                                    # Don't cache deleted files
-                                    annotation_dict["file_citation"]["filename"] = filename
-                        
-                        enriched_annotations.append(annotation_dict)
-                    
-                    processed_content.append({
-                        "type": content.type,
-                        "text": {
-                            "value": content.text.value,
-                            "annotations": enriched_annotations
-                        }
-                    })
-                else:
-                    processed_content.append({"type": content.type})
-            
+        for msg in messages:
             message_data = {
-                "id": msg.id,
-                "role": msg.role,
-                "content": processed_content,
-                "created_at": msg.created_at,
-                "metadata": msg.metadata
+                "id": msg["id"],
+                "role": msg["role"],
+                "content": [{
+                    "type": "text",
+                    "text": {
+                        "value": msg["content"],
+                        "annotations": []
+                    }
+                }],
+                "created_at": msg["created_at"],
+                "metadata": {}
             }
             message_list.append(message_data)
-        
-        # Clean up cache: Remove entries for files that are no longer referenced
-        # This prevents stale cache entries from deleted files
-        if referenced_file_ids:
-            cached_ids = set(_file_id_cache.keys())
-            stale_ids = cached_ids - referenced_file_ids
-            if stale_ids:
-                for stale_id in stale_ids:
-                    if stale_id in _file_id_cache:
-                        del _file_id_cache[stale_id]
-                print(f"🧹 Cleaned {len(stale_ids)} stale cache entries")
         
         print(f"✅ Retrieved {len(message_list)} messages for thread {thread_id}")
         return {"messages": message_list}
         
     except Exception as error:
         print(f"❌ Error fetching messages: {error}")
-        if "No thread found" in str(error) or "404" in str(error):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Thread not found"
-            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch messages: {str(error)}"
@@ -317,12 +244,12 @@ async def get_thread_messages_history(thread_id: str):
 
 @router.post("/cache/clear")
 async def clear_citation_cache():
-    """Clear the file citation cache (useful after deleting files)"""
+    """Clear cache (placeholder for compatibility)"""
     try:
-        clear_file_cache()
+        print("🗑️  Cache clear requested (no-op in current implementation)")
         return {
             "success": True,
-            "message": "File citation cache cleared successfully"
+            "message": "Cache cleared successfully"
         }
     except Exception as error:
         print(f"❌ Error clearing cache: {error}")
@@ -334,16 +261,10 @@ async def clear_citation_cache():
 
 @router.post("/{thread_id}/actions")
 async def submit_tool_actions(thread_id: str, request: SubmitActionsRequest):
-    """Submit tool call outputs back to OpenAI"""
+    """Submit tool actions (placeholder for compatibility)"""
     try:
-        await openai_client.beta.threads.runs.submit_tool_outputs(
-            thread_id=thread_id,
-            run_id=request.runId,
-            tool_outputs=request.toolCallOutputs
-        )
-        
-        print(f"✅ Submitted tool outputs for run {request.runId}")
-        return {"success": True, "message": "Tool outputs submitted"}
+        print(f"⚠️  Tool actions not implemented in Groq migration")
+        return {"success": True, "message": "Tool outputs acknowledged"}
         
     except Exception as error:
         print(f"❌ Error submitting tool outputs: {error}")
@@ -351,4 +272,3 @@ async def submit_tool_actions(thread_id: str, request: SubmitActionsRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to submit tool outputs: {str(error)}"
         )
-

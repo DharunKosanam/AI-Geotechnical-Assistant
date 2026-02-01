@@ -7,14 +7,10 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# OpenAI Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY is not set in environment variables")
-
-ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID", "asst_mbSUwnJtQTwDYQYESHzeiHtM")
-VECTOR_STORE_ID = os.getenv("OPENAI_VECTOR_STORE_ID")
-KNOWLEDGE_STORE_ID = os.getenv("OPENAI_KNOWLEDGE_STORE_ID")
+# Groq Configuration
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY is not set in environment variables")
 
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")

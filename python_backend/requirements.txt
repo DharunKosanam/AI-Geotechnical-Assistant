@@ -9,3 +9,6 @@ python-multipart
 Pillow
 img2pdf
 httpx
+llama-index-llms-groq
+fastembed
+pypdf

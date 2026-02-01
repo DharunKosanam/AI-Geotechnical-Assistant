@@ -85,3 +85,18 @@ class SubmitActionsRequest(BaseModel):
     toolCallOutputs: List[Dict[str, Any]]
     runId: str
 
+
+# Phase 4: RAG Chat Models
+class RAGChatRequest(BaseModel):
+    """Request model for RAG chat endpoint"""
+    query: str = Field(..., description="The user's question or query")
+    history: Optional[List[Dict[str, str]]] = Field(
+        default=None, 
+        description="Optional conversation history (list of {role, content} dicts)"
+    )
+
+
+class RAGChatResponse(BaseModel):
+    """Response model for RAG chat endpoint"""
+    answer: str = Field(..., description="The AI-generated answer")
+    sources: List[str] = Field(..., description="List of source filenames used")

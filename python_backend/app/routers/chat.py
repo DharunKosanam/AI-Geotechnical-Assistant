@@ -1,36 +1,113 @@
 """
-Chat endpoints for handling messages and streaming responses
+Chat endpoints for handling messages and streaming responses using Groq + RAG
 """
 import asyncio
 import json
-import httpx
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
-
-from models import ChatRequest, ChatResponse
-from app.core.config import ASSISTANT_ID, VECTOR_STORE_ID, OPENAI_API_KEY, USER_ID
-from app.core.database import conversations_collection, files_collection
-from app.services.openai_service import get_openai_client
 from datetime import datetime
+from typing import List
 
-router = APIRouter(prefix="/chat", tags=["chat"])
-openai_client = get_openai_client()
+from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse
+from app.core.config import USER_ID
+from app.core.database import conversations_collection, files_collection
+from app.services.llm_service import get_llm, generate_answer_with_groq
+from app.services.rag_service import query_with_context, query_vector_store
+
+router = APIRouter(tags=["chat"])
 
 
-async def get_user_uploaded_files():
-    """Get a list of user-uploaded files for context"""
+@router.post("/chat", response_model=RAGChatResponse)
+async def chat_with_rag(request: RAGChatRequest):
+    """
+    Main RAG endpoint: Query the vector store, retrieve context, and generate an answer.
+    
+    This endpoint:
+    1. Queries the vector store for relevant document chunks
+    2. Formats the context for the LLM
+    3. Generates an answer using Groq with RAG context
+    4. Returns the answer with source citations
+    
+    Args:
+        request: RAGChatRequest containing query and optional conversation history
+        
+    Returns:
+        RAGChatResponse with answer and list of source filenames
+    """
     try:
-        cursor = files_collection.find({"userId": USER_ID, "category": "user_upload"})
-        files = []
-        async for doc in cursor:
-            files.append({
-                "id": doc.get("fileId"),
-                "filename": doc.get("filename")
-            })
-        return files
-    except Exception as e:
-        print(f"⚠️  Could not retrieve user files: {e}")
-        return []
+        print(f"📨 Received query: {request.query}")
+        
+        # Step 1: Query vector store for relevant chunks
+        print("🔍 Querying vector store...")
+        chunks = await query_vector_store(request.query, top_k=5)
+        print(f"   Found {len(chunks)} relevant chunks")
+        
+        # Step 2: Format context and extract sources
+        if chunks and len(chunks) > 0:
+            # Format chunks into a single context string
+            context = "\n\n".join([
+                f"[Source: {chunk['filename']}]\n{chunk['text']}"
+                for chunk in chunks
+            ])
+            
+            # Extract unique source filenames
+            sources = list(set([chunk['filename'] for chunk in chunks]))
+            print(f"   Sources: {', '.join(sources)}")
+        else:
+            # No chunks found - use empty context
+            context = ""
+            sources = []
+            print("   ⚠️  No relevant chunks found in vector store")
+        
+        # Step 3: Generate answer with Groq using RAG context
+        print("🤖 Generating answer with Groq...")
+        answer = await generate_answer_with_groq(
+            query=request.query,
+            context=context,
+            history=request.history
+        )
+        print(f"   ✓ Generated answer ({len(answer)} chars)")
+        
+        # Step 4: Return response
+        return RAGChatResponse(
+            answer=answer,
+            sources=sources
+        )
+        
+    except Exception as error:
+        print(f"❌ Error in chat endpoint: {error}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate answer: {str(error)}"
+        )
+
+
+# In-memory storage for thread messages (can be moved to MongoDB for persistence)
+_thread_messages = {}
+
+
+async def get_thread_messages(thread_id: str):
+    """Get messages for a thread"""
+    if thread_id not in _thread_messages:
+        _thread_messages[thread_id] = []
+    return _thread_messages[thread_id]
+
+
+async def add_message_to_thread(thread_id: str, role: str, content: str):
+    """Add a message to a thread"""
+    if thread_id not in _thread_messages:
+        _thread_messages[thread_id] = []
+    
+    message = {
+        "id": f"msg_{len(_thread_messages[thread_id])}",
+        "role": role,
+        "content": content,
+        "created_at": datetime.now().isoformat()
+    }
+    _thread_messages[thread_id].append(message)
+    return message
 
 
 async def save_conversation_to_db(thread_id: str):
@@ -66,12 +143,11 @@ async def save_conversation_to_db(thread_id: str):
 @router.post("/stream")
 async def send_chat_message_stream(request: ChatRequest):
     """
-    Send a message to the OpenAI Assistant with streaming response.
+    Send a message and get streaming response from Groq with RAG context.
     """
     try:
         thread_id = request.threadId
         content = request.content
-        assistant_id = request.assistantId or ASSISTANT_ID
         
         # Validate inputs
         if not content or not content.strip():
@@ -85,173 +161,105 @@ async def send_chat_message_stream(request: ChatRequest):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Thread ID is required"
             )
-            
-        if not assistant_id:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Assistant ID is not configured"
-            )
         
         print(f"📨 Received message for thread: {thread_id}")
         
-        # Check for active runs and cancel them
-        try:
-            runs = await openai_client.beta.threads.runs.list(
-                thread_id=thread_id,
-                limit=5
-            )
-            
-            active_statuses = ['in_progress', 'queued', 'requires_action']
-            active_run = next(
-                (run for run in runs.data if run.status in active_statuses),
-                None
-            )
-            
-            if active_run:
-                print(f"⚠️  Found active run ({active_run.status}): {active_run.id}. Cancelling...")
-                try:
-                    await openai_client.beta.threads.runs.cancel(
-                        thread_id=thread_id,
-                        run_id=active_run.id
-                    )
-                    print(f"✅ Cancelled run {active_run.id}")
-                    await asyncio.sleep(1)
-                except Exception as cancel_error:
-                    print(f"⚠️  Could not cancel run: {cancel_error}")
-                    
-        except Exception as check_error:
-            print(f"⚠️  Error checking for active runs: {check_error}")
-        
-        # Get list of user-uploaded files to provide context
-        user_files = await get_user_uploaded_files()
-        
-        # Add the message to the thread
-        try:
-            # If user has uploaded files, add context to help the AI use them
-            message_content = content
-            if user_files:
-                file_names = [f["filename"] for f in user_files]
-                file_context = f"\n\n[Available files: {', '.join(file_names)}]"
-                print(f"📎 Including context about {len(user_files)} uploaded files")
-                # Add file context as metadata but keep message content clean
-                message_content = content
-            
-            await openai_client.beta.threads.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content=message_content
-            )
-            print("✅ Message added to thread successfully")
-            
-        except Exception as create_error:
-            print(f"❌ Error creating message: {create_error}")
-            
-            if hasattr(create_error, 'status_code'):
-                error_status = create_error.status_code
-            elif hasattr(create_error, 'code'):
-                error_status = 401 if create_error.code == 'invalid_api_key' else 500
-            else:
-                error_status = 500
-            
-            if error_status == 401:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key"
-                )
-            elif error_status == 404:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Thread not found"
-                )
-            elif error_status == 400:
-                error_msg = str(create_error)
-                if 'run' in error_msg.lower():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="AI is still processing. Please wait."
-                    )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid request: {error_msg}"
-                )
-            else:
-                raise
+        # Add user message to thread
+        await add_message_to_thread(thread_id, "user", content)
         
         # Save conversation async
         asyncio.create_task(save_conversation_to_db(thread_id))
         
-        # Start streaming run
-        async def proxy_openai_stream():
+        # Generate streaming response
+        async def generate_response_stream():
             try:
-                url = f"https://api.openai.com/v1/threads/{thread_id}/runs"
-                headers = {
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json",
-                    "OpenAI-Beta": "assistants=v2"
-                }
+                # Perform RAG search to get relevant context
+                print("🔍 Performing vector search...")
+                rag_result = await query_with_context(content, top_k=5)
                 
-                # Build additional instructions with file context
-                additional_instructions = None
-                if user_files:
-                    file_list = ", ".join([f["filename"] for f in user_files])
-                    additional_instructions = (
-                        f"IMPORTANT: The user has uploaded the following files: {file_list}. "
-                        f"Use file_search to access and reference these files when answering. "
-                        f"If the question relates to any of these files, search them for relevant information."
-                    )
+                # Get previous messages for context
+                messages = await get_thread_messages(thread_id)
                 
-                payload = {
-                    "assistant_id": assistant_id,
-                    "model": "gpt-4o-mini",
-                    "stream": True,
-                    "truncation_strategy": {
-                        "type": "last_messages",
-                        "last_messages": 10
-                    },
-                    "max_completion_tokens": 1000
-                }
+                # Build conversation history (last 5 messages)
+                conversation_history = ""
+                for msg in messages[-5:]:
+                    conversation_history += f"{msg['role'].upper()}: {msg['content']}\n"
                 
-                # Add additional instructions if we have file context
-                if additional_instructions:
-                    payload["additional_instructions"] = additional_instructions
+                # Build the prompt with RAG context
+                system_prompt = """You are an expert AI assistant specializing in geotechnical engineering and soil mechanics. 
+Use the provided context from documents to answer questions accurately. 
+If the context doesn't contain relevant information, use your knowledge but mention this.
+Always cite sources when using information from the provided documents."""
                 
-                if VECTOR_STORE_ID:
-                    payload["tool_resources"] = {
-                        "file_search": {
-                            "vector_store_ids": [VECTOR_STORE_ID]
+                context_section = ""
+                if rag_result['context']:
+                    context_section = f"\n\nRELEVANT DOCUMENTS:\n{rag_result['context']}\n"
+                    print(f"✅ Found {rag_result['num_results']} relevant documents")
+                else:
+                    print("⚠️  No relevant documents found in vector store")
+                
+                full_prompt = f"""{system_prompt}
+
+CONVERSATION HISTORY:
+{conversation_history}
+{context_section}
+
+USER QUESTION: {content}
+
+ASSISTANT:"""
+                
+                # Initialize Groq LLM
+                llm = get_llm()
+                
+                # Stream the response
+                print("🤖 Generating response with Groq...")
+                
+                # Start SSE stream
+                yield "event: thread.message.delta\n".encode()
+                initial_data = {"delta": {"content": [{"type": "text", "text": {"value": ""}}]}}
+                yield f"data: {json.dumps(initial_data)}\n\n".encode()
+                
+                # Get streaming response from Groq
+                full_response = ""
+                response_stream = await llm.astream_complete(full_prompt)
+                
+                async for chunk in response_stream:
+                    if chunk.text:
+                        full_response += chunk.text
+                        # Format as OpenAI-style SSE event
+                        event_data = {
+                            "delta": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": {"value": chunk.text}
+                                }]
+                            }
                         }
-                    }
+                        yield f"event: thread.message.delta\n".encode()
+                        yield f"data: {json.dumps(event_data)}\n\n".encode()
                 
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    async with client.stream("POST", url, headers=headers, json=payload) as response:
-                        if response.status_code != 200:
-                            error_body = await response.aread()
-                            print(f"❌ OpenAI API error {response.status_code}: {error_body}")
-                            yield f"data: {json.dumps({'error': error_body.decode()})}\n\n".encode()
-                            return
-                        
-                        buffer = b""
-                        async for chunk in response.aiter_raw():
-                            if chunk:
-                                buffer += chunk
-                                while b"\n" in buffer:
-                                    line, buffer = buffer.split(b"\n", 1)
-                                    line_str = line.decode('utf-8', errors='ignore').strip()
-                                    
-                                    if line_str.startswith("data:") or line_str == "":
-                                        yield (line + b"\n")
-                                    elif line_str.startswith("event:"):
-                                        continue
-                                    else:
-                                        yield (line + b"\n")
-                                
+                # Add assistant response to thread
+                await add_message_to_thread(thread_id, "assistant", full_response)
+                
+                # Send completion event
+                yield f"event: thread.message.completed\n".encode()
+                yield f"data: {json.dumps({'status': 'completed'})}\n\n".encode()
+                
+                print(f"✅ Response completed ({len(full_response)} chars)")
+                
             except Exception as error:
-                print(f"❌ Proxy stream error: {error}")
-                error_msg = f"data: {json.dumps({'error': str(error)})}\n\n"
-                yield error_msg.encode()
+                print(f"❌ Stream error: {error}")
+                error_event = {
+                    "error": {
+                        "message": str(error),
+                        "type": "server_error"
+                    }
+                }
+                yield f"event: error\n".encode()
+                yield f"data: {json.dumps(error_event)}\n\n".encode()
         
         return StreamingResponse(
-            proxy_openai_stream(),
+            generate_response_stream(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -268,4 +276,3 @@ async def send_chat_message_stream(request: ChatRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(error)}"
         )
-

@@ -24,8 +24,8 @@ function loadEnvFromFile() {
       }
     }
   } catch (envError) {
-    // .env file might not exist
-    console.error('[OpenAI] Could not read .env file');
+    // .env file might not exist - this is OK when using Python backend
+    console.warn('[OpenAI] No root .env file found (OK if using Python backend)');
   }
   return null;
 }
@@ -37,18 +37,22 @@ const fileApiKey = loadEnvFromFile();
 const apiKey = fileApiKey || process.env.OPENAI_API_KEY;
 
 if (!apiKey) {
-  throw new Error(
-    "OPENAI_API_KEY is not set. Please add it to your .env file."
+  // Don't crash the server - just warn. Some routes (thread history) use MongoDB only
+  // and don't need OpenAI. Only operations that actually call OpenAI will fail gracefully.
+  console.warn(
+    "[OpenAI] OPENAI_API_KEY is not set. OpenAI-dependent features will be unavailable. " +
+    "Thread management via MongoDB will still work."
   );
 }
 
 // Log which key is being used for debugging
-if (process.env.NODE_ENV === 'development') {
+if (apiKey && process.env.NODE_ENV === 'development') {
   const keySource = fileApiKey ? "file (.env)" : "environment variable";
   console.log(`[OpenAI] Using API key from ${keySource}, starting with: ${apiKey.substring(0, 12)}...`);
 }
 
-export const openai = new OpenAI({
-  apiKey: apiKey,
-});
+// Export openai client - may be null if no API key is configured
+export const openai: OpenAI | null = apiKey
+  ? new OpenAI({ apiKey })
+  : null;
 

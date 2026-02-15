@@ -1,0 +1,18 @@
+fastapi
+uvicorn[standard]
+motor
+python-dotenv
+pydantic
+pydantic-settings
+python-multipart
+Pillow
+img2pdf
+httpx
+llama-index-llms-groq
+torch
+fastembed
+# pypdf  # Replaced with PyMuPDF for better text extraction
+pymupdf
+redis
+pytest
+pytest-asyncio

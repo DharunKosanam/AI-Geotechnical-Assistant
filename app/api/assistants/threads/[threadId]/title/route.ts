@@ -24,6 +24,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ thr
       );
     }
 
+    if (!openai) {
+      // Without OpenAI, generate a simple title from the message
+      const simpleTitle = message.length > 50 ? message.substring(0, 47) + "..." : message;
+      return Response.json({ title: simpleTitle });
+    }
+
     // Generate a concise title (max 60 characters) from the first message
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",

@@ -9,11 +9,13 @@
 .leftPanel {
   margin-right: 20px;
   width: 25%;               /* 占据 25% 的宽度 */
-  height: 95%;             /* 高度占满容器 */
+  height: 100%;             /* 高度占满容器 */
   background-color: #f7f7f7; /* 可选：浅灰色背景 */
   border-radius: 16px;
   padding: 10px;
-  overflow-x: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex-shrink: 0;
 }
 
 

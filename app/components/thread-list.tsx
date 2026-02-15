@@ -1,7 +1,7 @@
 import React, { useState, useEffect, forwardRef, useImperativeHandle } from "react";
 import styles from "./thread-list.module.css";
 
-const Modal = ({ show, onClose, children }) => {
+const Modal = ({ show, onClose, children }: { show: boolean; onClose: () => void; children: React.ReactNode }) => {
   if (!show) return null;
 
   return (
@@ -69,7 +69,7 @@ interface ThreadListProps {
   onThreadSelect: (threadId: string | null, isGroup: boolean) => void;
 }
 
-const ThreadList = forwardRef(({ currentThreadId, onThreadSelect }: ThreadListProps, ref) => {
+const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThreadSelect }, ref) => {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [newThreadName, setNewThreadName] = useState<string>("");
@@ -288,5 +288,7 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
     </div>
   );
 });
+
+ThreadList.displayName = 'ThreadList';
 
 export default ThreadList;

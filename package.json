@@ -6,24 +6,31 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:smoke": "playwright test --headed",
+    "test:smoke:headless": "playwright test",
+    "test:report": "playwright show-report"
   },
   "dependencies": {
     "csv-parser": "^3.0.0",
-    "dotenv": "^17.2.3",
-    "mongodb": "^6.3.0",
+    "katex": "^0.16.28",
     "next": "^14.2.18",
-    "openai": "^4.46.0",
+    "openai": "^4.77.0",
     "react": "^18",
     "react-dom": "^18",
     "react-markdown": "^9.0.1",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "swr": "^2.2.5",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "@types/node": "20.12.7",
-    "@types/react": "18.2.79",
-    "typescript": "5.4.5"
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "typescript": "^5.7.2"
   },
   "prettier": {
     "singleQuote": false

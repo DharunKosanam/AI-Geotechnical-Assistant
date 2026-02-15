@@ -1,23 +1,20 @@
 import { Inter } from "next/font/google";
 import "./globals.css";
-import Warnings from "./components/warnings";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata = {
-  title: "Geotechnical Assistant",
-  description: "A geotechnical assistant based on quickstart template using the Assistants API with OpenAI.",
+  title: "AI Geotechnical Assistant",
+  description: "AI-powered geotechnical assistant using RAG with Groq, MongoDB Atlas, and Redis.",
   icons: {
     icon: "/openai.svg",
   },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const hasApiKey = Boolean(process.env.OPENAI_API_KEY);
-
   return (
     <html lang="en">
-      <body>
-        {hasApiKey ? children : <Warnings />}
+      <body className={inter.className}>
+        {children}
       </body>
     </html>
   );

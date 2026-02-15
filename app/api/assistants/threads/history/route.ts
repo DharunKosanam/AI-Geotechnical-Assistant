@@ -138,11 +138,11 @@ export async function DELETE(request: Request) {
       return Response.json({ error: 'Thread ID is required' }, { status: 400 });
     }
     
-    // If not a group thread, try to delete from OpenAI
-    if (!isGroup) {
+    // If not a group thread and OpenAI is configured, try to delete from OpenAI
+    if (!isGroup && openai) {
       try {
         await openai.beta.threads.del(threadId);
-      } catch (openaiError) {
+      } catch (openaiError: any) {
         // Thread might not exist (404) - that's fine, we still want to remove it from database
         if (openaiError.status !== 404 && openaiError.statusCode !== 404) {
           console.error('OpenAI thread deletion failed:', openaiError);

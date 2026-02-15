@@ -18,9 +18,15 @@ const TrashIcon = () => (
   </svg>
 );
 
+interface FileData {
+  file_id: string;
+  filename: string;
+  status?: string;
+}
+
 const FileViewer = () => {
-  const [files, setFiles] = useState([]);
-  const [optimisticFiles, setOptimisticFiles] = useState([]); // Track optimistically added files
+  const [files, setFiles] = useState<FileData[]>([]);
+  const [optimisticFiles, setOptimisticFiles] = useState<FileData[]>([]); // Track optimistically added files
 
   useEffect(() => {
       fetchFiles();
@@ -28,8 +34,9 @@ const FileViewer = () => {
 
   const fetchFiles = async () => {
     try {
-      console.log("Fetching files...");
-      const resp = await fetch("/api/assistants/files", {
+      console.log("Fetching user uploaded files only...");
+      // Use Python backend directly (same as upload and delete)
+      const resp = await fetch("http://127.0.0.1:8000/api/assistants/files?category=user_upload", {
         method: "GET",
       });
       
@@ -51,13 +58,16 @@ const FileViewer = () => {
       try {
         const data = JSON.parse(responseText);
         console.log("Fetched files:", data);
-        setFiles(data);
+        
+        // Handle both response formats: {files: [...]} and [...]
+        const filesList = Array.isArray(data) ? data : (data.files || []);
+        setFiles(filesList);
         
         // Remove optimistic files that now exist in the API response
         setOptimisticFiles(prevOptimistic => {
           return prevOptimistic.filter(optimisticFile => {
             // Keep optimistic file if it's not yet in the API response
-            const existsInApi = data.some(apiFile => 
+            const existsInApi = filesList.some(apiFile => 
               apiFile.filename === optimisticFile.filename
             );
             if (existsInApi) {
@@ -75,8 +85,18 @@ const FileViewer = () => {
     }
   };
 
-  const handleFileDelete = async (fileId) => {
+  const handleFileDelete = async (fileId: string, filename: string) => {
     try {
+      // Show confirmation dialog
+      const confirmed = window.confirm(
+        `Are you sure you want to delete "${filename}"?\n\nThis will permanently remove the file and all its vector embeddings from the database.`
+      );
+      
+      if (!confirmed) {
+        console.log("File deletion cancelled by user");
+        return;
+      }
+      
       // Check if this is an optimistic file (temp ID)
       if (fileId.startsWith('temp-')) {
         console.log("Removing optimistic file:", fileId);
@@ -84,84 +104,111 @@ const FileViewer = () => {
         return;
       }
       
-      const resp = await fetch("/api/assistants/files", {
+      console.log(`Deleting file: ${filename}`);
+      
+      // Call the new DELETE endpoint with filename (note: /api/files/delete/ prefix)
+      const resp = await fetch(`http://127.0.0.1:8000/api/files/delete/${encodeURIComponent(filename)}`, {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ fileId }),
       });
       
       if (!resp.ok) {
-        console.error(`Failed to delete file. Status: ${resp.status}`);
-        return;
-      }
-      
-      // Optimistically remove from UI
-      setFiles(prev => prev.filter(f => f.file_id !== fileId));
-      
-      // Refresh in background
-      fetchFiles();
-    } catch (error) {
-      console.error("Error deleting file:", error);
-    }
-  };
-
-  const handleFileUpload = async (event) => {
-    try {
-      const selectedFiles = event.target.files;
-      if (selectedFiles.length === 0) return;
-      
-      console.log(`Starting upload of ${selectedFiles.length} file(s)...`);
-      
-      // Create FormData and append ALL selected files
-      const data = new FormData();
-      const filesList = []; // Track files for optimistic update
-      
-      for (let i = 0; i < selectedFiles.length; i++) {
-        data.append("files", selectedFiles[i]); // Note: "files" (plural)
-        console.log(`  - Added: ${selectedFiles[i].name}`);
-        filesList.push(selectedFiles[i]);
-      }
-      
-      const resp = await fetch("/api/assistants/files", {
-        method: "POST",
-        body: data,
-      });
-      
-      console.log("Upload response status:", resp.status);
-      
-      if (!resp.ok) {
-        const errorData = await resp.json();
-        console.error(`Failed to upload files. Status: ${resp.status}`, errorData);
-        alert(`Upload failed: ${errorData.error || 'Unknown error'}`);
-        // Reset file input even on error
-        event.target.value = "";
+        const errorData = await resp.json().catch(() => ({ message: "Unknown error" }));
+        console.error(`Failed to delete file. Status: ${resp.status}`, errorData);
+        alert(`Failed to delete file: ${errorData.detail || errorData.message || "Unknown error"}`);
         return;
       }
       
       const result = await resp.json();
-      console.log("Upload successful!", result);
+      console.log("Delete successful:", result);
       
-      // ✅ OPTIMISTIC UPDATE: Add files to UI immediately
-      const newOptimisticFiles = filesList.map((file, idx) => ({
-        file_id: `temp-${Date.now()}-${idx}`, // Temporary ID
-        filename: file.name,
-        status: "✓ Uploaded" // Success checkmark
-      }));
+      // Only remove from UI after successful backend deletion
+      setFiles(prev => prev.filter(f => f.file_id !== fileId));
+      setOptimisticFiles(prev => prev.filter(f => f.file_id !== fileId));
       
-      console.log("Adding optimistic files:", newOptimisticFiles);
-      setOptimisticFiles(prev => [...prev, ...newOptimisticFiles]);
+      // Show success message
+      console.log(`✓ Successfully deleted ${result.deleted_count} chunks for file: ${filename}`);
+      
+      // Refresh list to ensure consistency
+      fetchFiles();
+    } catch (error) {
+      console.error("Error deleting file:", error);
+      alert("Failed to delete file. Please try again.");
+    }
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    try {
+      const selectedFiles = event.target.files;
+      if (!selectedFiles || selectedFiles.length === 0) return;
+      
+      console.log(`Starting upload of ${selectedFiles.length} file(s)...`);
+      
+      const uploadedFiles = [];
+      
+      // Upload files ONE AT A TIME to /api/upload endpoint
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const file = selectedFiles[i];
+        console.log(`Uploading ${i + 1}/${selectedFiles.length}: ${file.name}`);
+        
+        // Create FormData for THIS file
+        const data = new FormData();
+        data.append("file", file); // Note: "file" (singular) for /upload endpoint
+        data.append("category", "user_upload"); // Tag as user upload (not knowledge base)
+        
+        try {
+          // Use the correct RAG ingestion endpoint
+          const resp = await fetch("http://127.0.0.1:8000/api/upload", {
+            method: "POST",
+            body: data,
+          });
+          
+          console.log(`  Response status: ${resp.status}`);
+          
+          if (!resp.ok) {
+            const errorData = await resp.json();
+            console.error(`  Failed to upload ${file.name}:`, errorData);
+            alert(`Upload failed for ${file.name}: ${errorData.detail || 'Unknown error'}`);
+            continue; // Skip to next file
+          }
+          
+          const result = await resp.json();
+          console.log(`  Upload successful!`, result);
+          uploadedFiles.push(file);
+          
+          // Add optimistic file to UI
+          setOptimisticFiles(prev => [...prev, {
+            file_id: `temp-${Date.now()}-${i}`,
+            filename: file.name,
+            status: "⏳ Processing..." // Show processing status
+          }]);
+          
+        } catch (error) {
+          console.error(`  Error uploading ${file.name}:`, error);
+          alert(`Upload failed for ${file.name}. Please try again.`);
+        }
+      }
+      
+      console.log(`Uploaded ${uploadedFiles.length}/${selectedFiles.length} files successfully`);
       
       // Reset file input to allow re-uploading
       event.target.value = "";
       
-      // Refresh the list in background (will merge with optimistic files)
-      console.log("Refreshing file list in background...");
-      fetchFiles();
+      // Wait for background processing, then refresh (try twice)
+      console.log("Waiting for background processing...");
+      setTimeout(() => {
+        console.log("Refreshing file list (first check)...");
+        fetchFiles();
+      }, 3000);
+      setTimeout(() => {
+        console.log("Refreshing file list (second check)...");
+        fetchFiles();
+      }, 8000);
       
     } catch (error) {
-      console.error("Error uploading files:", error);
+      console.error("Error in file upload handler:", error);
       alert("Upload failed. Please try again.");
       // Reset file input on error
       event.target.value = "";
@@ -187,7 +234,11 @@ const FileViewer = () => {
                 <span className={styles.fileName}>{file.filename}</span>
                 <span className={styles.fileStatus}>{file.status}</span>
               </div>
-              <span onClick={() => handleFileDelete(file.file_id)}>
+              <span 
+                onClick={() => handleFileDelete(file.file_id, file.filename)}
+                style={{ cursor: 'pointer' }}
+                title={`Delete ${file.filename}`}
+              >
                 <TrashIcon />
               </span>
             </div>

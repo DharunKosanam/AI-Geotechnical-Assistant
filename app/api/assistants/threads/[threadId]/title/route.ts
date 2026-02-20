@@ -3,10 +3,9 @@ import { openai } from "@/app/openai";
 export const runtime = "nodejs";
 
 // Generate a title for a thread based on the first message
-export async function POST(request: Request, { params }: { params: Promise<{ threadId: string }> | { threadId: string } }) {
+export async function POST(request: Request, context: any) {
   try {
-    const resolvedParams = params instanceof Promise ? await params : params;
-    const threadId = resolvedParams.threadId;
+    const { threadId } = await context.params;
     
     const { message } = await request.json();
 

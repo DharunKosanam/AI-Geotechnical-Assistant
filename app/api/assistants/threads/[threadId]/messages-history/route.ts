@@ -4,11 +4,9 @@ import { OpenAI } from "openai";
 export const runtime = "nodejs";
 
 // Get message history for a thread (for SWR polling)
-export async function GET(request, { params }) {
+export async function GET(request: Request, context: any) {
   try {
-    // Handle Next.js 14 (sync) and 15+ (async) params
-    const resolvedParams = params instanceof Promise ? await params : params;
-    const threadId = resolvedParams.threadId;
+    const { threadId } = await context.params;
 
     if (!threadId) {
       return Response.json(

@@ -4,11 +4,9 @@ import { openai } from "@/app/openai";
 export const runtime = "nodejs";
 
 // Send a new message to a thread
-export async function POST(request, { params }) {
+export async function POST(request: Request, context: any) {
   try {
-    // Handle Next.js 14 (sync) and 15+ (async) params
-    const resolvedParams = params instanceof Promise ? await params : params;
-    const threadId = resolvedParams.threadId;
+    const { threadId } = await context.params;
     
     const { content } = await request.json();
 

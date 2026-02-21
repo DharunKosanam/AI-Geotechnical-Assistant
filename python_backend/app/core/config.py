@@ -35,7 +35,9 @@ USER_ID = "default-user"  # Hardcoded user ID to match Next.js implementation
 
 # CORS Origins
 CORS_ORIGINS = [
+    "https://ai-geotechnical-assistant-production.up.railway.app",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "*",
 ]
 

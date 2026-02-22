@@ -1,5 +1,6 @@
 import React, { useState, useEffect, forwardRef, useImperativeHandle } from "react";
 import styles from "./thread-list.module.css";
+import { API_ENDPOINTS } from "../config/api";
 
 const Modal = ({ show, onClose, children }: { show: boolean; onClose: () => void; children: React.ReactNode }) => {
   if (!show) return null;
@@ -77,7 +78,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const fetchThreads = async () => {
-    const response = await fetch('/api/assistants/threads/history');
+    const response = await fetch(API_ENDPOINTS.getThreadHistory());
     const data = await response.json();
     // 确保访问 threads 数组属性并进行反转
     setThreads(data.threads ? data.threads.reverse() : []);
@@ -121,7 +122,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
   
     try {
       // 1. Send delete request to backend
-      const response = await fetch('/api/assistants/threads/history', {
+      const response = await fetch(API_ENDPOINTS.deleteThread(), {
         method: 'DELETE',
         body: JSON.stringify({ 
           threadId,
@@ -161,7 +162,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
 
   const updateThreadName = async (threadId: string) => {
     try {
-      const response = await fetch('/api/assistants/threads/history', {
+      const response = await fetch(API_ENDPOINTS.updateThread(), {
         method: 'PUT',
         body: JSON.stringify({ threadId, newName: newThreadName }),
         headers: {
@@ -196,7 +197,7 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
   // 如果不是群组，则设置为群组
   if (!isGroup) {
     try {
-      const response = await fetch('/api/assistants/threads/history', {
+      const response = await fetch(API_ENDPOINTS.updateThread(), {
         method: 'PUT',
         body: JSON.stringify({ threadId, isGroup: true }),
         headers: {

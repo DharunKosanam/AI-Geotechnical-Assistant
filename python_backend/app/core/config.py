@@ -30,6 +30,8 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 if not REDIS_PASSWORD:
     raise ValueError("REDIS_PASSWORD is not set in environment variables")
 
+REDIS_USER = os.getenv("REDIS_USER", "default")
+
 # Application Constants
 USER_ID = "default-user"  # Hardcoded user ID to match Next.js implementation
 

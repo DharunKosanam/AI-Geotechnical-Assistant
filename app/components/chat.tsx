@@ -323,7 +323,7 @@ const Chat = ({
 
   // SWR polling for real-time message updates (for group conversations)
   const { data: messageData } = useSWR(
-    isGroupConversation && threadId ? `/api/assistants/threads/${threadId}/messages-history` : null,
+    isGroupConversation && threadId ? API_ENDPOINTS.getMessages(threadId) : null,
     fetcher,
     {
       refreshInterval: 3000, // Poll every 3 seconds
@@ -595,7 +595,7 @@ const Chat = ({
   const submitActionResult = async (runId: string, toolCallOutputs: any[]) => {
     try {
       const response = await fetch(
-        `/api/assistants/threads/${threadId}/actions`,
+        API_ENDPOINTS.submitActions(threadId),
         {
           method: "POST",
           headers: {
@@ -807,7 +807,8 @@ const Chat = ({
 
   // imageFileDone - show image in chat
   const handleImageFileDone = (image: any) => {
-    appendToLastMessage(`\n![${image.file_id}](/api/files/${image.file_id})\n`);
+    const backendUrl = process.env.NEXT_PUBLIC_PYTHON_API_URL || '';
+    appendToLastMessage(`\n![${image.file_id}](${backendUrl}/api/files/${image.file_id})\n`);
   }
 
   // toolCallCreated - log new tool call
@@ -938,10 +939,8 @@ const Chat = ({
       };
       annotations.forEach((annotation) => {
         if (annotation.type === 'file_path') {
-          // 使用完整的文件路径
-          const fullPath = process.env.NODE_ENV === 'development' 
-            ? `http://localhost:3000/api/files/${annotation.file_path.file_id}`
-            : `/api/files/${annotation.file_path.file_id}`;
+          const backendUrl = process.env.NEXT_PUBLIC_PYTHON_API_URL || '';
+          const fullPath = `${backendUrl}/api/files/${annotation.file_path.file_id}`;
           
           updatedLastMessage.text = updatedLastMessage.text.replaceAll(
             annotation.text,

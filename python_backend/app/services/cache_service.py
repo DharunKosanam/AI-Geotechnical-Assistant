@@ -5,7 +5,7 @@ import redis.asyncio as redis
 import hashlib
 import json
 from typing import Optional, Dict, Any
-from app.core.config import REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
+from app.core.config import REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_USER
 
 
 class RedisClient:
@@ -34,6 +34,7 @@ class RedisClient:
             self.client = redis.Redis(
                 host=REDIS_HOST,
                 port=REDIS_PORT,
+                username=REDIS_USER,
                 password=REDIS_PASSWORD,
                 decode_responses=True,
                 socket_connect_timeout=5,

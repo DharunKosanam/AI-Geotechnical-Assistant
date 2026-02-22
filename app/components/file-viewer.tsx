@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
 import styles from "./file-viewer.module.css";
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_PYTHON_API_URL || "http://127.0.0.1:8000";
+
 const TrashIcon = () => (
   <svg
     className={styles.fileDeleteIcon}
@@ -36,7 +38,7 @@ const FileViewer = () => {
     try {
       console.log("Fetching user uploaded files only...");
       // Use Python backend directly (same as upload and delete)
-      const resp = await fetch("http://127.0.0.1:8000/api/assistants/files?category=user_upload", {
+      const resp = await fetch(`${BACKEND_URL}/api/assistants/files?category=user_upload`, {
         method: "GET",
       });
       
@@ -107,7 +109,7 @@ const FileViewer = () => {
       console.log(`Deleting file: ${filename}`);
       
       // Call the new DELETE endpoint with filename (note: /api/files/delete/ prefix)
-      const resp = await fetch(`http://127.0.0.1:8000/api/files/delete/${encodeURIComponent(filename)}`, {
+      const resp = await fetch(`${BACKEND_URL}/api/files/delete/${encodeURIComponent(filename)}`, {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
@@ -160,7 +162,7 @@ const FileViewer = () => {
         
         try {
           // Use the correct RAG ingestion endpoint
-          const resp = await fetch("http://127.0.0.1:8000/api/upload", {
+          const resp = await fetch(`${BACKEND_URL}/api/upload`, {
             method: "POST",
             body: data,
           });

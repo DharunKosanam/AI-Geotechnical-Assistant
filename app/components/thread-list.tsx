@@ -59,10 +59,12 @@ const GroupIcon = () => (
 );
 
 interface Thread {
-  _id?: string; // MongoDB ID (optional)
-  threadId: string; // Changed from 'id' to 'threadId'
+  _id?: string;
+  threadId: string;
   name: string;
   isGroup: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 interface ThreadListProps {
@@ -81,7 +83,18 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
     const response = await fetch(API_ENDPOINTS.getThreadHistory());
     const data = await response.json();
     // 确保访问 threads 数组属性并进行反转
-    setThreads(data.threads ? data.threads.reverse() : []);
+    const raw: Thread[] = data.threads || [];
+    const seen = new Set<string>();
+    const unique = raw.filter((t) => {
+      if (seen.has(t.threadId)) return false;
+      seen.add(t.threadId);
+      return true;
+    });
+    unique.sort((a, b) =>
+      new Date(b.updatedAt || b.createdAt || 0).getTime() -
+      new Date(a.updatedAt || a.createdAt || 0).getTime()
+    );
+    setThreads(unique);
   };
 
   useImperativeHandle(ref, () => ({
@@ -170,11 +183,18 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
         },
       });
       if (response.ok) {
-        setThreads((prevThreads) =>
-          prevThreads.map((thread) =>
-            thread.threadId === threadId ? { ...thread, name: newThreadName } : thread
-          )
-        );
+        setThreads((prevThreads) => {
+          const updated = prevThreads.map((thread) =>
+            thread.threadId === threadId
+              ? { ...thread, name: newThreadName, updatedAt: new Date().toISOString() }
+              : thread
+          );
+          updated.sort((a, b) =>
+            new Date(b.updatedAt || b.createdAt || 0).getTime() -
+            new Date(a.updatedAt || a.createdAt || 0).getTime()
+          );
+          return updated;
+        });
         setEditingThreadId(null);
         setNewThreadName("");
       }

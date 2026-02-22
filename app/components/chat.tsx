@@ -323,10 +323,10 @@ const Chat = ({
 
   // SWR polling for real-time message updates (for group conversations)
   const { data: messageData } = useSWR(
-    isGroupConversation && threadId ? API_ENDPOINTS.getMessages(threadId) : null,
+    isGroupConversation && threadId ? API_ENDPOINTS.getChatHistory(threadId) : null,
     fetcher,
     {
-      refreshInterval: 3000, // Poll every 3 seconds
+      refreshInterval: 2000,
       revalidateOnFocus: true,
       revalidateOnReconnect: true,
     }
@@ -335,9 +335,17 @@ const Chat = ({
   // Update messages when SWR fetches new data (ONLY for group conversations)
   useEffect(() => {
     if (messageData?.messages && isGroupConversation && threadId) {
-      console.log(`[SWR] Group conversation update: ${messageData.messages.length} messages for thread ${threadId}`);
-      setMessages(messageData.messages);
-      setShouldScroll(true);
+      const parsed = messageData.messages.map((msg: any) => ({
+        role: msg.role,
+        text: msg.content?.[0]?.text?.value || msg.content || '',
+        annotations: msg.content?.[0]?.text?.annotations || []
+      }));
+      if (parsed.length > lastMessageCountRef.current) {
+        console.log(`[SWR] Group update: ${parsed.length} messages (had ${lastMessageCountRef.current})`);
+        setMessages(parsed);
+        lastMessageCountRef.current = parsed.length;
+        setShouldScroll(true);
+      }
     }
   }, [messageData, isGroupConversation, threadId]);
 
@@ -1133,30 +1141,10 @@ const Chat = ({
     if (!joinThreadInput.trim()) return;
     
     try {
-      const defaultName = getDefaultThreadName();
-      const historyEndpoint = API_ENDPOINTS.createThreadHistory();
-      const response = await fetch(historyEndpoint, {
-        method: 'POST',
-        body: JSON.stringify({ 
-          threadId: joinThreadInput,
-          name: defaultName,
-          isGroup: true 
-        }),
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
-  
-      if (!response.ok) throw new Error('Failed to join team chat');
-      
       setShowJoinModal(false);
       setJoinThreadInput('');
+      // Load the shared thread directly without saving to personal sidebar history
       handleThreadSelect(joinThreadInput, true);
-      
-      // 刷新线程列表
-      if (threadListRef.current) {
-        await threadListRef.current.fetchThreads();
-      }
     } catch (error) {
       console.error('Error joining team chat:', error);
     }

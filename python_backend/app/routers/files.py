@@ -7,8 +7,6 @@ from datetime import datetime
 from typing import Optional, List
 import io
 from bson import ObjectId
-from fastembed import TextEmbedding
-
 from app.core.config import USER_ID
 from app.core.database import files_collection
 from app.services.file_processing import (
@@ -16,12 +14,9 @@ from app.services.file_processing import (
     needs_image_conversion,
     determine_media_type
 )
-from app.services.rag_service import ingest_document, delete_document
+from app.services.rag_service import ingest_document, delete_document, extract_text_from_pdf, get_embedding_model
 
 router = APIRouter(prefix="/api", tags=["files"])
-
-# Initialize embedding model
-embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
 
 @router.get("/files")
@@ -67,29 +62,27 @@ async def list_files_simple(category: Optional[str] = None):
 
 
 def extract_text_from_file(file_content: bytes, filename: str) -> str:
-    """
-    Extract text from file content (simple implementation)
-    Can be enhanced with PDF parsing, OCR, etc.
-    """
+    """Extract text from file content based on file type."""
     try:
-        # For text files
+        if filename.lower().endswith('.pdf'):
+            return extract_text_from_pdf(file_content)
+        
         if filename.endswith(('.txt', '.md', '.csv')):
             return file_content.decode('utf-8', errors='ignore')
         
-        # For PDFs and other formats, you'd need additional libraries
-        # For now, return empty string for binary files
         return ""
     except Exception as e:
-        print(f"[WARNING]  Could not extract text from {filename}: {e}")
+        print(f"[WARNING] Could not extract text from {filename}: {e}")
         return ""
 
 
 async def generate_embeddings(text: str) -> List[float]:
-    """Generate embeddings for text using FastEmbed"""
+    """Generate embeddings for text using FastEmbed (lazy-loaded model)"""
     if not text or not text.strip():
-        return [0.0] * 384  # Return zero vector for empty text
+        return [0.0] * 384
     
-    embeddings = list(embedding_model.embed([text]))
+    model = get_embedding_model()
+    embeddings = list(model.embed([text]))
     return embeddings[0].tolist()
 
 
@@ -103,12 +96,18 @@ async def process_file_ingestion(filename: str, file_content: bytes, category: s
         file_content: File content as bytes
         category: Category of the file ("user_upload" or "knowledge_base")
     """
+    import gc
     try:
         print(f"[LOADING] Background processing started for: {filename} (category: {category})")
         result = await ingest_document(filename, file_content, category)
         print(f"[OK] Background processing completed: {result}")
     except Exception as e:
         print(f"[ERROR] Background processing failed for {filename}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        del file_content
+        gc.collect()
 
 
 @router.post("/upload")

@@ -3,6 +3,7 @@ RAG (Retrieval-Augmented Generation) service for querying vector store
 """
 from typing import List, Dict, Any
 import io
+import gc
 from datetime import datetime
 import fitz  # PyMuPDF - better text extraction than pypdf
 from fastembed import TextEmbedding
@@ -174,46 +175,78 @@ def extract_text_from_pdf(file_content: bytes) -> str:
     """
     Extract text from PDF file content using PyMuPDF (better extraction quality).
     
+    Handles 'document closed' errors by saving metadata before close and
+    using per-page try-except with a fallback re-open strategy.
+    
     Args:
         file_content: PDF file content as bytes
         
     Returns:
         Extracted text from all pages
     """
+    doc = None
     try:
-        # Open PDF from bytes using PyMuPDF
         doc = fitz.open(stream=file_content, filetype="pdf")
+        total_pages = len(doc)
         
         text = ""
         empty_pages = []
+        failed_pages = []
         
-        # Extract text from each page
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            page_text = page.get_text()
-            
-            # Check if page is empty or image-based
-            if not page_text or len(page_text.strip()) == 0:
-                empty_pages.append(page_num + 1)  # 1-indexed for user display
-                print(f"      [WARNING] Page {page_num + 1} is empty or image-based (no extractable text)")
-            else:
-                text += page_text + "\n"
-        
-        # Close the document
+        for page_num in range(total_pages):
+            try:
+                page = doc[page_num]
+                page_text = page.get_text()
+                
+                if not page_text or len(page_text.strip()) == 0:
+                    empty_pages.append(page_num + 1)
+                    print(f"      [WARNING] Page {page_num + 1} is empty or image-based (no extractable text)")
+                else:
+                    text += page_text + "\n"
+            except Exception as page_err:
+                failed_pages.append(page_num + 1)
+                print(f"      [ERROR] Failed to extract page {page_num + 1}: {page_err}")
+
         doc.close()
-        
-        # Show summary if there were empty pages
+        doc = None
+
+        # Fallback: if pages failed due to 'document closed' or similar, re-open and retry
+        if failed_pages:
+            print(f"      [RETRY] Re-opening PDF to retry {len(failed_pages)} failed pages...")
+            try:
+                retry_doc = fitz.open(stream=file_content, filetype="pdf")
+                for page_num_1indexed in failed_pages:
+                    try:
+                        page = retry_doc[page_num_1indexed - 1]
+                        page_text = page.get_text()
+                        if page_text and page_text.strip():
+                            text += page_text + "\n"
+                            print(f"      [OK] Retry succeeded for page {page_num_1indexed}")
+                        else:
+                            empty_pages.append(page_num_1indexed)
+                    except Exception as retry_err:
+                        print(f"      [ERROR] Retry also failed for page {page_num_1indexed}: {retry_err}")
+                retry_doc.close()
+            except Exception as reopen_err:
+                print(f"      [ERROR] Could not re-open PDF for retry: {reopen_err}")
+
         if empty_pages:
-            if len(empty_pages) == len(doc):
-                print(f"      [ERROR] All {len(doc)} pages are empty or image-based!")
+            if len(empty_pages) >= total_pages:
+                print(f"      [ERROR] All {total_pages} pages are empty or image-based!")
                 print(f"      This PDF may contain only images or scanned documents.")
             else:
-                print(f"      [INFO] {len(empty_pages)} out of {len(doc)} pages were empty/image-based: {empty_pages[:10]}")
+                print(f"      [INFO] {len(empty_pages)} out of {total_pages} pages were empty/image-based: {empty_pages[:10]}")
         
         return text.strip()
     except Exception as e:
         print(f"[ERROR] Error extracting text from PDF with PyMuPDF: {e}")
         raise ValueError(f"Failed to extract text from PDF: {str(e)}")
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
@@ -381,15 +414,23 @@ async def ingest_document(filename: str, file_content: bytes, category: str = "u
     # Step 5: Insert into MongoDB
     print("  5. Inserting into MongoDB...")
     result = await files_collection.insert_many(documents)
-    print(f"      Inserted {len(result.inserted_ids)} documents")
+    inserted_count = len(result.inserted_ids)
+    print(f"      Inserted {inserted_count} documents")
     
     print(f"[OK] Document ingestion complete: {filename}")
     
+    total_characters = len(text)
+    chunks_created = len(chunks)
+    
+    # Free large objects before returning
+    del text, chunks, embeddings_list, embeddings, documents
+    gc.collect()
+    
     return {
         "filename": filename,
-        "chunks_created": len(chunks),
-        "total_characters": len(text),
-        "documents_inserted": len(result.inserted_ids),
+        "chunks_created": chunks_created,
+        "total_characters": total_characters,
+        "documents_inserted": inserted_count,
         "status": "success"
     }
 

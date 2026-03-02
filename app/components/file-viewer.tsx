@@ -161,7 +161,6 @@ const FileViewer = () => {
         data.append("category", "user_upload"); // Tag as user upload (not knowledge base)
         
         try {
-          // Use the correct RAG ingestion endpoint
           const resp = await fetch(`${BACKEND_URL}/api/upload`, {
             method: "POST",
             body: data,
@@ -170,22 +169,31 @@ const FileViewer = () => {
           console.log(`  Response status: ${resp.status}`);
           
           if (!resp.ok) {
-            const errorData = await resp.json();
+            const errorData = await resp.json().catch(() => ({ detail: "Unknown error" }));
             console.error(`  Failed to upload ${file.name}:`, errorData);
             alert(`Upload failed for ${file.name}: ${errorData.detail || 'Unknown error'}`);
-            continue; // Skip to next file
+            continue;
           }
           
           const result = await resp.json();
-          console.log(`  Upload successful!`, result);
+          console.log(`  Upload response:`, result);
+          
+          const hasProcessingError = result.status === "processing_failed" || result.error;
           uploadedFiles.push(file);
           
-          // Add optimistic file to UI
           setOptimisticFiles(prev => [...prev, {
             file_id: `temp-${Date.now()}-${i}`,
             filename: file.name,
-            status: "⏳ Processing..." // Show processing status
+            status: hasProcessingError
+              ? `Warning: ${result.error || "Processing issue - file may be partially indexed"}`
+              : "Processing..."
           }]);
+          
+          if (hasProcessingError) {
+            alert(
+              `"${file.name}" was uploaded but processing had issues:\n${result.error || "PDF text extraction may have partially failed."}\n\nThe file is saved but search results may be incomplete.`
+            );
+          }
           
         } catch (error) {
           console.error(`  Error uploading ${file.name}:`, error);

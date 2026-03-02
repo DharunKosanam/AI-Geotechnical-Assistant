@@ -36,14 +36,7 @@ const fileApiKey = loadEnvFromFile();
 // Use file key if available, otherwise fall back to process.env
 const apiKey = fileApiKey || process.env.OPENAI_API_KEY;
 
-if (!apiKey) {
-  // Don't crash the server - just warn. Some routes (thread history) use MongoDB only
-  // and don't need OpenAI. Only operations that actually call OpenAI will fail gracefully.
-  console.warn(
-    "[OpenAI] OPENAI_API_KEY is not set. OpenAI-dependent features will be unavailable. " +
-    "Thread management via MongoDB will still work."
-  );
-}
+// OpenAI key check disabled - using custom Python/Groq backend
 
 // Log which key is being used for debugging
 if (apiKey && process.env.NODE_ENV === 'development') {

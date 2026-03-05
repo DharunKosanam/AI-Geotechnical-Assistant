@@ -33,7 +33,8 @@ def get_llm() -> Groq:
         model="qwen/qwen3-32b",
         api_key=groq_api_key,
         temperature=0.3,
-        max_tokens=1000  # Add reasonable token limit
+        max_tokens=4096,
+        request_timeout=60.0,
     )
     
     return llm

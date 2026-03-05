@@ -290,6 +290,7 @@ const Chat = ({
   
   const [shouldScroll, setShouldScroll] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   // Track if this is a new thread that hasn't had a message sent yet
   const [isNewThread, setIsNewThread] = useState(false);
   // Track polling interval for real-time updates
@@ -302,10 +303,16 @@ const Chat = ({
     return new Date().toLocaleString();
   };
 
+  const isNearBottom = (): boolean => {
+    const container = messagesContainerRef.current;
+    if (!container) return true;
+    const threshold = 100;
+    return container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+  };
+
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     if (shouldScroll) {
-      // Use setTimeout to ensure DOM has updated
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
         setShouldScroll(false);
@@ -344,7 +351,7 @@ const Chat = ({
         console.log(`[SWR] Group update: ${parsed.length} messages (had ${lastMessageCountRef.current})`);
         setMessages(parsed);
         lastMessageCountRef.current = parsed.length;
-        setShouldScroll(true);
+        if (isNearBottom()) setShouldScroll(true);
       }
     }
   }, [messageData, isGroupConversation, threadId]);
@@ -408,6 +415,76 @@ const Chat = ({
   };
 
   const handleSSEStream = async (readableStream: ReadableStream) => {
+    const processSSEMessage = async (message: string) => {
+      if (!message.trim()) return;
+
+      const lines = message.split('\n');
+      let eventType = '';
+      let data = '';
+
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventType = line.substring(6).trim();
+        } else if (line.startsWith('data:')) {
+          data = line.substring(5).trim();
+        }
+      }
+
+      if (!data) return;
+
+      if (data === '[DONE]') {
+        console.log("Stream completed with [DONE] signal");
+        setInputDisabled(false);
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(data);
+        console.log("📩 SSE Event:", eventType, "Data:", parsed);
+
+        if (eventType === 'thread.message.created' || parsed.object === 'thread.message') {
+          if (parsed.role === 'assistant') {
+            appendMessage("assistant", "");
+            if (isNearBottom()) setShouldScroll(true);
+          }
+        } else if (eventType === 'thread.message.delta' || parsed.object === 'thread.message.delta') {
+          if (parsed.delta?.content) {
+            for (const content of parsed.delta.content) {
+              if (content.type === 'text' && content.text?.value) {
+                appendToLastMessage(content.text.value);
+              }
+            }
+          }
+        } else if (eventType === 'thread.run.completed' || parsed.status === 'completed') {
+          console.log("Run completed");
+          setInputDisabled(false);
+        } else if (eventType === 'thread.run.failed' || parsed.status === 'failed') {
+          console.error("Run failed:", parsed);
+          setInputDisabled(false);
+          const errorMsg = parsed.last_error?.message || "The assistant run failed. Please try again.";
+          appendMessage("assistant", `\n\n[Error: ${errorMsg}]`);
+        } else if (eventType === 'thread.run.requires_action') {
+          if (parsed.required_action?.type === 'submit_tool_outputs') {
+            const toolCalls = parsed.required_action.submit_tool_outputs.tool_calls;
+            const toolCallOutputs = await Promise.all(
+              toolCalls.map(async (toolCall: RequiredActionFunctionToolCall) => {
+                const result = await functionCallHandler(toolCall);
+                return { output: result, tool_call_id: toolCall.id };
+              })
+            );
+            setInputDisabled(true);
+            await submitActionResult(parsed.id, toolCallOutputs);
+          }
+        } else if (parsed.error) {
+          console.error("Stream error:", parsed.error);
+          appendMessage("assistant", `\n\n[Error: ${parsed.error}]`);
+          setInputDisabled(false);
+        }
+      } catch (parseError) {
+        console.error("Error parsing SSE data:", parseError, "Data:", data);
+      }
+    };
+
     try {
       const reader = readableStream.getReader();
       const decoder = new TextDecoder();
@@ -415,99 +492,26 @@ const Chat = ({
 
       while (true) {
         const { done, value } = await reader.read();
-        
+
         if (done) {
+          // Flush the decoder and process any remaining buffer data
+          buffer += decoder.decode();
+          const remaining = buffer.split('\n\n');
+          for (const msg of remaining) {
+            await processSSEMessage(msg);
+          }
           console.log("Stream ended");
           setInputDisabled(false);
           break;
         }
 
-        // Decode the chunk and add to buffer
         buffer += decoder.decode(value, { stream: true });
 
-        // Process complete SSE messages (separated by double newlines)
         const messages = buffer.split('\n\n');
-        
-        // Keep the last incomplete message in the buffer
         buffer = messages.pop() || '';
 
         for (const message of messages) {
-          if (!message.trim()) continue;
-
-          // Parse SSE message
-          const lines = message.split('\n');
-          let eventType = '';
-          let data = '';
-
-          for (const line of lines) {
-            if (line.startsWith('event:')) {
-              eventType = line.substring(6).trim();
-            } else if (line.startsWith('data:')) {
-              data = line.substring(5).trim();
-            }
-          }
-
-          if (!data) continue;
-
-          // Handle [DONE] signal from OpenAI
-          if (data === '[DONE]') {
-            console.log("Stream completed with [DONE] signal");
-            setInputDisabled(false);
-            continue;
-          }
-
-          try {
-            const parsed = JSON.parse(data);
-            console.log("📩 SSE Event:", eventType, "Data:", parsed);
-            
-            // Handle different event types
-            if (eventType === 'thread.message.created' || parsed.object === 'thread.message') {
-              // Message created
-              if (parsed.role === 'assistant') {
-                appendMessage("assistant", "");
-                setShouldScroll(true);
-              }
-            } else if (eventType === 'thread.message.delta' || parsed.object === 'thread.message.delta') {
-              // Message delta - update the last message
-              if (parsed.delta?.content) {
-                for (const content of parsed.delta.content) {
-                  if (content.type === 'text' && content.text?.value) {
-                    appendToLastMessage(content.text.value);
-                  }
-                }
-              }
-            } else if (eventType === 'thread.run.completed' || parsed.status === 'completed') {
-              // Run completed
-              console.log("Run completed");
-              setInputDisabled(false);
-            } else if (eventType === 'thread.run.failed' || parsed.status === 'failed') {
-              // Run failed
-              console.error("Run failed:", parsed);
-              setInputDisabled(false);
-              const errorMsg = parsed.last_error?.message || "The assistant run failed. Please try again.";
-              appendMessage("assistant", `\n\n[Error: ${errorMsg}]`);
-            } else if (eventType === 'thread.run.requires_action') {
-              // Handle required actions (tool calls)
-              if (parsed.required_action?.type === 'submit_tool_outputs') {
-                const toolCalls = parsed.required_action.submit_tool_outputs.tool_calls;
-                const toolCallOutputs = await Promise.all(
-                  toolCalls.map(async (toolCall: RequiredActionFunctionToolCall) => {
-                    const result = await functionCallHandler(toolCall);
-                    return { output: result, tool_call_id: toolCall.id };
-                  })
-                );
-                setInputDisabled(true);
-                await submitActionResult(parsed.id, toolCallOutputs);
-              }
-            } else if (parsed.error) {
-              // Error in response
-              console.error("Stream error:", parsed.error);
-              appendMessage("assistant", `\n\n[Error: ${parsed.error}]`);
-              setInputDisabled(false);
-            }
-          } catch (parseError) {
-            console.error("Error parsing SSE data:", parseError, "Data:", data);
-          }
+          await processSSEMessage(message);
         }
       }
     } catch (error) {
@@ -800,7 +804,7 @@ const Chat = ({
   // textCreated - create new assistant message
   const handleTextCreated = () => {
     appendMessage("assistant", "");
-    setShouldScroll(true); // 添加新消息时滚动
+    if (isNearBottom()) setShouldScroll(true);
   };
 
   // textDelta - append text to last assistant message
@@ -1035,7 +1039,7 @@ const Chat = ({
           setMessages(newMessages);
           lastMessageCountRef.current = newMessages.length;
           setIsNewThread(newMessages.length === 0);
-          setShouldScroll(true);
+          if (isNearBottom()) setShouldScroll(true);
         }
       }
     } catch (error) {
@@ -1160,7 +1164,7 @@ const Chat = ({
         />
       </div>
     <div className={styles.chatContainer}>
-      <div className={styles.messages}>
+      <div className={styles.messages} ref={messagesContainerRef}>
         {!threadId ? (
           <WelcomeMessage />
         ) : (

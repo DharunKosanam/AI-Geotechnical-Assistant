@@ -288,37 +288,54 @@ const Chat = ({
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinThreadInput, setJoinThreadInput] = useState('');
   
-  const [shouldScroll, setShouldScroll] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
-  // Track if this is a new thread that hasn't had a message sent yet
   const [isNewThread, setIsNewThread] = useState(false);
-  // Track polling interval for real-time updates
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  // Track last message count to detect new messages
   const lastMessageCountRef = useRef<number>(0);
 
-  // 添加一个生成默认名称的函数
+  // --- Scroll tracking refs (never cause re-renders) ---
+  // Updated on every scroll event via passive listener so the value is always fresh.
+  const isAtBottomRef = useRef(true);
+  // Set to true before a state update that MUST scroll (user send, thread switch).
+  const shouldForceScrollRef = useRef(false);
+
   const getDefaultThreadName = () => {
     return new Date().toLocaleString();
   };
 
-  const isNearBottom = (): boolean => {
-    const container = messagesContainerRef.current;
-    if (!container) return true;
-    const threshold = 100;
-    return container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  // Auto-scroll to bottom when messages change
+  // Passive scroll listener keeps isAtBottomRef in sync without re-renders
   useEffect(() => {
-    if (shouldScroll) {
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-        setShouldScroll(false);
-      }, 100);
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      const threshold = 50;
+      isAtBottomRef.current =
+        container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+    };
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [threadId]);
+
+  // Smart auto-scroll: single decision point after every messages render
+  useEffect(() => {
+    if (messages.length === 0) return;
+
+    if (shouldForceScrollRef.current) {
+      shouldForceScrollRef.current = false;
+      requestAnimationFrame(() => scrollToBottom());
+      return;
     }
-  }, [shouldScroll]);
+
+    // Only follow new content if the user was already at the bottom
+    if (isAtBottomRef.current) {
+      requestAnimationFrame(() => scrollToBottom());
+    }
+  }, [messages]);
 
 
   // SWR fetcher function for message history
@@ -351,7 +368,6 @@ const Chat = ({
         console.log(`[SWR] Group update: ${parsed.length} messages (had ${lastMessageCountRef.current})`);
         setMessages(parsed);
         lastMessageCountRef.current = parsed.length;
-        if (isNearBottom()) setShouldScroll(true);
       }
     }
   }, [messageData, isGroupConversation, threadId]);
@@ -445,7 +461,6 @@ const Chat = ({
         if (eventType === 'thread.message.created' || parsed.object === 'thread.message') {
           if (parsed.role === 'assistant') {
             appendMessage("assistant", "");
-            if (isNearBottom()) setShouldScroll(true);
           }
         } else if (eventType === 'thread.message.delta' || parsed.object === 'thread.message.delta') {
           if (parsed.delta?.content) {
@@ -585,7 +600,6 @@ const Chat = ({
       console.log("📚 Sources:", sources);
       
       appendMessage("assistant", fullResponse);
-      if (isNearBottom()) setShouldScroll(true);
       setInputDisabled(false);
 
       // Generate title for first message in new thread
@@ -711,6 +725,7 @@ const Chat = ({
         // 5. Now send the message with the new threadId
         const firstMessageText = messageText;
         
+        shouldForceScrollRef.current = true;
         setMessages((prevMessages) => {
           const newMessages: MessageProps[] = [
             ...prevMessages,
@@ -719,7 +734,6 @@ const Chat = ({
           lastMessageCountRef.current = newMessages.length;
           return newMessages;
         });
-        setShouldScroll(true);
         
         // Send message immediately with new thread ID
         await sendMessage(messageText, newThreadId);
@@ -778,6 +792,7 @@ const Chat = ({
         return;
       }
     } else {
+      shouldForceScrollRef.current = true;
       setMessages((prevMessages) => {
         const newMessages: MessageProps[] = [
           ...prevMessages,
@@ -786,7 +801,6 @@ const Chat = ({
         lastMessageCountRef.current = newMessages.length;
         return newMessages;
       });
-      setShouldScroll(true);
 
       sendMessage(messageText);
     }
@@ -797,7 +811,6 @@ const Chat = ({
   // textCreated - create new assistant message
   const handleTextCreated = () => {
     appendMessage("assistant", "");
-    if (isNearBottom()) setShouldScroll(true);
   };
 
   // textDelta - append text to last assistant message
@@ -1023,7 +1036,7 @@ const Chat = ({
         lastMessageCountRef.current = newMessages.length;
         setIsNewThread(newMessages.length === 0);
         if (newMessages.length > 0) {
-          setShouldScroll(true);
+          shouldForceScrollRef.current = true;
         }
       } else {
         // On polling, only update if backend has MORE messages than local state
@@ -1032,7 +1045,6 @@ const Chat = ({
           setMessages(newMessages);
           lastMessageCountRef.current = newMessages.length;
           setIsNewThread(newMessages.length === 0);
-          if (isNearBottom()) setShouldScroll(true);
         }
       }
     } catch (error) {

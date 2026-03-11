@@ -7,9 +7,11 @@ from app.core.config import MONGODB_URI
 # Initialize MongoDB client
 mongo_client = AsyncIOMotorClient(
     MONGODB_URI,
-    maxPoolSize=10,
-    minPoolSize=2,
-    maxIdleTimeMS=30000
+    maxPoolSize=50,
+    minPoolSize=5,
+    maxIdleTimeMS=30000,
+    connectTimeoutMS=10000,
+    serverSelectionTimeoutMS=10000
 )
 
 # Database and collections

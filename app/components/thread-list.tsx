@@ -1,4 +1,4 @@
-import React, { useState, useEffect, forwardRef, useImperativeHandle } from "react";
+import React, { useState, useEffect, forwardRef, useImperativeHandle, useMemo } from "react";
 import styles from "./thread-list.module.css";
 import { API_ENDPOINTS } from "../config/api";
 
@@ -238,10 +238,24 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
 };
 
 
+  const sortedUniqueThreads = useMemo(() => {
+    const seen = new Set<string>();
+    return threads
+      .filter((t) => {
+        if (seen.has(t.threadId)) return false;
+        seen.add(t.threadId);
+        return true;
+      })
+      .sort((a, b) =>
+        new Date(b.updatedAt || b.createdAt || 0).getTime() -
+        new Date(a.updatedAt || a.createdAt || 0).getTime()
+      );
+  }, [threads]);
+
   return (
     <div className={styles.sidebar}>
       <h3>Conversation History</h3>
-      {threads.map((thread) => (
+      {sortedUniqueThreads.map((thread) => (
         <div
           key={thread.threadId}
           className={`${styles.threadItem} ${thread.threadId === currentThreadId ? styles.active : ''}`}

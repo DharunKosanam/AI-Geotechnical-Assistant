@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import useSWR from "swr";
 import styles from "./chat.module.css";
 import { AssistantStream } from "openai/lib/AssistantStream";
@@ -584,9 +584,8 @@ const Chat = ({
       console.log("✅ Answer extracted:", answer.substring(0, 100) + "...");
       console.log("📚 Sources:", sources);
       
-      // Add assistant's response to messages
       appendMessage("assistant", fullResponse);
-      setShouldScroll(true);
+      if (isNearBottom()) setShouldScroll(true);
       setInputDisabled(false);
 
       // Generate title for first message in new thread
@@ -668,8 +667,12 @@ const Chat = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userInput.trim()) return;
-    
+    if (!userInput.trim() || inputDisabled) return;
+
+    const messageText = userInput;
+    setUserInput("");
+    setInputDisabled(true);
+
     // If no thread exists, create one first
     if (!threadId) {
       try {
@@ -706,25 +709,20 @@ const Chat = ({
         }
         
         // 5. Now send the message with the new threadId
-        // Need to use newThreadId directly since state may not have updated yet
-        const firstMessageText = userInput; // Save for title generation
+        const firstMessageText = messageText;
         
-        // FIX: Append to messages instead of replacing (same pattern as line 607)
         setMessages((prevMessages) => {
           const newMessages: MessageProps[] = [
             ...prevMessages,
-            { role: "user" as const, text: userInput }
+            { role: "user" as const, text: messageText }
           ];
-          // Update ref to prevent polling from overwriting
           lastMessageCountRef.current = newMessages.length;
           return newMessages;
         });
-        setUserInput("");
-        setInputDisabled(true);
         setShouldScroll(true);
         
         // Send message immediately with new thread ID
-        await sendMessage(userInput, newThreadId);
+        await sendMessage(messageText, newThreadId);
         
         // 6. Generate title for the new thread
         try {
@@ -776,26 +774,21 @@ const Chat = ({
         
       } catch (error) {
         console.error('Failed to create thread:', error);
+        setInputDisabled(false);
         return;
       }
     } else {
-      // Thread exists, just send message normally
-      // CRITICAL: Add user message to state FIRST, then send to API
       setMessages((prevMessages) => {
         const newMessages: MessageProps[] = [
           ...prevMessages,
-          { role: "user" as const, text: userInput },
+          { role: "user" as const, text: messageText },
         ];
-        // Update ref to prevent polling from overwriting
         lastMessageCountRef.current = newMessages.length;
         return newMessages;
       });
-      setUserInput("");
-      setInputDisabled(true);
       setShouldScroll(true);
-      
-      // Send after adding to state
-      sendMessage(userInput);
+
+      sendMessage(messageText);
     }
   };
 
@@ -1154,6 +1147,16 @@ const Chat = ({
     }
   };
 
+  const deduplicatedMessages = useMemo(() => {
+    const result: MessageProps[] = [];
+    for (const msg of messages) {
+      const last = result[result.length - 1];
+      if (last && last.role === msg.role && last.text === msg.text) continue;
+      result.push(msg);
+    }
+    return result;
+  }, [messages]);
+
   return (
     <div className={styles.container}>
       <div className={styles.leftPanel}>
@@ -1169,8 +1172,8 @@ const Chat = ({
           <WelcomeMessage />
         ) : (
           <>
-            {messages.map((msg, index) => (
-              <Message key={index} role={msg.role} text={msg.text} annotations={msg.annotations} />
+            {deduplicatedMessages.map((msg, index) => (
+              <Message key={`${msg.role}-${index}-${msg.text.length}`} role={msg.role} text={msg.text} annotations={msg.annotations} />
             ))}
             <div ref={messagesEndRef} />
           </>

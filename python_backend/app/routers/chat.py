@@ -78,6 +78,7 @@ async def chat_with_rag(request: RAGChatRequest):
             print("[WARNING] No threadId provided - messages will NOT be saved!")
         
         # Step 0: Check Redis cache
+        redis_client = None
         cached_answer = None
         try:
             redis_client = get_redis_client()
@@ -187,11 +188,12 @@ async def chat_with_rag(request: RAGChatRequest):
         else:
             print("[SKIP] Not saving messages - no threadId provided")
         
-        # Step 5: Cache the answer
-        try:
-            await redis_client.set_cached_answer(request.query, clean_answer, ttl=3600)
-        except Exception as cache_error:
-            print(f"[WARNING]  Failed to cache answer: {cache_error}")
+        # Step 5: Cache the answer (skip if Redis unavailable)
+        if redis_client:
+            try:
+                await redis_client.set_cached_answer(request.query, clean_answer, ttl=3600)
+            except Exception as cache_error:
+                print(f"[WARNING] Failed to cache answer: {cache_error}")
         
         # Step 6: Return simple JSON response
         return RAGChatResponse(

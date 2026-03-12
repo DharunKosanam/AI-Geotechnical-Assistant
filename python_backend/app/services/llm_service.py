@@ -121,8 +121,11 @@ Please provide a detailed answer:"""
         # Also remove any remaining XML-style tags
         cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
         
-        # Strip leading/trailing whitespace and normalize whitespace
-        final_answer = ' '.join(cleaned_answer.split()).strip()
+        # Preserve markdown structure: strip each line individually,
+        # then collapse runs of 3+ blank lines down to one blank line.
+        lines = cleaned_answer.split('\n')
+        final_answer = '\n'.join(line.strip() for line in lines)
+        final_answer = re.sub(r'\n{3,}', '\n\n', final_answer).strip()
         
         print(f"   [CLEAN] Cleaned answer length: {len(final_answer)} chars")
         

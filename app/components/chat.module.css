@@ -74,7 +74,7 @@
   display: flex;
   flex-direction: column;
   order: 2;
-  white-space: pre-wrap;
+  overflow-anchor: auto;
 }
 
 .userMessage,
@@ -100,10 +100,13 @@
   align-self: flex-end;
   color: #fff;
   background-color: #000;
+  white-space: pre-wrap;
 }
 
 .assistantMessage {
   background-color: #efefef;
+  white-space: normal;
+  line-height: 1.6;
 }
 
 .codeMessage {
@@ -111,6 +114,7 @@
   background-color: #e9e9e9;
   font-family: monospace;
   counter-reset: line;
+  white-space: pre-wrap;
 }
 
 .codeMessage > div {

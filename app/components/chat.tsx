@@ -304,8 +304,13 @@ const Chat = ({
     return new Date().toLocaleString();
   };
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  const scrollToBottom = (smooth = false) => {
+    if (smooth) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    } else {
+      const container = messagesContainerRef.current;
+      if (container) container.scrollTop = container.scrollHeight;
+    }
   };
 
   // Passive scroll listener keeps isAtBottomRef in sync without re-renders
@@ -327,13 +332,13 @@ const Chat = ({
 
     if (shouldForceScrollRef.current) {
       shouldForceScrollRef.current = false;
-      requestAnimationFrame(() => scrollToBottom());
+      requestAnimationFrame(() => scrollToBottom(true));
       return;
     }
 
-    // Only follow new content if the user was already at the bottom
+    // Instant (non-animated) pin when following the stream — no competing animations
     if (isAtBottomRef.current) {
-      requestAnimationFrame(() => scrollToBottom());
+      requestAnimationFrame(() => scrollToBottom(false));
     }
   }, [messages]);
 

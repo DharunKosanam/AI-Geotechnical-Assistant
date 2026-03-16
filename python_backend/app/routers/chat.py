@@ -13,7 +13,7 @@ from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse
 from app.core.config import USER_ID
 from app.core.database import conversations_collection, files_collection, messages_collection
 from app.services.llm_service import get_llm, generate_answer_with_groq
-from app.services.rag_service import query_with_context, query_vector_store
+from app.services.rag_service import query_with_context, query_vector_store, get_clean_title
 from app.services.cache_service import get_redis_client
 
 router = APIRouter(tags=["chat"])
@@ -124,13 +124,19 @@ async def chat_with_rag(request: RAGChatRequest):
         chunks = await query_vector_store(request.query, top_k=8)
         print(f"[SEARCH] Retrieved {len(chunks)} total chunks (user uploads prioritized)")
         
-        # Step 2: Format context and extract sources
+        # Step 2: Format context with academic titles and extract unique sources
         if chunks and len(chunks) > 0:
             context = "\n\n".join([
-                f"[Source: {chunk['filename']}]\n{chunk['text']}"
+                f"[Source: {get_clean_title(chunk['filename'])}]\n{chunk['text']}"
                 for chunk in chunks
             ])
-            sources = list(set([chunk['filename'] for chunk in chunks]))
+            seen_titles = set()
+            sources = []
+            for chunk in chunks:
+                title = get_clean_title(chunk['filename'])
+                if title not in seen_titles:
+                    seen_titles.add(title)
+                    sources.append(title)
             print(f"   Sources: {', '.join(sources)}")
         else:
             context = ""

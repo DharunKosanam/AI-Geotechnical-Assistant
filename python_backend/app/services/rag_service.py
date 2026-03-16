@@ -1,6 +1,7 @@
 """
 RAG (Retrieval-Augmented Generation) service for querying vector store
 """
+import re
 from typing import List, Dict, Any
 import io
 import gc
@@ -9,6 +10,44 @@ import fitz  # PyMuPDF - better text extraction than pypdf
 from fastembed import TextEmbedding
 from app.core.database import files_collection
 from app.core.config import USER_ID
+
+
+# ---------------------------------------------------------------------------
+# Academic citation title mapping
+# Maps raw PDF filenames → clean "Author (Year) - Title" references.
+# Unknown filenames are auto-cleaned at runtime by get_clean_title().
+# ---------------------------------------------------------------------------
+FILENAME_TO_TITLE: Dict[str, str] = {
+    "StrengthanddilatancyofsandsBolton1986discussion1987.pdf":
+        "Bolton (1986) - Strength and Dilatancy of Sands",
+    "Bonelli (2013) Book-Erosion in geomechanics ap.pdf":
+        "Bonelli (2013) - Erosion in Geomechanics",
+    "Applications of enzyme induced carbonate precipitation (EICP) for soil_2015_Hamdan.pdf":
+        "Hamdan (2015) - Applications of EICP for Soil Improvement",
+    "Critical-State-Of-Soil-Mechanics-Schofield-Wroth.pdf":
+        "Schofield & Wroth - Critical State Soil Mechanics",
+    "Scour effects on the response of laterally loaded piles considering stress-Chenglin.pdf":
+        "Chenglin et al. - Scour Effects on Laterally Loaded Piles",
+}
+
+
+def get_clean_title(filename: str) -> str:
+    """
+    Convert a raw PDF filename into a professional academic citation title.
+
+    Checks the curated FILENAME_TO_TITLE mapping first.  If no match is
+    found, strips the extension, replaces separators with spaces, and
+    returns a human-readable fallback.
+    """
+    if filename in FILENAME_TO_TITLE:
+        return FILENAME_TO_TITLE[filename]
+
+    # Auto-generate from filename
+    name = filename.rsplit(".", 1)[0] if "." in filename else filename
+    name = name.replace("_", " ").replace("-", " ")
+    # Collapse multiple spaces
+    name = " ".join(name.split())
+    return name
 
 
 # Initialize embedding model lazily to avoid blocking on import

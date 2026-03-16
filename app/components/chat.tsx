@@ -326,21 +326,43 @@ const Chat = ({
     return () => container.removeEventListener("scroll", onScroll);
   }, [threadId]);
 
-  // Smart auto-scroll: single decision point after every messages render
+  // MutationObserver auto-scroll: watches the DOM for any layout changes
+  // (new messages, streaming text, late Markdown/image renders) and scrolls
+  // only when the user is already at the bottom or a forced scroll is pending.
+  // If the user has scrolled up, the observer skips scrolling entirely.
   useEffect(() => {
-    if (messages.length === 0) return;
+    const container = messagesContainerRef.current;
+    if (!container) return;
 
-    if (shouldForceScrollRef.current) {
-      shouldForceScrollRef.current = false;
-      requestAnimationFrame(() => scrollToBottom(true));
-      return;
-    }
+    let rafId: number | null = null;
 
-    // Instant (non-animated) pin when following the stream — no competing animations
-    if (isAtBottomRef.current) {
-      requestAnimationFrame(() => scrollToBottom(false));
-    }
-  }, [messages]);
+    const observer = new MutationObserver(() => {
+      if (rafId !== null) return;
+
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (shouldForceScrollRef.current) {
+          shouldForceScrollRef.current = false;
+          scrollToBottom(true);
+          return;
+        }
+        if (isAtBottomRef.current) {
+          scrollToBottom(false);
+        }
+      });
+    });
+
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      observer.disconnect();
+    };
+  }, [threadId]);
 
 
   // SWR fetcher function for message history
@@ -1190,7 +1212,7 @@ const Chat = ({
         ) : (
           <>
             {deduplicatedMessages.map((msg, index) => (
-              <Message key={`${msg.role}-${index}-${msg.text.length}`} role={msg.role} text={msg.text} annotations={msg.annotations} />
+              <Message key={`${msg.role}-${index}`} role={msg.role} text={msg.text} annotations={msg.annotations} />
             ))}
             <div ref={messagesEndRef} />
           </>

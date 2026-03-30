@@ -66,15 +66,16 @@ class RedisClient:
         
         return f"chat:{query_hash[:16]}"  # Use first 16 chars for brevity
     
-    async def get_cached_answer(self, query: str) -> Optional[str]:
+    async def get_cached_answer(self, query: str) -> Optional[Dict[str, Any]]:
         """
-        Retrieve a cached answer for a query.
+        Retrieve a cached answer (with sources) for a query.
         
         Args:
             query: The user's question
             
         Returns:
-            Cached answer if exists, None otherwise
+            Dict with "answer" and "sources" if cached, None otherwise.
+            Falls back gracefully for legacy plain-string entries.
         """
         if not self.is_connected:
             return None
@@ -85,20 +86,27 @@ class RedisClient:
             
             if cached_data:
                 print(f"[CACHE HIT] Cache HIT for query: '{query}'")
-                return cached_data
-            print(f"[ERROR] Cache MISS for query: '{query}'")
+                try:
+                    parsed = json.loads(cached_data)
+                    if isinstance(parsed, dict) and "answer" in parsed:
+                        return parsed
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                return {"answer": cached_data, "sources": []}
+            print(f"[CACHE MISS] Cache MISS for query: '{query}'")
             return None
         except Exception as e:
             print(f"[WARNING]  Error getting from Redis cache: {e}")
             return None
     
-    async def set_cached_answer(self, query: str, answer: str, ttl: int = 3600):
+    async def set_cached_answer(self, query: str, answer: str, sources: list = None, ttl: int = 3600):
         """
-        Cache an answer for a query with TTL (Time To Live).
+        Cache an answer and its sources for a query with TTL (Time To Live).
         
         Args:
             query: The user's question
             answer: The generated answer
+            sources: List of source dicts ({title, url})
             ttl: Time to live in seconds (default: 3600 = 1 hour)
         """
         if not self.is_connected:
@@ -106,8 +114,9 @@ class RedisClient:
             
         try:
             key = self._generate_cache_key(query)
-            await self.client.setex(key, ttl, answer)
-            print(f"[OK] Cached answer for query: '{query}' with TTL {ttl}s")
+            payload = json.dumps({"answer": answer, "sources": sources or []})
+            await self.client.setex(key, ttl, payload)
+            print(f"[OK] Cached answer + {len(sources or [])} sources for query: '{query}' with TTL {ttl}s")
         except Exception as e:
             print(f"[WARNING]  Error setting to Redis cache: {e}")
     

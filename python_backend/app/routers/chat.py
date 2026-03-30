@@ -85,7 +85,9 @@ async def chat_with_rag(request: RAGChatRequest):
             cached_answer = await redis_client.get_cached_answer(request.query)
             
             if cached_answer:
-                print("[CACHED] Found cached answer")
+                cached_text = cached_answer["answer"]
+                cached_sources = cached_answer.get("sources", [])
+                print(f"[CACHED] Found cached answer with {len(cached_sources)} sources")
                 # IMPORTANT: Still save messages to DB even for cached answers
                 # so chat history works when switching threads
                 if thread_id:
@@ -103,8 +105,8 @@ async def chat_with_rag(request: RAGChatRequest):
                             "threadId": thread_id,
                             "userId": USER_ID,
                             "role": "assistant",
-                            "content": cached_answer,
-                            "sources": [],
+                            "content": cached_text,
+                            "sources": cached_sources,
                             "createdAt": datetime.now()
                         }
                         await messages_collection.insert_one(assistant_msg)
@@ -113,8 +115,8 @@ async def chat_with_rag(request: RAGChatRequest):
                         print(f"[WARNING] Failed to save cached messages: {save_err}")
                 
                 return RAGChatResponse(
-                    answer=cached_answer,
-                    sources=[]
+                    answer=cached_text,
+                    sources=cached_sources
                 )
         except Exception as cache_error:
             print(f"[WARNING]  Cache check failed: {cache_error}")
@@ -197,7 +199,7 @@ async def chat_with_rag(request: RAGChatRequest):
         # Step 5: Cache the answer (skip if Redis unavailable)
         if redis_client:
             try:
-                await redis_client.set_cached_answer(request.query, clean_answer, ttl=3600)
+                await redis_client.set_cached_answer(request.query, clean_answer, sources=sources, ttl=3600)
             except Exception as cache_error:
                 print(f"[WARNING] Failed to cache answer: {cache_error}")
         

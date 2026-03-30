@@ -214,6 +214,19 @@ const AssistantMessage = ({ text, annotations }: { text: string; annotations?: a
                   color: '#6b7280',
                   fontStyle: 'italic'
                 }} {...props} />
+              ),
+              // Open all links in a new tab
+              a: ({node, ...props}) => (
+                <a
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    color: '#2563eb',
+                    textDecoration: 'underline',
+                    cursor: 'pointer',
+                  }}
+                  {...props}
+                />
               )
             }}
           >
@@ -386,11 +399,34 @@ const Chat = ({
   // Update messages when SWR fetches new data (ONLY for group conversations)
   useEffect(() => {
     if (messageData?.messages && isGroupConversation && threadId) {
-      const parsed = messageData.messages.map((msg: any) => ({
-        role: msg.role,
-        text: msg.content?.[0]?.text?.value || msg.content || '',
-        annotations: msg.content?.[0]?.text?.annotations || []
-      }));
+      const parsed = messageData.messages.map((msg: any) => {
+        let text = msg.content?.[0]?.text?.value || msg.content || '';
+        const sources = msg.sources || [];
+        if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
+          text += "\n\n**Sources:**\n";
+          sources.forEach((source: any, index: number) => {
+            if (typeof source === "object" && source !== null && source.title && source.url) {
+              text += `${index + 1}. [${source.title}](${source.url})\n`;
+            } else if (typeof source === "string") {
+              try {
+                const parsed = JSON.parse(source);
+                if (parsed.title && parsed.url) {
+                  text += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
+                } else {
+                  text += `${index + 1}. ${source}\n`;
+                }
+              } catch {
+                text += `${index + 1}. ${source}\n`;
+              }
+            }
+          });
+        }
+        return {
+          role: msg.role,
+          text,
+          annotations: msg.content?.[0]?.text?.annotations || []
+        };
+      });
       if (parsed.length > lastMessageCountRef.current) {
         console.log(`[SWR] Group update: ${parsed.length} messages (had ${lastMessageCountRef.current})`);
         setMessages(parsed);
@@ -613,13 +649,28 @@ const Chat = ({
       const answer = data.answer || "";
       const sources = data.sources || [];
       
-      // Build the complete response with sources
+      // Build the complete response with clickable source links
       let fullResponse = answer;
       
       if (sources && sources.length > 0) {
         fullResponse += "\n\n**Sources:**\n";
-        sources.forEach((source: string, index: number) => {
-          fullResponse += `${index + 1}. ${source}\n`;
+        sources.forEach((source: any, index: number) => {
+          if (typeof source === "object" && source !== null && source.title && source.url) {
+            fullResponse += `${index + 1}. [${source.title}](${source.url})\n`;
+          } else if (typeof source === "string") {
+            try {
+              const parsed = JSON.parse(source);
+              if (parsed.title && parsed.url) {
+                fullResponse += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
+              } else {
+                fullResponse += `${index + 1}. ${source}\n`;
+              }
+            } catch {
+              fullResponse += `${index + 1}. ${source}\n`;
+            }
+          } else {
+            fullResponse += `${index + 1}. ${String(source)}\n`;
+          }
         });
       }
       
@@ -1049,11 +1100,34 @@ const Chat = ({
       }
       
       // Parse messages - handle both old format (nested content) and new format (direct content)
-      const newMessages = (data.messages || []).map((msg: any) => ({
-        role: msg.role,
-        text: msg.content?.[0]?.text?.value || msg.content || '',
-        annotations: msg.content?.[0]?.text?.annotations || []
-      }));
+      const newMessages = (data.messages || []).map((msg: any) => {
+        let text = msg.content?.[0]?.text?.value || msg.content || '';
+        const sources = msg.sources || [];
+        if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
+          text += "\n\n**Sources:**\n";
+          sources.forEach((source: any, index: number) => {
+            if (typeof source === "object" && source !== null && source.title && source.url) {
+              text += `${index + 1}. [${source.title}](${source.url})\n`;
+            } else if (typeof source === "string") {
+              try {
+                const parsed = JSON.parse(source);
+                if (parsed.title && parsed.url) {
+                  text += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
+                } else {
+                  text += `${index + 1}. ${source}\n`;
+                }
+              } catch {
+                text += `${index + 1}. ${source}\n`;
+              }
+            }
+          });
+        }
+        return {
+          role: msg.role,
+          text,
+          annotations: msg.content?.[0]?.text?.annotations || []
+        };
+      });
       
       console.log(`[LOAD] Parsed ${newMessages.length} messages for thread: ${targetThreadId}`);
       

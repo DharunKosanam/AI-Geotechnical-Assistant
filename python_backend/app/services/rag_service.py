@@ -3,6 +3,7 @@ RAG (Retrieval-Augmented Generation) service for querying vector store
 """
 import re
 from typing import List, Dict, Any
+from urllib.parse import quote
 import io
 import gc
 from datetime import datetime
@@ -31,23 +32,26 @@ FILENAME_TO_TITLE: Dict[str, str] = {
 }
 
 
-def get_clean_title(filename: str) -> str:
+def get_clean_title(filename: str) -> Dict[str, str]:
     """
-    Convert a raw PDF filename into a professional academic citation title.
+    Convert a raw PDF filename into an academic citation title and a
+    Google Scholar search URL so students can find the original paper.
+
+    Returns ``{"title": "Clean Title", "url": "https://scholar.google.com/scholar?q=…"}``.
 
     Checks the curated FILENAME_TO_TITLE mapping first.  If no match is
     found, strips the extension, replaces separators with spaces, and
     returns a human-readable fallback.
     """
     if filename in FILENAME_TO_TITLE:
-        return FILENAME_TO_TITLE[filename]
+        title = FILENAME_TO_TITLE[filename]
+    else:
+        name = filename.rsplit(".", 1)[0] if "." in filename else filename
+        name = name.replace("_", " ").replace("-", " ")
+        title = " ".join(name.split())
 
-    # Auto-generate from filename
-    name = filename.rsplit(".", 1)[0] if "." in filename else filename
-    name = name.replace("_", " ").replace("-", " ")
-    # Collapse multiple spaces
-    name = " ".join(name.split())
-    return name
+    url = f"https://scholar.google.com/scholar?q={quote(title)}"
+    return {"title": title, "url": url}
 
 
 # Initialize embedding model lazily to avoid blocking on import

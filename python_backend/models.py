@@ -107,4 +107,7 @@ class RAGChatRequest(BaseModel):
 class RAGChatResponse(BaseModel):
     """Response model for RAG chat endpoint"""
     answer: str = Field(..., description="The AI-generated answer")
-    sources: List[str] = Field(..., description="List of source filenames used")
+    sources: List[Any] = Field(
+        ...,
+        description="List of source objects ({title, url}) or legacy strings",
+    )

@@ -127,17 +127,17 @@ async def chat_with_rag(request: RAGChatRequest):
         # Step 2: Format context with academic titles and extract unique sources
         if chunks and len(chunks) > 0:
             context = "\n\n".join([
-                f"[Source: {get_clean_title(chunk['filename'])}]\n{chunk['text']}"
+                f"[Source: {get_clean_title(chunk['filename'])['title']}]\n{chunk['text']}"
                 for chunk in chunks
             ])
-            seen_titles = set()
-            sources = []
+            seen_titles: set[str] = set()
+            sources: list[dict] = []
             for chunk in chunks:
-                title = get_clean_title(chunk['filename'])
-                if title not in seen_titles:
-                    seen_titles.add(title)
-                    sources.append(title)
-            print(f"   Sources: {', '.join(sources)}")
+                info = get_clean_title(chunk["filename"])
+                if info["title"] not in seen_titles:
+                    seen_titles.add(info["title"])
+                    sources.append({"title": info["title"], "url": info["url"]})
+            print(f"   Sources: {', '.join(s['title'] for s in sources)}")
         else:
             context = ""
             sources = []

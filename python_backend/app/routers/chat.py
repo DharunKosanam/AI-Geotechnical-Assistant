@@ -158,6 +158,19 @@ async def chat_with_rag(request: RAGChatRequest):
         # The answer is already cleaned in llm_service, so use it directly
         clean_answer = answer
         
+        # Clear sources if hallucination guard triggered (off-topic refusal)
+        refusal_keywords = [
+            "outside the scope",
+            "not related to geotechnical",
+            "i'm here to help with questions related to",
+            "cannot answer",
+            "don't have information",
+            "not within my expertise",
+        ]
+        if any(kw in clean_answer.lower() for kw in refusal_keywords):
+            sources = []
+            print("[GUARD] Off-topic refusal detected - clearing sources")
+        
         print(f"    Final answer to return ({len(clean_answer)} chars)")
         
         # Step 4: Save messages to database for history

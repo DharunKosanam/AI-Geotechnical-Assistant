@@ -178,11 +178,22 @@ async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]
         kb_files = list(set([r['filename'] for r in kb_results]))
         print(f"   Files: {', '.join(kb_files[:3])}")
     
-    # STEP 3: Combine results (user uploads FIRST)
+    # STEP 3: Combine with RELEVANCE FILTERING
+    MIN_SCORE = 0.5
+
+    user_results = [r for r in user_results if r.get("score", 0) >= MIN_SCORE]
+
+    if user_results:
+        # User uploads found — only include KB results if they are highly relevant
+        # Use 0.75 threshold to prevent irrelevant paper padding
+        kb_results = [r for r in kb_results if r.get("score", 0) >= 0.75]
+    else:
+        kb_results = [r for r in kb_results if r.get("score", 0) >= MIN_SCORE]
+
     combined_results = user_results + kb_results
-    
-    print(f"[SEARCH] Combined total: {len(combined_results)} chunks")
-    print(f"   Priority: {len(user_results)} user + {len(kb_results)} knowledge base")
+
+    print(f"[SEARCH] After relevance filtering: {len(combined_results)} chunks")
+    print(f"   Kept: {len(user_results)} user + {len(kb_results)} knowledge base")
     
     return combined_results
 

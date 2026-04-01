@@ -67,6 +67,11 @@ async def generate_answer_with_groq(
 
 Your task is to answer questions accurately using the provided context from technical documents.
 
+SCOPE RULES (CRITICAL - FOLLOW STRICTLY):
+- If the user's question is NOT related to geotechnical engineering, soil mechanics, or the content of their uploaded documents, politely decline. Say: "I'm here to help with questions related to geotechnical engineering and soil mechanics. If you have a specific question about topics like soil properties, erosion mechanisms, or other geotechnical concepts, feel free to ask."
+- Do NOT attempt to answer off-topic questions. Do NOT try to loosely connect non-geotechnical questions back to geotechnical concepts.
+- If the user uploaded a document and asks about it, answer based on that document even if it is not geotechnical.
+
 Guidelines:
 - Use the provided context to answer questions
 - When citing sources inline, use the academic reference titles provided in [Source: ...] tags (e.g. "Bolton (1986)"). NEVER use raw .pdf filenames in your answer.

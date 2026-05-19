@@ -1,22 +1,50 @@
 """
-RAG (Retrieval-Augmented Generation) service for querying vector store
+RAG (Retrieval-Augmented Generation) service for querying the vector store.
+
+CHUNKING (v2 — structure-aware recursive):
+  * Page-aware PDF extraction; chunks carry page_start + section_header metadata.
+  * Recursive split priority: section headers > paragraph (\\n\\n) > line >
+    sentence > word > hard cut. Greedy-packed toward CHUNK_TARGET_SIZE,
+    capped at CHUNK_MAX_SIZE, with CHUNK_OVERLAP char tail-prefix between
+    adjacent chunks.
+  * Old v1 chunks (500-char fixed, no metadata) still work — they live in the
+    same 384-dim embedding space. New chunks are tagged chunkingVersion='v2'.
+
+RETRIEVAL:
+  * Two-stage Atlas vector search (user_upload then knowledge_base) — pool
+    sizes widen when the reranker is on so it has enough candidates to work with.
+  * Optional cross-encoder rerank (fastembed TextCrossEncoder). When enabled,
+    user + KB candidates are reranked TOGETHER on pure query relevance — the
+    explicit "user uploads first" preference is dropped in this mode by design.
+  * When disabled, falls back to the original 5/3 limits + score-floor +
+    user-first ordering.
 """
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import quote
-import io
 import gc
 from datetime import datetime
-import fitz  # PyMuPDF - better text extraction than pypdf
+
+import fitz  # PyMuPDF
 from fastembed import TextEmbedding
+
 from app.core.database import files_collection
-from app.core.config import USER_ID
+from app.core.config import (
+    USER_ID,
+    CHUNKING_VERSION,
+    CHUNK_TARGET_SIZE,
+    CHUNK_MAX_SIZE,
+    CHUNK_OVERLAP,
+    RERANKER_ENABLED,
+    RERANKER_MODEL,
+    RERANK_TOP_K,
+    PRE_RERANK_POOL_USER,
+    PRE_RERANK_POOL_KB,
+)
 
 
 # ---------------------------------------------------------------------------
 # Academic citation title mapping
-# Maps raw PDF filenames → clean "Author (Year) - Title" references.
-# Unknown filenames are auto-cleaned at runtime by get_clean_title().
 # ---------------------------------------------------------------------------
 FILENAME_TO_TITLE: Dict[str, str] = {
     "StrengthanddilatancyofsandsBolton1986discussion1987.pdf":
@@ -36,12 +64,6 @@ def get_clean_title(filename: str) -> Dict[str, str]:
     """
     Convert a raw PDF filename into an academic citation title and a
     Google Scholar search URL so students can find the original paper.
-
-    Returns ``{"title": "Clean Title", "url": "https://scholar.google.com/scholar?q=…"}``.
-
-    Checks the curated FILENAME_TO_TITLE mapping first.  If no match is
-    found, strips the extension, replaces separators with spaces, and
-    returns a human-readable fallback.
     """
     if filename in FILENAME_TO_TITLE:
         title = FILENAME_TO_TITLE[filename]
@@ -54,11 +76,15 @@ def get_clean_title(filename: str) -> Dict[str, str]:
     return {"title": title, "url": url}
 
 
-# Initialize embedding model lazily to avoid blocking on import
+# ---------------------------------------------------------------------------
+# Lazy-loaded models (embedding + reranker)
+# ---------------------------------------------------------------------------
 _embedding_model = None
+_reranker_model = None
+
 
 def get_embedding_model():
-    """Get or initialize the embedding model (lazy loading)"""
+    """Get or initialize the embedding model (lazy loading)."""
     global _embedding_model
     if _embedding_model is None:
         print("[LOADING] Initializing embedding model (BAAI/bge-small-en-v1.5)...")
@@ -67,231 +93,77 @@ def get_embedding_model():
     return _embedding_model
 
 
-async def _search_by_category(
-    query_vector: List[float], 
-    category: str, 
-    limit: int
-) -> List[Dict[str, Any]]:
+def get_reranker():
+    """Get or initialize the cross-encoder reranker (lazy loading)."""
+    global _reranker_model
+    if _reranker_model is None:
+        # Import here so disabling the reranker via env doesn't pay this import cost
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        print(f"[LOADING] Initializing reranker ({RERANKER_MODEL})...")
+        _reranker_model = TextCrossEncoder(model_name=RERANKER_MODEL)
+        print("[OK] Reranker loaded successfully")
+    return _reranker_model
+
+
+# ---------------------------------------------------------------------------
+# PDF extraction — page-aware
+# ---------------------------------------------------------------------------
+def extract_pages_from_pdf(file_content: bytes) -> List[Tuple[int, str]]:
     """
-    Helper function to perform vector search filtered by category.
-    
-    NOTE: We search more results and filter client-side because MongoDB Atlas
-    requires 'category' to be added to vector index as filterable field.
-    This is a fallback approach that works without index changes.
-    
-    Args:
-        query_vector: The embedding vector for the query
-        category: Category to filter by ("user_upload" or "knowledge_base")
-        limit: Maximum number of results to return
-        
-    Returns:
-        List of relevant text chunks from the specified category
-    """
-    # Search more candidates since we'll filter client-side
-    search_limit = limit * 20  # Get 20x more to ensure we find enough after filtering
-    
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "embedding",
-                "queryVector": query_vector,
-                "numCandidates": search_limit * 2,
-                "limit": search_limit
-                # NOTE: Filter removed - requires index update in MongoDB Atlas
-            }
-        },
-        {
-            "$match": {
-                "category": category,  # Filter by category AFTER vector search
-                "userId": USER_ID
-            }
-        },
-        {
-            "$limit": limit  # Limit to requested number after filtering
-        },
-        {
-            "$project": {
-                "_id": 1,
-                "text": 1,
-                "filename": 1,
-                "category": 1,
-                "metadata": 1,
-                "score": {"$meta": "vectorSearchScore"}
-            }
-        }
-    ]
-    
-    results = []
-    async for doc in files_collection.aggregate(pipeline):
-        results.append({
-            "id": str(doc.get("_id")),
-            "text": doc.get("text", ""),
-            "filename": doc.get("filename", "unknown"),
-            "category": doc.get("category", "unknown"),
-            "metadata": doc.get("metadata", {}),
-            "score": doc.get("score", 0.0)
-        })
-    
-    return results[:limit]  # Ensure we return exactly 'limit' results
-
-
-async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-    """
-    Query the MongoDB Atlas Vector Store with PRIORITIZED search.
-    
-    Search Strategy:
-    1. Search user_upload files FIRST (top 5 results)
-    2. Search knowledge_base files SECOND (top 3 results)
-    3. Combine with user uploads prioritized
-    
-    This ensures user-uploaded files are ALWAYS prioritized over the large
-    knowledge base, so user-specific content isn't crowded out.
-    
-    Args:
-        query: The search query text
-        top_k: Total number of results (split between categories)
-        
-    Returns:
-        List of relevant text chunks with user uploads first
-    """
-    print(f"[SEARCH] Prioritized search for: {query[:50]}...")
-    
-    # Generate embedding for the query using FastEmbed (384 dimensions)
-    model = get_embedding_model()
-    query_embeddings = list(model.embed([query]))
-    query_vector = query_embeddings[0].tolist()
-    
-    # STEP 1: Search user uploads FIRST (prioritized)
-    print("[SEARCH] Step 1: Searching user uploads...")
-    user_results = await _search_by_category(query_vector, "user_upload", limit=5)
-    print(f"   Found {len(user_results)} chunks from user uploads")
-    if user_results:
-        user_files = list(set([r['filename'] for r in user_results]))
-        print(f"   Files: {', '.join(user_files[:3])}")
-    
-    # STEP 2: Search knowledge base SECOND (supplementary)
-    print("[SEARCH] Step 2: Searching knowledge base...")
-    kb_results = await _search_by_category(query_vector, "knowledge_base", limit=3)
-    print(f"   Found {len(kb_results)} chunks from knowledge base")
-    if kb_results:
-        kb_files = list(set([r['filename'] for r in kb_results]))
-        print(f"   Files: {', '.join(kb_files[:3])}")
-    
-    # STEP 3: Combine with RELEVANCE FILTERING
-    MIN_SCORE = 0.5
-
-    user_results = [r for r in user_results if r.get("score", 0) >= MIN_SCORE]
-
-    if user_results:
-        # User uploads found — only include KB results if they are highly relevant
-        # Use 0.75 threshold to prevent irrelevant paper padding
-        kb_results = [r for r in kb_results if r.get("score", 0) >= 0.75]
-    else:
-        kb_results = [r for r in kb_results if r.get("score", 0) >= MIN_SCORE]
-
-    combined_results = user_results + kb_results
-
-    print(f"[SEARCH] After relevance filtering: {len(combined_results)} chunks")
-    print(f"   Kept: {len(user_results)} user + {len(kb_results)} knowledge base")
-    
-    return combined_results
-
-
-async def query_with_context(query: str, top_k: int = 5) -> Dict[str, Any]:
-    """
-    Query the vector store and return results with context.
-    
-    Args:
-        query: The search query text
-        top_k: Number of top results to return (default: 5)
-        
-    Returns:
-        Dictionary containing the query, results, and formatted context
-    """
-    results = await query_vector_store(query, top_k)
-    
-    # Format context for LLM
-    context = "\n\n".join([
-        f"[Source: {r['filename']}]\n{r['text']}"
-        for r in results
-    ])
-    
-    return {
-        "query": query,
-        "results": results,
-        "context": context,
-        "num_results": len(results)
-    }
-
-
-def extract_text_from_pdf(file_content: bytes) -> str:
-    """
-    Extract text from PDF file content using PyMuPDF (better extraction quality).
-    
-    Handles 'document closed' errors by saving metadata before close and
-    using per-page try-except with a fallback re-open strategy.
-    
-    Args:
-        file_content: PDF file content as bytes
-        
-    Returns:
-        Extracted text from all pages
+    Extract text from a PDF as a list of (page_number, page_text).
+    Page numbers are 1-indexed. Empty/image-only pages are skipped.
+    Uses a per-page try/except and a re-open retry for pages that error.
     """
     doc = None
     try:
         doc = fitz.open(stream=file_content, filetype="pdf")
         total_pages = len(doc)
-        
-        text = ""
-        empty_pages = []
-        failed_pages = []
-        
-        for page_num in range(total_pages):
+        pages: List[Tuple[int, str]] = []
+        empty_pages: List[int] = []
+        failed_pages: List[int] = []
+
+        for i in range(total_pages):
             try:
-                page = doc[page_num]
-                page_text = page.get_text()
-                
-                if not page_text or len(page_text.strip()) == 0:
-                    empty_pages.append(page_num + 1)
-                    print(f"      [WARNING] Page {page_num + 1} is empty or image-based (no extractable text)")
+                page_text = doc[i].get_text()
+                if page_text and page_text.strip():
+                    pages.append((i + 1, page_text))
                 else:
-                    text += page_text + "\n"
+                    empty_pages.append(i + 1)
+                    print(f"      [WARNING] Page {i + 1} is empty or image-based")
             except Exception as page_err:
-                failed_pages.append(page_num + 1)
-                print(f"      [ERROR] Failed to extract page {page_num + 1}: {page_err}")
+                failed_pages.append(i + 1)
+                print(f"      [ERROR] Failed to extract page {i + 1}: {page_err}")
 
         doc.close()
         doc = None
 
-        # Fallback: if pages failed due to 'document closed' or similar, re-open and retry
+        # Re-open retry for any pages that errored
         if failed_pages:
             print(f"      [RETRY] Re-opening PDF to retry {len(failed_pages)} failed pages...")
             try:
                 retry_doc = fitz.open(stream=file_content, filetype="pdf")
-                for page_num_1indexed in failed_pages:
+                for pn in failed_pages:
                     try:
-                        page = retry_doc[page_num_1indexed - 1]
-                        page_text = page.get_text()
+                        page_text = retry_doc[pn - 1].get_text()
                         if page_text and page_text.strip():
-                            text += page_text + "\n"
-                            print(f"      [OK] Retry succeeded for page {page_num_1indexed}")
+                            pages.append((pn, page_text))
+                            print(f"      [OK] Retry succeeded for page {pn}")
                         else:
-                            empty_pages.append(page_num_1indexed)
+                            empty_pages.append(pn)
                     except Exception as retry_err:
-                        print(f"      [ERROR] Retry also failed for page {page_num_1indexed}: {retry_err}")
+                        print(f"      [ERROR] Retry also failed for page {pn}: {retry_err}")
                 retry_doc.close()
             except Exception as reopen_err:
                 print(f"      [ERROR] Could not re-open PDF for retry: {reopen_err}")
+            pages.sort(key=lambda p: p[0])  # keep page order after retry insertions
 
         if empty_pages:
             if len(empty_pages) >= total_pages:
                 print(f"      [ERROR] All {total_pages} pages are empty or image-based!")
-                print(f"      This PDF may contain only images or scanned documents.")
             else:
-                print(f"      [INFO] {len(empty_pages)} out of {total_pages} pages were empty/image-based: {empty_pages[:10]}")
-        
-        return text.strip()
+                print(f"      [INFO] {len(empty_pages)}/{total_pages} pages empty: {empty_pages[:10]}")
+
+        return pages
     except Exception as e:
         print(f"[ERROR] Error extracting text from PDF with PyMuPDF: {e}")
         raise ValueError(f"Failed to extract text from PDF: {str(e)}")
@@ -303,188 +175,518 @@ def extract_text_from_pdf(file_content: bytes) -> str:
                 pass
 
 
+def extract_text_from_pdf(file_content: bytes) -> str:
+    """
+    BACK-COMPAT: returns the concatenated text of all pages.
+    Used by files.py::extract_text_from_file for the legacy single-document
+    upload path that doesn't carry page metadata.
+    """
+    return "\n".join(text for _, text in extract_pages_from_pdf(file_content))
+
+
+# ---------------------------------------------------------------------------
+# Chunking v2 — structure-aware recursive
+# ---------------------------------------------------------------------------
+# Section header detection: markdown #+, numbered "1.2.3 Title" (period optional),
+# or short ALL-CAPS lines.
+_HEADER_RE = re.compile(
+    r"^(?:"
+    r"#{1,6}\s+.{1,120}"                                  # markdown
+    r"|\d+(?:\.\d+){0,3}\.?\s+[A-Z][^\n]{1,120}"          # 1. INTRODUCTION  /  1.2 Title
+    r"|[A-Z][A-Z0-9 \-]{3,80}"                            # ALL CAPS standalone
+    r")$"
+)
+
+
+def _detect_section_header(text: str) -> Optional[str]:
+    """
+    Return the first heading-like line found anywhere in the chunk, or None.
+    Scans all lines because the chunk often starts with an overlap prefix
+    from the previous chunk, pushing the real section header further down.
+    """
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if _HEADER_RE.match(s):
+            return s[:120]
+    return None
+
+
+_DEFAULT_SEPARATORS = [
+    "\n## ", "\n### ", "\n#### ",   # markdown-style headings (uncommon in PDFs but cheap)
+    "\n\n",                          # paragraph
+    "\n",                            # line
+    ". ", "! ", "? ",                # sentence
+    " ",                             # word
+    "",                              # hard cut (last resort)
+]
+
+
+def _recursive_split(
+    text: str,
+    max_size: int,
+    separators: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Recursive character splitter. Walks down a separator hierarchy until
+    every fragment fits in ``max_size``, falling back to a hard cut.
+
+    Critical: each recursive call receives only the separators AFTER the one
+    just used. Without that, re-attaching the separator to each split part
+    would let the next level re-split on the same separator and loop forever.
+    """
+    if len(text) <= max_size:
+        return [text]
+
+    if separators is None:
+        separators = _DEFAULT_SEPARATORS
+
+    for idx, sep in enumerate(separators):
+        if sep == "":
+            # Last resort: hard cut at max_size
+            return [text[i:i + max_size] for i in range(0, len(text), max_size)]
+        if sep not in text:
+            continue
+
+        parts = text.split(sep)
+        # Re-attach the separator to every part except the last so text
+        # round-trips cleanly when chunks are concatenated.
+        reattached = [p + sep for p in parts[:-1]] + [parts[-1]]
+
+        remaining = separators[idx + 1:]
+        result: List[str] = []
+        for part in reattached:
+            if not part:
+                continue
+            if len(part) <= max_size:
+                result.append(part)
+            else:
+                result.extend(_recursive_split(part, max_size, remaining))
+        return result
+
+    # No separator helped — hard cut
+    return [text[i:i + max_size] for i in range(0, len(text), max_size)]
+
+
+def _merge_with_target(parts: List[str], target: int, max_size: int) -> List[str]:
+    """
+    Greedily pack small fragments toward ``target`` size, never exceeding
+    ``max_size``. Preserves order. No overlap added here.
+    """
+    merged: List[str] = []
+    current = ""
+    for p in parts:
+        if not p:
+            continue
+        if not current:
+            current = p
+            continue
+        if len(current) + len(p) <= max_size:
+            current += p
+            # Emit once we've reached target
+            if len(current) >= target:
+                merged.append(current)
+                current = ""
+        else:
+            merged.append(current)
+            current = p
+    if current:
+        merged.append(current)
+    return merged
+
+
+def chunk_text_v2(
+    pages: List[Tuple[int, str]],
+    target: int = CHUNK_TARGET_SIZE,
+    max_size: int = CHUNK_MAX_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> List[Dict[str, Any]]:
+    """
+    Structure-aware recursive chunker.
+
+    Returns a list of dicts with keys:
+        text            — chunk text (with overlap prefix from prior chunk)
+        page_start      — 1-indexed page where this chunk begins
+        section_header  — detected heading line for this chunk, or None
+        chunk_index     — zero-based ordinal
+    """
+    if not pages:
+        return []
+
+    # Build full text and remember each page's starting char-offset so we
+    # can later map any character position back to its source page.
+    parts: List[str] = []
+    page_offsets: List[Tuple[int, int]] = []  # (start_offset, page_num)
+    offset = 0
+    for page_num, page_text in pages:
+        page_offsets.append((offset, page_num))
+        parts.append(page_text)
+        sep = "" if page_text.endswith("\n") else "\n"
+        parts.append(sep)
+        offset += len(page_text) + len(sep)
+    full_text = "".join(parts)
+
+    def offset_to_page(off: int) -> int:
+        page = page_offsets[0][1]
+        for start, pn in page_offsets:
+            if start <= off:
+                page = pn
+            else:
+                break
+        return page
+
+    # 1. Recursively split into fragments <= max_size
+    # NOTE: keep whitespace-only fragments (e.g. "\n") — they preserve
+    # document structure (line/paragraph breaks). Only drop truly empty strings.
+    fragments = _recursive_split(full_text, max_size)
+    fragments = [f for f in fragments if f]
+
+    # 2. Greedy-pack into chunks near target size
+    raw_chunks = _merge_with_target(fragments, target=target, max_size=max_size)
+
+    # 3. Assemble final chunks: assign page_start, detect section, prepend overlap
+    chunks: List[Dict[str, Any]] = []
+    cursor = 0
+    prev_tail = ""
+    for i, body in enumerate(raw_chunks):
+        # Locate this chunk's start in the full text (sequential scan)
+        idx = full_text.find(body, cursor)
+        if idx == -1:
+            idx = cursor
+        page_start = offset_to_page(idx)
+
+        text = (prev_tail + body).strip() if prev_tail else body.strip()
+        section_header = _detect_section_header(text)
+
+        chunks.append({
+            "text": text,
+            "page_start": page_start,
+            "section_header": section_header,
+            "chunk_index": i,
+        })
+
+        prev_tail = body[-overlap:] if overlap > 0 else ""
+        cursor = idx + len(body)
+
+    return chunks
+
+
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
     """
-    Split text into chunks with overlap.
-    
-    Args:
-        text: Text to chunk
-        chunk_size: Target size of each chunk in characters
-        overlap: Number of characters to overlap between chunks
-        
-    Returns:
-        List of text chunks
+    DEPRECATED v1 chunker. Kept for backward compatibility with any external
+    callers. New ingestion uses chunk_text_v2().
     """
     if not text or len(text.strip()) == 0:
         return []
-    
-    chunks = []
+
+    chunks: List[str] = []
     start = 0
     text_length = len(text)
-    
+
     while start < text_length:
-        # Get chunk
         end = start + chunk_size
         chunk = text[start:end]
-        
-        # Try to break at sentence boundary if possible
+
         if end < text_length:
-            # Look for sentence endings
             last_period = chunk.rfind('.')
             last_newline = chunk.rfind('\n')
             break_point = max(last_period, last_newline)
-            
-            if break_point > chunk_size * 0.5:  # Only break if we're past halfway
+            if break_point > chunk_size * 0.5:
                 chunk = text[start:start + break_point + 1]
                 end = start + break_point + 1
-        
+
         chunks.append(chunk.strip())
-        
-        # Move start position with overlap
         start = end - overlap
-        
-        # Avoid infinite loop
         if start <= end - chunk_size + overlap:
             start = end
-    
-    return [c for c in chunks if c]  # Filter out empty chunks
+
+    return [c for c in chunks if c]
 
 
+# ---------------------------------------------------------------------------
+# Vector search helpers
+# ---------------------------------------------------------------------------
+async def _search_by_category(
+    query_vector: List[float],
+    category: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """
+    Vector search filtered by category. We over-fetch and filter client-side
+    because the Atlas vector index doesn't include ``category`` as a
+    filterable field — see project README for the index spec.
+    """
+    search_limit = limit * 20
+
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": "vector_index",
+                "path": "embedding",
+                "queryVector": query_vector,
+                "numCandidates": search_limit * 2,
+                "limit": search_limit,
+            }
+        },
+        {
+            "$match": {
+                "category": category,
+                "userId": USER_ID,
+            }
+        },
+        {"$limit": limit},
+        {
+            "$project": {
+                "_id": 1,
+                "text": 1,
+                "filename": 1,
+                "category": 1,
+                "metadata": 1,
+                "chunkingVersion": 1,
+                "pageStart": 1,
+                "sectionHeader": 1,
+                "score": {"$meta": "vectorSearchScore"},
+            }
+        },
+    ]
+
+    results: List[Dict[str, Any]] = []
+    async for doc in files_collection.aggregate(pipeline):
+        results.append({
+            "id": str(doc.get("_id")),
+            "text": doc.get("text", ""),
+            "filename": doc.get("filename", "unknown"),
+            "category": doc.get("category", "unknown"),
+            "metadata": doc.get("metadata", {}),
+            "chunkingVersion": doc.get("chunkingVersion"),   # may be None for old v1 chunks
+            "pageStart": doc.get("pageStart"),
+            "sectionHeader": doc.get("sectionHeader"),
+            "score": doc.get("score", 0.0),
+        })
+
+    return results[:limit]
+
+
+async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    """
+    Two-stage vector search with optional cross-encoder reranking.
+
+    When RERANKER_ENABLED:
+      * Pulls PRE_RERANK_POOL_USER (15) + PRE_RERANK_POOL_KB (10) candidates.
+      * Reranks all survivors TOGETHER on query relevance.
+      * Returns the top RERANK_TOP_K (5) regardless of original category — the
+        cross-encoder picks purely on relevance, so the explicit user-first
+        ordering is dropped in this mode by design.
+
+    When RERANKER_ENABLED is False (fallback):
+      * Uses the legacy 5/3 pools, MIN_SCORE 0.5 floor, and user-first ordering.
+
+    ``top_k`` is retained for signature stability but is effectively superseded
+    by RERANK_TOP_K when the reranker is on.
+    """
+    print(f"[SEARCH] Two-stage search for: {query[:50]}...")
+
+    model = get_embedding_model()
+    query_vector = list(model.embed([query]))[0].tolist()
+
+    user_pool = PRE_RERANK_POOL_USER if RERANKER_ENABLED else 5
+    kb_pool = PRE_RERANK_POOL_KB if RERANKER_ENABLED else 3
+
+    # STEP 1: user uploads
+    print(f"[SEARCH] Step 1: Searching user uploads (limit {user_pool})...")
+    user_results = await _search_by_category(query_vector, "user_upload", user_pool)
+    print(f"   Found {len(user_results)} chunks from user uploads")
+    if user_results:
+        user_files = list({r['filename'] for r in user_results})
+        print(f"   Files: {', '.join(user_files[:3])}")
+
+    # STEP 2: knowledge base
+    print(f"[SEARCH] Step 2: Searching knowledge base (limit {kb_pool})...")
+    kb_results = await _search_by_category(query_vector, "knowledge_base", kb_pool)
+    print(f"   Found {len(kb_results)} chunks from knowledge base")
+    if kb_results:
+        kb_files = list({r['filename'] for r in kb_results})
+        print(f"   Files: {', '.join(kb_files[:3])}")
+
+    # STEP 3a: reranker path
+    if RERANKER_ENABLED:
+        combined = user_results + kb_results
+        if not combined:
+            print("[RERANK] No candidates to rerank")
+            return []
+        try:
+            reranker = get_reranker()
+            documents = [c["text"] for c in combined]
+            scores = list(reranker.rerank(query, documents))
+            for c, s in zip(combined, scores):
+                c["rerank_score"] = float(s)
+            combined.sort(key=lambda c: c["rerank_score"], reverse=True)
+            top = combined[:RERANK_TOP_K]
+            print(f"[RERANK] Reranked {len(combined)} candidates -> kept top {len(top)}")
+            for c in top[:3]:
+                print(f"   {c['rerank_score']:+.3f} | {c['filename']} (vec {c['score']:.3f})")
+            return top
+        except Exception as rerank_err:
+            print(f"[WARNING] Rerank failed ({rerank_err}); falling back to vector order")
+            # Fall through to legacy filtering path below
+
+    # STEP 3b: legacy path — score floors + user-first ordering
+    MIN_SCORE = 0.5
+    user_results = [r for r in user_results if r.get("score", 0) >= MIN_SCORE]
+    if user_results:
+        kb_results = [r for r in kb_results if r.get("score", 0) >= 0.75]
+    else:
+        kb_results = [r for r in kb_results if r.get("score", 0) >= MIN_SCORE]
+
+    combined = user_results + kb_results
+    print(f"[SEARCH] After relevance filtering: {len(combined)} chunks")
+    print(f"   Kept: {len(user_results)} user + {len(kb_results)} knowledge base")
+    return combined
+
+
+async def query_with_context(query: str, top_k: int = 5) -> Dict[str, Any]:
+    """Query the vector store and return results with formatted context."""
+    results = await query_vector_store(query, top_k)
+
+    context = "\n\n".join([
+        f"[Source: {r['filename']}]\n{r['text']}"
+        for r in results
+    ])
+
+    return {
+        "query": query,
+        "results": results,
+        "context": context,
+        "num_results": len(results),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Ingestion + deletion
+# ---------------------------------------------------------------------------
 async def delete_document(filename: str) -> Dict[str, Any]:
-    """
-    Delete all vector chunks associated with a filename from MongoDB.
-    
-    Args:
-        filename: Name of the file to delete
-        
-    Returns:
-        Dictionary with deletion results
-    """
+    """Delete all vector chunks associated with a filename from MongoDB."""
     try:
         print(f"[DELETE] Deleting document: {filename}")
         print(f"[DELETE] Searching for filename: {repr(filename)}")
-        
-        # First, check what we have in the database
+
         sample = await files_collection.find_one({"userId": USER_ID})
         if sample:
             print(f"[DELETE] Sample filename in DB: {repr(sample.get('filename'))}")
-        
-        # Delete all chunks with matching filename or source
+
         result = await files_collection.delete_many({
             "$or": [
                 {"filename": filename},
-                {"source": filename}
+                {"source": filename},
             ],
-            "userId": USER_ID
+            "userId": USER_ID,
         })
-        
+
         deleted_count = result.deleted_count
         print(f"[OK] Deleted {deleted_count} chunks for file: {filename}")
-        
+
         return {
             "filename": filename,
             "deleted_count": deleted_count,
-            "status": "success"
+            "status": "success",
         }
     except Exception as e:
         print(f"[ERROR] Failed to delete document {filename}: {e}")
         raise ValueError(f"Failed to delete document: {str(e)}")
 
 
-async def ingest_document(filename: str, file_content: bytes, category: str = "user_upload") -> Dict[str, Any]:
+async def ingest_document(
+    filename: str,
+    file_content: bytes,
+    category: str = "user_upload",
+) -> Dict[str, Any]:
     """
-    Ingest a PDF document: extract text, chunk, embed, and store in MongoDB.
-    
-    Args:
-        filename: Name of the file
-        file_content: File content as bytes
-        category: Category of the file ("user_upload" or "knowledge_base")
-        
-    Returns:
-        Dictionary with ingestion results
-        
-    Raises:
-        ValueError: If file is not a PDF or processing fails
+    Ingest a PDF: page-aware extract, v2 chunk, embed, store.
+    Chunks are tagged with chunkingVersion + pageStart + sectionHeader.
     """
-    # Validate it's a PDF
     if not filename.lower().endswith('.pdf'):
         raise ValueError("Only PDF files are supported. Please upload a PDF file.")
-    
+
     print(f"[FILE] Ingesting document: {filename}")
-    
-    # Step 1: Extract text from PDF
-    print("  1. Extracting text from PDF...")
-    try:
-        text = extract_text_from_pdf(file_content)
-        print(f"      Extracted {len(text)} characters")
-    except Exception as e:
-        print(f"     [ERROR] Text extraction failed: {e}")
-        raise
-    
-    if not text or len(text.strip()) < 10:
+
+    # 1. Page-aware text extraction
+    print("  1. Extracting text from PDF (page-aware)...")
+    pages = extract_pages_from_pdf(file_content)
+    total_chars = sum(len(t) for _, t in pages)
+    print(f"      Extracted {len(pages)} pages, {total_chars} characters")
+
+    if not pages or total_chars < 10:
         raise ValueError("PDF appears to be empty or contains no extractable text")
-    
-    # Step 2: Chunk the text
-    print("  2. Chunking text...")
-    chunks = chunk_text(text, chunk_size=500, overlap=50)
-    print(f"      Created {len(chunks)} chunks")
-    
-    if not chunks:
+
+    # 2. Structure-aware chunking (v2)
+    print(
+        f"  2. Chunking text (v2, target={CHUNK_TARGET_SIZE}, "
+        f"max={CHUNK_MAX_SIZE}, overlap={CHUNK_OVERLAP})..."
+    )
+    chunk_records = chunk_text_v2(pages)
+    print(f"      Created {len(chunk_records)} chunks")
+    if not chunk_records:
         raise ValueError("No text chunks could be created from the PDF")
-    
-    # Step 3: Generate embeddings for each chunk
+
+    # 3. Embeddings (batch)
     print("  3. Generating embeddings...")
     model = get_embedding_model()
-    embeddings_list = list(model.embed(chunks))
-    embeddings = [emb.tolist() for emb in embeddings_list]
+    texts = [c["text"] for c in chunk_records]
+    embeddings_list = list(model.embed(texts))
+    embeddings = [e.tolist() for e in embeddings_list]
     print(f"      Generated {len(embeddings)} embeddings (384-dim)")
-    
-    # Step 4: Create document objects
+
+    # 4. Build documents (carries v2 metadata)
     print("  4. Creating document objects...")
-    documents = []
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+    documents: List[Dict[str, Any]] = []
+    for c, embedding in zip(chunk_records, embeddings):
         doc = {
-            "text": chunk,
+            "text": c["text"],
             "filename": filename,
             "source": filename,
             "embedding": embedding,
             "userId": USER_ID,
-            "category": category,  # Use the category parameter
-            "chunkIndex": i,
-            "totalChunks": len(chunks),
+            "category": category,
+            "chunkIndex": c["chunk_index"],
+            "totalChunks": len(chunk_records),
+            "chunkingVersion": CHUNKING_VERSION,
+            "pageStart": c["page_start"],
+            "sectionHeader": c["section_header"],
             "metadata": {
-                "chunkSize": len(chunk),
-                "chunkIndex": i,
-                "totalChunks": len(chunks),
+                "chunkSize": len(c["text"]),
+                "chunkIndex": c["chunk_index"],
+                "totalChunks": len(chunk_records),
                 "originalFilename": filename,
-                "category": category  # Also include in metadata for querying
+                "category": category,
+                "chunkingVersion": CHUNKING_VERSION,
+                "pageStart": c["page_start"],
+                "sectionHeader": c["section_header"],
             },
-            "createdAt": datetime.now()
+            "createdAt": datetime.now(),
         }
         documents.append(doc)
-    
+
     print(f"      Prepared {len(documents)} documents")
-    
-    # Step 5: Insert into MongoDB
+
+    # 5. Insert
     print("  5. Inserting into MongoDB...")
     result = await files_collection.insert_many(documents)
     inserted_count = len(result.inserted_ids)
     print(f"      Inserted {inserted_count} documents")
-    
+
     print(f"[OK] Document ingestion complete: {filename}")
-    
-    total_characters = len(text)
-    chunks_created = len(chunks)
-    
+
+    chunks_created = len(chunk_records)
     # Free large objects before returning
-    del text, chunks, embeddings_list, embeddings, documents
+    del pages, chunk_records, texts, embeddings_list, embeddings, documents
     gc.collect()
-    
+
     return {
         "filename": filename,
         "chunks_created": chunks_created,
-        "total_characters": total_characters,
+        "total_characters": total_chars,
         "documents_inserted": inserted_count,
-        "status": "success"
+        "chunking_version": CHUNKING_VERSION,
+        "status": "success",
     }
-

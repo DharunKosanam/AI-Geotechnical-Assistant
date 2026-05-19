@@ -35,6 +35,32 @@ REDIS_USER = os.getenv("REDIS_USER", "default")
 # Application Constants
 USER_ID = "default-user"  # Hardcoded user ID to match Next.js implementation
 
+# ---------------------------------------------------------------------------
+# Chunking & Retrieval (v2)
+# ---------------------------------------------------------------------------
+# CHUNKING_VERSION tags new chunks so old (500-char v1) chunks can coexist.
+# Old chunks have no chunkingVersion field; new chunks get this value.
+CHUNKING_VERSION = os.getenv("CHUNKING_VERSION", "v2")
+
+# Structure-aware chunker sizing (characters)
+CHUNK_TARGET_SIZE = int(os.getenv("CHUNK_TARGET_SIZE", "1200"))
+CHUNK_MAX_SIZE = int(os.getenv("CHUNK_MAX_SIZE", "1500"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+
+# Cross-encoder reranking (after vector search, before LLM prompt assembly)
+RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "5"))
+
+# Pre-rerank candidate pool sizes (per category). With reranker disabled,
+# the legacy 5/3 limits are used instead.
+PRE_RERANK_POOL_USER = int(os.getenv("PRE_RERANK_POOL_USER", "15"))
+PRE_RERANK_POOL_KB = int(os.getenv("PRE_RERANK_POOL_KB", "10"))
+
+# Folder of source PDFs used by the kb_admin CLI for reindex/add operations.
+# Required for reindex when chunks don't carry the original PDF binary.
+KNOWLEDGE_BASE_PDF_PATH = os.getenv("KNOWLEDGE_BASE_PDF_PATH", "")
+
 # CORS Origins
 CORS_ORIGINS = [
     "https://ai-geotechnical-assistant-production.up.railway.app",

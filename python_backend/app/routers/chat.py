@@ -136,9 +136,22 @@ async def chat_with_rag(request: RAGChatRequest):
             sources: list[dict] = []
             for chunk in chunks:
                 info = get_clean_title(chunk["filename"])
-                if info["title"] not in seen_titles:
-                    seen_titles.add(info["title"])
-                    sources.append({"title": info["title"], "url": info["url"]})
+                if info["title"] in seen_titles:
+                    continue
+                seen_titles.add(info["title"])
+                # Expose fileType so the UI can render the right icon next to
+                # each citation (PDF vs Word vs Excel vs slide vs OCR'd image).
+                meta = chunk.get("metadata") or {}
+                file_type = meta.get("fileType")
+                if not file_type:
+                    fn = chunk.get("filename", "")
+                    file_type = ("." + fn.rsplit(".", 1)[-1].lower()) if "." in fn else ""
+                sources.append({
+                    "title": info["title"],
+                    "url": info["url"],
+                    "filename": chunk.get("filename"),
+                    "fileType": file_type,
+                })
             print(f"   Sources: {', '.join(s['title'] for s in sources)}")
         else:
             context = ""

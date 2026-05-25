@@ -7,6 +7,8 @@ from typing import List, Dict, Optional
 from llama_index.llms.groq import Groq
 from dotenv import load_dotenv
 
+from app.core.config import GROQ_MODEL
+
 # Load environment variables
 load_dotenv()
 
@@ -30,14 +32,19 @@ def get_llm() -> Groq:
         )
     
     llm = Groq(
-        model="qwen/qwen3-32b",
+        model=GROQ_MODEL,
         api_key=groq_api_key,
         temperature=0.3,
         max_tokens=4096,
         request_timeout=60.0,
     )
-    
+
     return llm
+
+
+def _model_emits_thinking_tags(model_name: str) -> bool:
+    """Only qwen3 models wrap their chain-of-thought in <think>...</think>."""
+    return "qwen" in (model_name or "").lower()
 
 
 async def generate_answer_with_groq(
@@ -119,13 +126,15 @@ Please provide a detailed answer:"""
         if len(raw_answer) > 0:
             print(f"   [TEXT] First 300 chars: {raw_answer[:300]}")
         
-        # Remove internal thinking tags <think>...</think>
-        # This ensures users never see the chain-of-thought process
-        # Use DOTALL flag to match across newlines
-        cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
-        
-        # Also remove any remaining XML-style tags
-        cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
+        # Strip <think>...</think> only for models that actually emit them
+        # (qwen3). Llama 4 Scout and other non-thinking models never produce
+        # these tags, so the scrub is skipped to avoid eating legitimate <>
+        # content.
+        if _model_emits_thinking_tags(GROQ_MODEL):
+            cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
+            cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
+        else:
+            cleaned_answer = raw_answer
         
         # Preserve markdown structure: strip each line individually,
         # then collapse runs of 3+ blank lines down to one blank line.

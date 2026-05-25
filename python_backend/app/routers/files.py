@@ -12,11 +12,48 @@ from app.core.database import files_collection
 from app.services.file_processing import (
     convert_image_to_pdf,
     needs_image_conversion,
-    determine_media_type
+    determine_media_type,
+    is_supported_file,
+    get_file_type,
+    extract_pages_from_file,
+    SUPPORTED_EXTENSIONS,
 )
-from app.services.rag_service import ingest_document, delete_document, extract_text_from_pdf, get_embedding_model
+from app.services.rag_service import ingest_document, extract_text_from_pdf, get_embedding_model
 
 router = APIRouter(prefix="/api", tags=["files"])
+
+# Hard ceiling for any uploaded file. Bigger payloads must be split client-side.
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
+# Friendly format list reused in error messages so the UI can echo it back.
+SUPPORTED_LIST_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, TIFF"
+
+
+def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
+    """
+    Centralized upload validation. Extension is the source of truth for type
+    (browsers send wrong MIME for .docx / .xlsx) — MIME stays advisory.
+    """
+    if not filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing filename",
+        )
+    if not is_supported_file(filename):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type. Supported: {SUPPORTED_LIST_LABEL}",
+        )
+    if size_bytes <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is empty",
+        )
+    if size_bytes > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large ({size_bytes / 1024 / 1024:.1f} MB). Max: 50 MB.",
+        )
 
 
 @router.get("/files")
@@ -62,14 +99,17 @@ async def list_files_simple(category: Optional[str] = None):
 
 
 def extract_text_from_file(file_content: bytes, filename: str) -> str:
-    """Extract text from file content based on file type."""
+    """
+    Concatenate text across all pages via the unified multi-format extractor.
+    Used by the legacy synchronous upload path so we get a single text blob
+    for the file-level embedding stored on the parent file doc.
+    """
     try:
-        if filename.lower().endswith('.pdf'):
-            return extract_text_from_pdf(file_content)
-        
-        if filename.endswith(('.txt', '.md', '.csv')):
-            return file_content.decode('utf-8', errors='ignore')
-        
+        if is_supported_file(filename):
+            triples = extract_pages_from_file(file_content, filename)
+            return "\n".join(t for _, t, _ in triples)
+        if filename.lower().endswith((".txt", ".md")):
+            return file_content.decode("utf-8", errors="ignore")
         return ""
     except Exception as e:
         print(f"[WARNING] Could not extract text from {filename}: {e}")
@@ -86,25 +126,46 @@ async def generate_embeddings(text: str) -> List[float]:
     return embeddings[0].tolist()
 
 
-async def process_file_ingestion(filename: str, file_content: bytes, category: str = "user_upload"):
+async def process_file_ingestion(
+    filename: str,
+    file_content: bytes,
+    category: str = "user_upload",
+    parent_id: Optional[ObjectId] = None,
+):
     """
     Background task to process file ingestion.
-    This runs asynchronously so the user doesn't have to wait.
-    
-    Args:
-        filename: Name of the file
-        file_content: File content as bytes
-        category: Category of the file ("user_upload" or "knowledge_base")
+
+    If parent_id is provided, the parent file-metadata doc's status is
+    updated to "processed" on success or "failed" on error, so the UI
+    can stop showing "Processing..." once chunks land in Mongo.
     """
     import gc
     try:
         print(f"[LOADING] Background processing started for: {filename} (category: {category})")
         result = await ingest_document(filename, file_content, category)
         print(f"[OK] Background processing completed: {result}")
+        if parent_id is not None:
+            await files_collection.update_one(
+                {"_id": parent_id},
+                {"$set": {
+                    "status": "processed",
+                    "chunkCount": result.get("chunks_created", 0),
+                    "processedAt": datetime.now(),
+                }},
+            )
     except Exception as e:
         print(f"[ERROR] Background processing failed for {filename}: {e}")
         import traceback
         traceback.print_exc()
+        if parent_id is not None:
+            await files_collection.update_one(
+                {"_id": parent_id},
+                {"$set": {
+                    "status": "failed",
+                    "error": str(e),
+                    "processedAt": datetime.now(),
+                }},
+            )
     finally:
         del file_content
         gc.collect()
@@ -117,48 +178,56 @@ async def upload_document(
     category: str = Form("user_upload")
 ):
     """
-    Upload a PDF document for ingestion and vector embedding.
-    The file is processed in the background, so this endpoint returns immediately.
-    
-    Args:
-        file: PDF file to upload
-        background_tasks: FastAPI background tasks
-        category: Category of the file ("user_upload" or "knowledge_base")
-        
-    Returns:
-        Success message with file information
+    Upload a document (PDF/DOCX/XLSX/CSV/PPTX/image) for background ingestion.
+
+    Always uses background processing so the request returns immediately —
+    large Excel/PPT files can take a while to chunk + embed.
     """
     try:
-        # Validate file type
-        if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only PDF files are supported. Please upload a PDF file."
-            )
-        
-        # Read file content
+        # Read first so we can size-check; extension is the source of truth for type.
         file_content = await file.read()
-        
-        if len(file_content) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="File is empty"
-            )
-        
+        _validate_upload(file.filename, len(file_content))
+
         print(f" Received file: {file.filename} ({len(file_content)} bytes, category: {category})")
-        
+
+        # Insert a parent file-metadata doc up front. This is what the listing
+        # endpoint surfaces to the UI — without it the frontend would never
+        # see the file (chunks live in the same collection but are filtered out
+        # of the listing). status flips to "processed" when the background
+        # task finishes.
+        file_type = get_file_type(file.filename)
+        parent_doc = {
+            "docType": "file",
+            "filename": file.filename,
+            "userId": USER_ID,
+            "category": category,
+            "bytes": len(file_content),
+            "purpose": "assistants",
+            "status": "processing",
+            "createdAt": datetime.now(),
+            "metadata": {
+                "mimetype": file.content_type,
+                "size": len(file_content),
+                "fileType": file_type,
+            },
+        }
+        insert_result = await files_collection.insert_one(parent_doc)
+        parent_id = insert_result.inserted_id
+
         # Schedule background ingestion with category
         background_tasks.add_task(
             process_file_ingestion,
             file.filename,
             file_content,
-            category
+            category,
+            parent_id,
         )
-        
+
         return {
             "success": True,
             "message": "File uploaded and processing started.",
             "filename": file.filename,
+            "file_id": str(parent_id),
             "size": len(file_content),
             "status": "processing"
         }
@@ -193,37 +262,46 @@ async def list_files(type: Optional[str] = None, category: Optional[str] = None)
         elif type == "knowledge_base":
             query["category"] = "knowledge_base"
         
-        # CRITICAL FIX: Exclude heavy fields and enable disk usage
-        # Projection excludes: text content, embeddings (prevents 32MB memory limit)
+        # Restrict to file-level docs (skip chunk records). Chunks have
+        # chunkIndex set; parent file docs do not. We accept both the explicit
+        # docType="file" marker (new uploads) and legacy parent docs that
+        # simply lack chunkIndex (old /api/assistants/files POST flow).
+        query["chunkIndex"] = {"$exists": False}
+
+        # Exclude heavy fields so the listing stays small even when legacy
+        # parent docs carry full text/binary/embedding payloads.
         projection = {
-            "text": 0,           # Exclude text content
-            "embedding": 0,      # Exclude vector embeddings
-            "content": 0         # Exclude binary file content
+            "text": 0,
+            "embedding": 0,
+            "content": 0,
         }
-        
-        # Enable allow_disk_use to prevent QueryExceededMemoryLimitNoDiskUseAllowed error
-        # This allows MongoDB to use disk for sorting large result sets (>32MB)
+
         cursor = (
             files_collection
             .find(query, projection)
             .sort("createdAt", -1)
-            .allow_disk_use(True)  # CRITICAL: Prevents memory limit error
+            .allow_disk_use(True)
         )
-        
+
         # Use dict to deduplicate by filename (keeps latest version)
         files_by_name = {}
         async for doc in cursor:
             filename = doc.get("filename")
             # Only keep the first occurrence (most recent due to sort)
             if filename not in files_by_name:
+                # Prefer the metadata.fileType written by the new ingester;
+                # fall back to the filename extension so older docs still report a type.
+                meta = doc.get("metadata") or {}
+                file_type = meta.get("fileType") or get_file_type(filename or "")
                 file_data = {
                     "file_id": str(doc["_id"]),
                     "filename": filename,
                     "purpose": doc.get("purpose", "assistants"),
                     "bytes": doc.get("bytes", 0),
                     "created_at": int(doc.get("createdAt", datetime.now()).timestamp()),
-                    "status": "processed",
-                    "category": doc.get("category", "knowledge_base")
+                    "status": doc.get("status", "processed"),
+                    "category": doc.get("category", "knowledge_base"),
+                    "fileType": file_type,
                 }
                 files_by_name[filename] = file_data
         
@@ -243,12 +321,20 @@ async def list_files(type: Optional[str] = None, category: Optional[str] = None)
 
 @router.post("/assistants/files")
 async def upload_file(files: UploadFile = File(...)):
-    """Upload a file to MongoDB with vector embeddings"""
+    """
+    Legacy synchronous upload: stores the file binary + a file-level embedding.
+    Now accepts every supported format via the unified extractor.
+    """
     try:
         file_content = await files.read()
         original_filename = files.filename
-        
-        # Check if file needs conversion
+
+        # Validate BEFORE any image conversion (so we reject .mp4/.zip up front).
+        _validate_upload(original_filename, len(file_content))
+
+        # Legacy TIS/TIF/TIFF -> PDF conversion (kept for back-compat with the
+        # old image-as-PDF flow). For .png/.jpg/.jpeg/.tiff we now OCR directly
+        # via the unified extractor, so we only convert the TIS/TIF aliases here.
         if needs_image_conversion(original_filename):
             print(f"[LOADING] Converting image to PDF: {original_filename}")
             file_content, original_filename = await convert_image_to_pdf(
@@ -256,17 +342,20 @@ async def upload_file(files: UploadFile = File(...)):
                 original_filename
             )
             print(f"[OK] Converted to PDF: {original_filename}")
-        
-        # Extract text from file
+
+        # Extract text from file (multi-format via unified extractor)
         print(f"[FILE] Extracting text from: {original_filename}")
         text_content = extract_text_from_file(file_content, original_filename)
-        
+
         # Generate embeddings
         print(f" Generating embeddings...")
         embedding = await generate_embeddings(text_content)
-        
+
+        file_type = get_file_type(original_filename)
         # Store in MongoDB
         file_doc = {
+            "docType": "file",
+            "status": "processed",
             "filename": original_filename,
             "content": file_content,  # Store file content as binary
             "text": text_content,  # Store extracted text
@@ -278,7 +367,8 @@ async def upload_file(files: UploadFile = File(...)):
             "createdAt": datetime.now(),
             "metadata": {
                 "mimetype": files.content_type,
-                "size": len(file_content)
+                "size": len(file_content),
+                "fileType": file_type,
             }
         }
         
@@ -311,7 +401,11 @@ async def upload_file(files: UploadFile = File(...)):
 
 @router.delete("/assistants/files")
 async def delete_file(fileId: str = Body(..., embed=True)):
-    """Delete a file from MongoDB"""
+    """
+    Delete a user-uploaded file and all of its chunks from MongoDB.
+    Scoped to category="user_upload" — knowledge_base chunks are never
+    touched, even if the parent doc somehow matched.
+    """
     try:
         # Convert string ID to ObjectId
         try:
@@ -321,18 +415,51 @@ async def delete_file(fileId: str = Body(..., embed=True)):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid file ID format"
             )
-        
-        # Delete from MongoDB
-        result = await files_collection.delete_one({"_id": object_id, "userId": USER_ID})
-        
-        if result.deleted_count == 0:
+
+        # Look up the parent doc first so we know its filename for chunk cleanup.
+        parent = await files_collection.find_one(
+            {"_id": object_id, "userId": USER_ID},
+            {"filename": 1, "category": 1},
+        )
+        if not parent:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File not found"
             )
-        
-        print(f"[OK] Deleted file: {fileId}")
-        return {"success": True, "message": "File deleted successfully"}
+
+        filename = parent.get("filename")
+        if parent.get("category") == "knowledge_base":
+            # Hard refusal — the student-facing delete endpoint must never
+            # remove curated knowledge_base material.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot delete knowledge_base files from this endpoint"
+            )
+
+        # Delete the parent doc.
+        parent_result = await files_collection.delete_one(
+            {"_id": object_id, "userId": USER_ID}
+        )
+
+        # Delete ALL chunks for this filename, scoped to user_upload only.
+        chunk_result = await files_collection.delete_many({
+            "userId": USER_ID,
+            "category": "user_upload",
+            "$or": [{"filename": filename}, {"source": filename}],
+            "chunkIndex": {"$exists": True},
+        })
+
+        total_deleted = parent_result.deleted_count + chunk_result.deleted_count
+        print(
+            f"[OK] Deleted file {fileId} ({filename}): "
+            f"1 parent + {chunk_result.deleted_count} chunks "
+            f"(total {total_deleted} docs)"
+        )
+        return {
+            "success": True,
+            "message": "File deleted successfully",
+            "deleted_chunks": chunk_result.deleted_count,
+        }
         
     except HTTPException:
         raise
@@ -390,27 +517,33 @@ async def get_file(file_id: str):
 @router.delete("/files/delete/{filename:path}")
 async def delete_file_by_name(filename: str):
     """
-    Delete a file and all its vector chunks from MongoDB by filename.
-    This removes ALL chunks associated with the file from the vector store.
+    Delete a user-uploaded file and all of its vector chunks by filename.
+    Scoped to category="user_upload" — knowledge_base material is never
+    touched by this endpoint.
     """
     try:
         print(f"[DELETE] Request to delete file: {filename}")
-        print(f"[DELETE] Filename repr: {repr(filename)}")
-        print(f"[DELETE] Filename bytes: {filename.encode('utf-8')}")
-        
-        # Delete all vector chunks for this file
-        result = await delete_document(filename)
-        
-        if result["deleted_count"] == 0:
+
+        # Scoped delete: parent file doc + all chunks, user_upload only.
+        result = await files_collection.delete_many({
+            "userId": USER_ID,
+            "category": "user_upload",
+            "$or": [{"filename": filename}, {"source": filename}],
+        })
+
+        deleted_count = result.deleted_count
+        print(f"[OK] Deleted {deleted_count} docs for user_upload file: {filename}")
+
+        if deleted_count == 0:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No documents found for file: {filename}"
+                detail=f"No user-uploaded documents found for file: {filename}"
             )
-        
+
         return {
             "success": True,
             "message": f"File {filename} deleted successfully",
-            "deleted_count": result["deleted_count"]
+            "deleted_count": deleted_count,
         }
         
     except HTTPException:

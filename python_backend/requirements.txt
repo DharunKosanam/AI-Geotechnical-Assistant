@@ -17,3 +17,10 @@ pymupdf
 redis
 pytest
 pytest-asyncio
+rich
+python-docx
+openpyxl
+pandas
+tabulate
+pytesseract
+python-pptx

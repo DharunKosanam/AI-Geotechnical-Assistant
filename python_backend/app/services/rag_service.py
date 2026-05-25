@@ -40,6 +40,9 @@ from app.core.config import (
     RERANK_TOP_K,
     PRE_RERANK_POOL_USER,
     PRE_RERANK_POOL_KB,
+    OCR_ENABLED,
+    OCR_MIN_TEXT_LEN,
+    PDF_IMAGE_OCR_MIN_DIM,
 )
 
 
@@ -182,6 +185,119 @@ def extract_text_from_pdf(file_content: bytes) -> str:
     upload path that doesn't carry page metadata.
     """
     return "\n".join(text for _, text in extract_pages_from_pdf(file_content))
+
+
+# ---------------------------------------------------------------------------
+# PDF extraction WITH OCR fallback — used by the multi-format ingest pipeline
+# ---------------------------------------------------------------------------
+def _ocr_pdf_page(page) -> str:
+    """Render a PDF page to a PNG bytes blob and OCR it."""
+    from app.services.file_processing import ocr_image_bytes, tesseract_available
+    if not tesseract_available():
+        return ""
+    try:
+        # 2x zoom — better OCR accuracy than the default 72dpi render
+        mat = fitz.Matrix(2.0, 2.0)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        png_bytes = pix.tobytes("png")
+        return ocr_image_bytes(png_bytes)
+    except Exception as e:
+        print(f"      [OCR ERROR] Page render/OCR failed: {e}")
+        return ""
+
+
+def _ocr_embedded_images(doc, page, min_dim: int) -> str:
+    """OCR every embedded image on a page that meets the min-dim threshold."""
+    from app.services.file_processing import ocr_image_bytes, tesseract_available
+    if not tesseract_available():
+        return ""
+    pieces: List[str] = []
+    try:
+        for img_info in page.get_images(full=True):
+            xref = img_info[0]
+            try:
+                base = doc.extract_image(xref)
+                width = base.get("width", 0)
+                height = base.get("height", 0)
+                if width < min_dim or height < min_dim:
+                    continue
+                img_bytes = base.get("image", b"")
+                if not img_bytes:
+                    continue
+                text = ocr_image_bytes(img_bytes).strip()
+                if text:
+                    pieces.append(text)
+            except Exception as inner:
+                print(f"      [OCR ERROR] Embedded image OCR failed: {inner}")
+    except Exception as e:
+        print(f"      [OCR ERROR] Listing embedded images failed: {e}")
+    return "\n".join(pieces)
+
+
+def extract_pages_from_pdf_with_ocr(file_content: bytes) -> List[Tuple[int, str, bool]]:
+    """
+    Page-aware PDF extraction with OCR fallback.
+
+    For each page:
+      1. PyMuPDF text layer (fast path).
+      2. If that yields < OCR_MIN_TEXT_LEN chars AND OCR is enabled, render
+         the page and OCR it.
+      3. Independently, OCR any large embedded images and append.
+
+    Returns (page_number, text, ocr_extracted). ``ocr_extracted`` is True
+    when any OCR contributed to the page text.
+    """
+    pages_pairs = extract_pages_from_pdf(file_content)  # uses existing retry logic
+    text_by_page = {p: t for p, t in pages_pairs}
+
+    if not OCR_ENABLED:
+        return [(p, t, False) for p, t in pages_pairs]
+
+    # Re-open once to drive OCR over all pages (we need fitz Page objects)
+    triples: List[Tuple[int, str, bool]] = []
+    doc = None
+    try:
+        doc = fitz.open(stream=file_content, filetype="pdf")
+        total_pages = len(doc)
+        for i in range(total_pages):
+            pn = i + 1
+            base_text = text_by_page.get(pn, "")
+            ocr_used = False
+
+            # (2) Page OCR fallback for sparse pages
+            if len(base_text.strip()) < OCR_MIN_TEXT_LEN:
+                try:
+                    page_obj = doc[i]
+                    ocr_text = _ocr_pdf_page(page_obj).strip()
+                    if ocr_text:
+                        print(f"      [OCR] Page {pn}: fallback OCR added {len(ocr_text)} chars")
+                        base_text = (base_text + "\n" + ocr_text).strip()
+                        ocr_used = True
+                except Exception as e:
+                    print(f"      [OCR ERROR] Page {pn} fallback failed: {e}")
+
+            # (3) Large embedded image OCR (figures, diagrams, scanned tables)
+            try:
+                page_obj = doc[i]
+                emb_text = _ocr_embedded_images(doc, page_obj, PDF_IMAGE_OCR_MIN_DIM).strip()
+                if emb_text:
+                    print(f"      [OCR] Page {pn}: embedded-image OCR added {len(emb_text)} chars")
+                    base_text = (base_text + "\n" + emb_text).strip() if base_text else emb_text
+                    ocr_used = True
+            except Exception as e:
+                print(f"      [OCR ERROR] Page {pn} embedded-image scan failed: {e}")
+
+            if base_text:
+                triples.append((pn, base_text, ocr_used))
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+    triples.sort(key=lambda t: t[0])
+    return triples
 
 
 # ---------------------------------------------------------------------------
@@ -602,24 +718,41 @@ async def ingest_document(
     category: str = "user_upload",
 ) -> Dict[str, Any]:
     """
-    Ingest a PDF: page-aware extract, v2 chunk, embed, store.
-    Chunks are tagged with chunkingVersion + pageStart + sectionHeader.
+    Multi-format ingest: extract pages, v2 chunk, embed, store.
+
+    Supported types are defined in file_processing.SUPPORTED_EXTENSIONS.
+    Chunks carry chunkingVersion, pageStart, sectionHeader, fileType, and
+    (for OCR-derived pages) metadata.ocrExtracted = True.
     """
-    if not filename.lower().endswith('.pdf'):
-        raise ValueError("Only PDF files are supported. Please upload a PDF file.")
+    # Lazy import to avoid a circular dependency at module load
+    from app.services.file_processing import (
+        extract_pages_from_file,
+        get_file_type,
+        is_supported_file,
+        SUPPORTED_EXTENSIONS,
+    )
 
-    print(f"[FILE] Ingesting document: {filename}")
+    file_type = get_file_type(filename)
+    if not is_supported_file(filename):
+        raise ValueError(
+            f"Unsupported file type: {file_type}. "
+            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
+        )
 
-    # 1. Page-aware text extraction
-    print("  1. Extracting text from PDF (page-aware)...")
-    pages = extract_pages_from_pdf(file_content)
+    print(f"[FILE] Ingesting document: {filename} (type: {file_type})")
+
+    # 1. Unified page-aware extraction (returns triples with OCR flag)
+    print(f"  1. Extracting text ({file_type})...")
+    page_triples = extract_pages_from_file(file_content, filename)
+    pages = [(p, t) for p, t, _ in page_triples]
+    ocr_by_page = {p: ocr for p, _, ocr in page_triples}
     total_chars = sum(len(t) for _, t in pages)
     print(f"      Extracted {len(pages)} pages, {total_chars} characters")
 
     if not pages or total_chars < 10:
-        raise ValueError("PDF appears to be empty or contains no extractable text")
+        raise ValueError(f"{filename} appears to be empty or contains no extractable text")
 
-    # 2. Structure-aware chunking (v2)
+    # 2. Structure-aware chunking (v2) — same chunker for every file type
     print(
         f"  2. Chunking text (v2, target={CHUNK_TARGET_SIZE}, "
         f"max={CHUNK_MAX_SIZE}, overlap={CHUNK_OVERLAP})..."
@@ -627,7 +760,7 @@ async def ingest_document(
     chunk_records = chunk_text_v2(pages)
     print(f"      Created {len(chunk_records)} chunks")
     if not chunk_records:
-        raise ValueError("No text chunks could be created from the PDF")
+        raise ValueError("No text chunks could be created from the file")
 
     # 3. Embeddings (batch)
     print("  3. Generating embeddings...")
@@ -637,10 +770,12 @@ async def ingest_document(
     embeddings = [e.tolist() for e in embeddings_list]
     print(f"      Generated {len(embeddings)} embeddings (384-dim)")
 
-    # 4. Build documents (carries v2 metadata)
+    # 4. Build documents — propagate fileType + per-page OCR flag
     print("  4. Creating document objects...")
     documents: List[Dict[str, Any]] = []
     for c, embedding in zip(chunk_records, embeddings):
+        page_start = c["page_start"]
+        ocr_extracted = bool(ocr_by_page.get(page_start, False))
         doc = {
             "text": c["text"],
             "filename": filename,
@@ -651,7 +786,7 @@ async def ingest_document(
             "chunkIndex": c["chunk_index"],
             "totalChunks": len(chunk_records),
             "chunkingVersion": CHUNKING_VERSION,
-            "pageStart": c["page_start"],
+            "pageStart": page_start,
             "sectionHeader": c["section_header"],
             "metadata": {
                 "chunkSize": len(c["text"]),
@@ -660,8 +795,10 @@ async def ingest_document(
                 "originalFilename": filename,
                 "category": category,
                 "chunkingVersion": CHUNKING_VERSION,
-                "pageStart": c["page_start"],
+                "pageStart": page_start,
                 "sectionHeader": c["section_header"],
+                "fileType": file_type,
+                "ocrExtracted": ocr_extracted,
             },
             "createdAt": datetime.now(),
         }

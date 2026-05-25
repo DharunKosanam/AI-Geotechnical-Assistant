@@ -12,6 +12,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY is not set in environment variables")
 
+# Model is env-overridable so we can swap without code changes. Llama 4 Scout
+# is the default since it doesn't emit <think> tags and has much higher TPM
+# headroom than qwen3-32b.
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
@@ -60,6 +65,26 @@ PRE_RERANK_POOL_KB = int(os.getenv("PRE_RERANK_POOL_KB", "10"))
 # Folder of source PDFs used by the kb_admin CLI for reindex/add operations.
 # Required for reindex when chunks don't carry the original PDF binary.
 KNOWLEDGE_BASE_PDF_PATH = os.getenv("KNOWLEDGE_BASE_PDF_PATH", "")
+
+# ---------------------------------------------------------------------------
+# OCR Configuration (Tesseract)
+# ---------------------------------------------------------------------------
+# Master switch — when False, image files are skipped and PDF pages with
+# little extractable text are not OCR'd.
+OCR_ENABLED = os.getenv("OCR_ENABLED", "true").lower() == "true"
+
+# Path to the tesseract executable. On Windows this is typically
+# "C:/Program Files/Tesseract-OCR/tesseract.exe". Leave empty on Linux/macOS
+# when tesseract is on PATH.
+TESSERACT_PATH = os.getenv("TESSERACT_PATH", "")
+
+# A page (or OCR result) shorter than this is treated as "no usable text"
+# — for PDFs, that triggers the OCR fallback; for images, it triggers a warn+skip.
+OCR_MIN_TEXT_LEN = int(os.getenv("OCR_MIN_TEXT_LEN", "50"))
+
+# Embedded PDF images smaller than this (width OR height) are skipped when
+# OCRing figures/diagrams — tiny images are usually icons/decorations.
+PDF_IMAGE_OCR_MIN_DIM = int(os.getenv("PDF_IMAGE_OCR_MIN_DIM", "200"))
 
 # CORS Origins
 CORS_ORIGINS = [

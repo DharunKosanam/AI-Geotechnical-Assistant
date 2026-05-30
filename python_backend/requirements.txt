@@ -24,3 +24,6 @@ pandas
 tabulate
 pytesseract
 python-pptx
+# Eval-only deps (used by app/eval/evaluate_rag.py)
+# Custom Groq-direct LLM judge -- relies only on httpx (already above).
+langchain-groq

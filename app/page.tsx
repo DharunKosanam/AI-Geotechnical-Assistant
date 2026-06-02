@@ -1,7 +1,6 @@
 "use client";
 import React from "react";
 import Chat from "./components/chat";
-import FileViewer from "./components/file-viewer";
 import styles from "./page.module.css";
 
 const FileSearchPage = () => {
@@ -12,9 +11,6 @@ const FileSearchPage = () => {
           <div className={styles.chat}>
             <Chat />
           </div>
-        </div>
-        <div className={styles.column}>
-          <FileViewer />
         </div>
       </div>
     </main>

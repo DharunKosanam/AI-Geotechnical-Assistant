@@ -14,6 +14,52 @@ import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistant
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
 import ThreadList from "./thread-list";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
+import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle } from "lucide-react";
+
+// --- File attachment config (mirrors python_backend file_processing.SUPPORTED_EXTENSIONS) ---
+const SUPPORTED_EXTENSIONS = [
+  ".pdf", ".docx",
+  ".xlsx", ".xls", ".csv",
+  ".png", ".jpg", ".jpeg", ".tiff", ".tif",
+  ".pptx",
+];
+// accept attribute for the hidden file input (per UI spec)
+const FILE_ACCEPT = ".pdf,.docx,.xlsx,.xls,.csv,.pptx,.png,.jpg,.jpeg,.tiff";
+const SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, TIFF";
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — must match backend
+
+// Status polling: the /api/upload response returns immediately while the
+// backend ingests in the background, so we poll until embeddings actually land.
+const POLL_INTERVAL_MS = 1500;
+const POLL_TIMEOUT_MS = 5 * 60 * 1000; // give up after 5 minutes
+
+// Friendly labels for the optional stage text shown under an uploading chip.
+const STAGE_LABELS: Record<string, string> = {
+  extracting: "Extracting...",
+  ocr: "OCR...",
+  chunking: "Chunking...",
+  embedding: "Embedding...",
+  done: "Done",
+};
+const stageLabel = (stage?: string): string =>
+  (stage && STAGE_LABELS[stage]) || "Processing...";
+
+const getExt = (filename: string): string => {
+  const i = filename.lastIndexOf(".");
+  return i >= 0 ? filename.slice(i).toLowerCase() : "";
+};
+const isSupportedFile = (filename: string): boolean =>
+  SUPPORTED_EXTENSIONS.includes(getExt(filename));
+
+// One attachment chip in the input area, tracking its upload lifecycle.
+type AttachedFile = {
+  id: string;
+  name: string;
+  status: "uploading" | "ready" | "error";
+  stage?: string; // backend ingest stage while processing (extracting/ocr/...)
+  error?: string;
+  settled?: boolean; // transient: after the success check, revert chip to the file icon
+};
 
 type MessageProps = {
   role: "user" | "assistant" | "code";
@@ -300,7 +346,24 @@ const Chat = ({
   const threadListRef = useRef<any>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinThreadInput, setJoinThreadInput] = useState('');
-  
+
+  // --- File attachment UI state (replaces the removed right-hand file panel) ---
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  // True while any chip is still uploading/processing — used to block sending.
+  const isUploading = attachedFiles.some((f) => f.status === "uploading");
+  // Per-file status poll timers so each chip can be cancelled independently (e.g. via X).
+  const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+
+  // Clear any outstanding status polls when the chat unmounts.
+  useEffect(() => {
+    const timers = pollTimersRef.current;
+    return () => {
+      timers.forEach((t) => clearInterval(t));
+      timers.clear();
+    };
+  }, []);
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const [isNewThread, setIsNewThread] = useState(false);
@@ -746,8 +809,8 @@ const Chat = ({
         // Enter (without Shift): Submit the message
         e.preventDefault(); // Prevent newline
         
-        // Don't submit if already processing or input is empty
-        if (inputDisabled || !userInput.trim()) {
+        // Don't submit if already processing, uploading, or input is empty
+        if (inputDisabled || isUploading || !userInput.trim()) {
           return;
         }
         
@@ -759,7 +822,7 @@ const Chat = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userInput.trim() || inputDisabled) return;
+    if (!userInput.trim() || inputDisabled || isUploading) return;
 
     const messageText = userInput;
     setUserInput("");
@@ -1260,6 +1323,169 @@ const Chat = ({
     }
   };
 
+  // Patch a single chip by id. Uses functional setState so concurrent uploads
+  // don't clobber each other; if the chip was removed mid-flight this no-ops.
+  const updateAttachedFile = (id: string, patch: Partial<AttachedFile>) => {
+    setAttachedFiles((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, ...patch } : f))
+    );
+  };
+
+  // Stop and forget a file's status poll (if any).
+  const stopPolling = (id: string) => {
+    const timer = pollTimersRef.current.get(id);
+    if (timer !== undefined) {
+      clearInterval(timer);
+      pollTimersRef.current.delete(id);
+    }
+  };
+
+  // Poll GET /api/upload/status until the backend reports the file is fully
+  // ingested (embeddings written) or errored. Each file polls independently so
+  // removing its chip via X cancels just that cycle.
+  const startPolling = (id: string, filename: string) => {
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+
+    const poll = async () => {
+      // Safety timeout — don't spin forever if ingest never resolves.
+      if (Date.now() > deadline) {
+        stopPolling(id);
+        updateAttachedFile(id, { status: "error", error: "Processing timed out" });
+        return;
+      }
+
+      try {
+        const resp = await fetch(API_ENDPOINTS.uploadStatus(filename));
+        if (!resp.ok) return; // transient server hiccup — keep polling until timeout
+        const data = await resp.json();
+
+        if (data.status === "ready") {
+          stopPolling(id);
+          updateAttachedFile(id, { status: "ready", stage: undefined });
+          // Settle the chip back to the calm file icon after the success check.
+          setTimeout(() => updateAttachedFile(id, { settled: true }), 1500);
+        } else if (data.status === "error") {
+          stopPolling(id);
+          updateAttachedFile(id, { status: "error", error: data.error || "Processing failed" });
+        } else {
+          // Still processing — reflect the current stage on the chip.
+          updateAttachedFile(id, { stage: data.stage });
+        }
+      } catch (e) {
+        // Network blip — leave the chip spinning and try again next tick.
+        console.warn(`Status poll failed for ${filename}:`, e);
+      }
+    };
+
+    poll(); // check immediately, then on an interval
+    const timer = setInterval(poll, POLL_INTERVAL_MS);
+    pollTimersRef.current.set(id, timer);
+  };
+
+  // Uploads one file and reflects the outcome on its chip.
+  // The /api/upload call itself is unchanged — only the chip status is new.
+  const uploadAttachedFile = async (id: string, file: File) => {
+    const data = new FormData();
+    data.append("file", file); // "file" (singular) for /upload endpoint
+    data.append("category", "user_upload"); // tag as user upload (not knowledge base)
+
+    try {
+      const resp = await fetch(API_ENDPOINTS.uploadFile(), {
+        method: "POST",
+        body: data,
+      });
+
+      if (!resp.ok) {
+        const errorData = await resp.json().catch(() => ({ detail: "Unknown error" }));
+        console.error(`Failed to upload ${file.name}:`, errorData);
+        updateAttachedFile(id, {
+          status: "error",
+          error: errorData.detail || `Upload failed (status ${resp.status})`,
+        });
+        return;
+      }
+
+      const result = await resp.json();
+      const hasProcessingError = result.status === "processing_failed" || result.error;
+
+      if (hasProcessingError) {
+        updateAttachedFile(id, {
+          status: "error",
+          error: result.error || "Processing issue — file may be partially indexed.",
+        });
+        return;
+      }
+
+      // Upload accepted. The backend now ingests (extract/OCR/chunk/embed) in a
+      // background task, so the chip stays "uploading" and we poll the status
+      // endpoint until embeddings actually land.
+      updateAttachedFile(id, { stage: result.stage || "processing" });
+      startPolling(id, file.name);
+    } catch (error: any) {
+      console.error(`Error uploading ${file.name}:`, error);
+      updateAttachedFile(id, {
+        status: "error",
+        error: error?.message || "Upload failed. Please try again.",
+      });
+    }
+  };
+
+  // Triggered by the hidden file <input> behind the "+" button.
+  // Pre-flight validation is unchanged; valid files render immediately as
+  // "uploading" chips, then each upload resolves its own chip independently.
+  const handleFileAttach = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = event.target.files;
+    if (!selectedFiles || selectedFiles.length === 0) return;
+
+    // Client-side pre-flight: filter out unsupported types and oversize files.
+    const valid: File[] = [];
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const f = selectedFiles[i];
+      if (!isSupportedFile(f.name)) {
+        alert(`"${f.name}" is not a supported file type.\n\nSupported: ${SUPPORTED_LABEL}`);
+        continue;
+      }
+      if (f.size > MAX_UPLOAD_BYTES) {
+        alert(`"${f.name}" is ${(f.size / 1024 / 1024).toFixed(1)} MB which exceeds the 50 MB limit.`);
+        continue;
+      }
+      valid.push(f);
+    }
+
+    // Reset the input so the same file can be re-selected.
+    event.target.value = "";
+
+    if (valid.length === 0) return;
+
+    // Assign each valid file a stable id and render its chip right away.
+    const entries = valid.map((file, i) => ({
+      id:
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${i}-${file.name}`,
+      file,
+    }));
+
+    setAttachedFiles((prev) => [
+      ...prev,
+      ...entries.map(({ id, file }) => ({
+        id,
+        name: file.name,
+        status: "uploading" as const,
+      })),
+    ]);
+
+    // Fire uploads concurrently; each resolves its own chip by id.
+    entries.forEach(({ id, file }) => uploadAttachedFile(id, file));
+  };
+
+  // Removes an attachment chip from the input (UI only). Cancels its status
+  // poll; any in-flight upload request resolves in the background and is ignored.
+  const removeAttachedFile = (id: string) => {
+    stopPolling(id);
+    setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  };
+
   const deduplicatedMessages = useMemo(() => {
     const result: MessageProps[] = [];
     for (const msg of messages) {
@@ -1327,27 +1553,101 @@ const Chat = ({
             </div>
           </div>
         )}
-        <textarea
-          className={styles.input}
-          value={userInput}
-          onChange={(e) => setUserInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Enter your question (Shift+Enter for new line)"
-          rows={1}
-          style={{
-            resize: 'vertical',
-            minHeight: '40px',
-            maxHeight: '200px',
-            overflow: 'auto',
-          }}
+        {/* Hidden file input — kept in the DOM, triggered by the "+" button.
+            Same picker the old "Attach files" button used. */}
+        <input
+          type="file"
+          ref={fileInputRef}
+          className="hidden"
+          accept={FILE_ACCEPT}
+          multiple
+          onChange={handleFileAttach}
         />
-        <button
-          type="submit"
-          className={styles.button}
-          disabled={inputDisabled}
-        >
-          Send
-        </button>
+        <div className={styles.inputContainer}>
+          {attachedFiles.length > 0 && (
+            <div className={styles.attachmentChips}>
+              {attachedFiles.map((file) => (
+                <div
+                  key={file.id}
+                  className={`${styles.chip} ${
+                    file.status === "error" ? styles.chipError : ""
+                  }`}
+                  title={file.status === "error" ? file.error : undefined}
+                >
+                  {file.status === "uploading" && (
+                    <Loader2
+                      size={16}
+                      className={`${styles.chipIcon} ${styles.spinner}`}
+                    />
+                  )}
+                  {file.status === "ready" && !file.settled && (
+                    <Check size={16} color="#4ade80" className={styles.chipIcon} />
+                  )}
+                  {file.status === "ready" && file.settled && (
+                    <FileIcon size={14} className={styles.chipIcon} />
+                  )}
+                  {file.status === "error" && (
+                    <AlertCircle size={16} color="#f87171" className={styles.chipIcon} />
+                  )}
+                  <span className={styles.chipText}>
+                    <span
+                      className={styles.chipName}
+                      title={file.status === "error" ? file.error : file.name}
+                    >
+                      {file.name}
+                    </span>
+                    {file.status === "uploading" && (
+                      <span className={styles.chipStage}>
+                        {stageLabel(file.stage)}
+                      </span>
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.chipRemove}
+                    onClick={() => removeAttachedFile(file.id)}
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className={styles.inputRow}>
+            <button
+              type="button"
+              className={styles.plusBtn}
+              onClick={() => fileInputRef.current?.click()}
+              title={`Attach files (${SUPPORTED_LABEL})`}
+              aria-label="Attach files"
+            >
+              <Plus size={20} />
+            </button>
+            <textarea
+              className={styles.input}
+              value={userInput}
+              onChange={(e) => setUserInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Enter your question (Shift+Enter for new line)"
+              rows={1}
+              style={{
+                resize: 'vertical',
+                minHeight: '40px',
+                maxHeight: '200px',
+                overflow: 'auto',
+              }}
+            />
+            <button
+              type="submit"
+              className={styles.button}
+              disabled={inputDisabled || isUploading}
+              title={isUploading ? "Waiting for files to finish uploading..." : undefined}
+            >
+              Send
+            </button>
+          </div>
+        </div>
       </form>
     </div>
     </div>

@@ -74,9 +74,9 @@ async def generate_answer_with_groq(
 
 Your task is to answer questions accurately using the provided context from technical documents.
 
-SCOPE RULES (CRITICAL - FOLLOW STRICTLY):
-- If the user's question is NOT related to geotechnical engineering, soil mechanics, or the content of their uploaded documents, politely decline. Say: "I'm here to help with questions related to geotechnical engineering and soil mechanics. If you have a specific question about topics like soil properties, erosion mechanisms, or other geotechnical concepts, feel free to ask."
-- Do NOT attempt to answer off-topic questions. Do NOT try to loosely connect non-geotechnical questions back to geotechnical concepts.
+SCOPE RULES:
+- If the user's question is NOT related to geotechnical engineering AND there is no prior conversation context that establishes a geotechnical topic, politely decline. Say: "I'm here to help with questions related to geotechnical engineering and soil mechanics. If you have a specific question about topics like soil properties, erosion mechanisms, or other geotechnical concepts, feel free to ask."
+- However, if the conversation history shows the user is in the middle of discussing a geotechnical topic, treat follow-up questions, clarifications, short responses ('ok', 'go on', 'more detail'), and summarization requests as on-topic — they inherit the topic of the conversation.
 - If the user uploaded a document and asks about it, answer based on that document even if it is not geotechnical.
 
 Guidelines:
@@ -90,14 +90,20 @@ Guidelines:
 
 CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
     
-    # Format conversation history if provided
+    # Format conversation history if provided. The caller (chat.py) already
+    # caps this list (last 20 turns, 6000-token budget), so include all of it
+    # rather than re-truncating to the last few messages.
     history_text = ""
     if history and len(history) > 0:
         history_text = "\n\nCONVERSATION HISTORY:\n"
-        for msg in history[-5:]:  # Last 5 messages for context
+        for msg in history:
             role = msg.get('role', 'user').upper()
             content = msg.get('content', '')
             history_text += f"{role}: {content}\n"
+        # Debug: confirm prior turns actually reach the prompt (wire check).
+        print(f"[PROMPT] Including {len(history)} prior turns:{history_text}")
+    else:
+        print("[PROMPT] No CONVERSATION HISTORY in prompt (history empty)")
     
     # Format context section
     context_section = ""

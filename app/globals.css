@@ -12,6 +12,12 @@
   margin: 0;
 }
 
+/* Utility: visually remove an element while keeping it in the DOM
+   (used to hide the file <input> behind the "+" attach button). */
+.hidden {
+  display: none !important;
+}
+
 html,
 body {
   max-width: 100vw;

@@ -7,7 +7,7 @@ import re
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 from datetime import datetime
-from typing import List
+from typing import List, Dict
 
 from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse
 from app.core.config import USER_ID
@@ -157,13 +157,60 @@ async def chat_with_rag(request: RAGChatRequest):
             context = ""
             sources = []
             print("   [WARNING]  No relevant chunks found")
-        
+
+        # Step 2.5: Load prior conversation turns for this thread so follow-up
+        # questions ("ok", "summarize everything") have context. History lives in
+        # MongoDB; the current user turn is saved later (Step 4), so it is not yet
+        # in the DB and won't be duplicated here. (request.history is ignored —
+        # the frontend sends []; the DB is the source of truth.)
+        conversation_history: List[Dict[str, str]] = []
+        if thread_id:
+            try:
+                # Pull the most recent 20 messages (newest first), then restore
+                # chronological order for the prompt.
+                cursor = (
+                    messages_collection
+                    .find({"threadId": thread_id, "userId": USER_ID})
+                    .sort("createdAt", -1)
+                    .limit(20)
+                )
+                loaded: List[Dict[str, str]] = []
+                async for doc in cursor:
+                    content = doc.get("content", "")
+                    if content:
+                        loaded.append({"role": doc.get("role", "user"), "content": content})
+                loaded.reverse()  # oldest -> newest
+
+                # Token-budget guard: rough len//4 heuristic. Drop the OLDEST
+                # turns until under the cap, always keeping the most recent ones.
+                HISTORY_TOKEN_CAP = 6000
+
+                def _est_tokens(msgs: List[Dict[str, str]]) -> int:
+                    return sum(len(m["content"]) // 4 for m in msgs)
+
+                dropped = 0
+                while len(loaded) > 1 and _est_tokens(loaded) > HISTORY_TOKEN_CAP:
+                    loaded.pop(0)
+                    dropped += 1
+
+                conversation_history = loaded
+                print(
+                    f"[HISTORY] Loaded {len(conversation_history)} prior messages for "
+                    f"thread {thread_id} (~{_est_tokens(conversation_history)} tokens; "
+                    f"dropped {dropped} oldest over {HISTORY_TOKEN_CAP}-token cap)"
+                )
+            except Exception as hist_err:
+                print(f"[WARNING] Failed to load conversation history: {hist_err}")
+                conversation_history = []
+        else:
+            print("[HISTORY] No thread_id provided — sending empty history")
+
         # Step 3: Generate answer with Groq
         print("[AI] Generating answer with Groq...")
         answer = await generate_answer_with_groq(
             query=request.query,
             context=context,
-            history=request.history
+            history=conversation_history
         )
         
         print(f"   [RESULT] Answer from LLM service: {len(answer)} chars")

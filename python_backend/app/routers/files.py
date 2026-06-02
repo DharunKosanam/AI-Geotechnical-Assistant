@@ -242,6 +242,66 @@ async def upload_document(
         )
 
 
+@router.get("/upload/status")
+async def upload_status(filename: str, user_id: Optional[str] = None):
+    """
+    Report ingest progress for an uploaded file so the UI can keep its chip
+    spinner running until embeddings actually land.
+
+    `/api/upload` returns 200 immediately and runs extraction/OCR/chunking/
+    embedding in a background task. That task flips the parent file-metadata
+    doc's `status` to "processed" only AFTER ingest_document() fully completes
+    (embeddings written) — or "failed" with an `error`. So the parent doc's
+    status is an accurate signal that needs no extra state and no changes to
+    the ingest pipeline.
+
+    user_id is optional: this deployment is single-user (config.USER_ID), so it
+    defaults to USER_ID when the caller omits it.
+    """
+    uid = user_id or USER_ID
+    try:
+        # Latest parent (file-level) doc for this filename. Chunks are excluded
+        # via chunkIndex, matching the listing endpoints.
+        doc = await files_collection.find_one(
+            {
+                "userId": uid,
+                "filename": filename,
+                "chunkIndex": {"$exists": False},
+            },
+            {"status": 1, "error": 1},
+            sort=[("createdAt", -1)],
+        )
+
+        if not doc:
+            # Upload row not visible yet (race right after POST) — treat as processing.
+            return {"filename": filename, "status": "processing", "stage": "processing"}
+
+        raw_status = doc.get("status", "processing")
+
+        if raw_status == "processed":
+            return {"filename": filename, "status": "ready", "stage": "done"}
+
+        if raw_status == "failed":
+            return {
+                "filename": filename,
+                "status": "error",
+                "stage": "error",
+                "error": doc.get("error") or "Ingestion failed",
+            }
+
+        # Still working. The background task doesn't expose fine-grained stages
+        # (that would require instrumenting the ingest pipeline), so report a
+        # coarse "processing" stage; the UI falls back to "Processing...".
+        return {"filename": filename, "status": "processing", "stage": "processing"}
+
+    except Exception as error:
+        print(f"[ERROR] Error getting upload status for {filename}: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get upload status: {str(error)}",
+        )
+
+
 @router.get("/assistants/files")
 async def list_files(type: Optional[str] = None, category: Optional[str] = None):
     """

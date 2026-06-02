@@ -35,20 +35,3 @@
   width: 100%;
   overflow: hidden;
 }
-
-
-.column {
-  display: flex;
-  flex-direction: column;
-  width: 20%;
-  height: 100vh;
-  max-height: 100vh;
-  overflow: hidden;
-}
-
-.column > * {
-  border-radius: 16px;
-  overflow: hidden;
-  width: 100%;
-  flex: 1;
-}

@@ -31,6 +31,7 @@
 
 .inputForm {
   display: flex;
+  align-items: flex-end;
   width: 100%;
   padding: 10px;
   padding-bottom: 40px;
@@ -67,6 +68,117 @@
   background-color: lightgrey;
 }
 
+/* Input container holds the attachment chips (top) and the [+] [textarea] [Send] row. */
+.inputContainer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.inputRow {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+}
+
+/* Circular "+" attach button — mirrors the Send button, on the left of the input. */
+.plusBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: #000;
+  color: #fff;
+  cursor: pointer;
+}
+
+.plusBtn:hover {
+  background-color: #333;
+}
+
+/* ChatGPT-style attachment chips above the textarea. */
+.attachmentChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 10px 8px 10px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background-color: #2a2a2a;
+  color: #fff;
+  font-size: 13px;
+}
+
+.chipIcon {
+  flex-shrink: 0;
+}
+
+.chipText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chipName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Small ingest-stage line under the filename while a chip is uploading. */
+.chipStage {
+  font-size: 11px;
+  color: #8e8ea0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.chipRemove:hover {
+  opacity: 0.7;
+}
+
+/* Upload progress indicators for attachment chips. */
+.spinner {
+  color: #8e8ea0; /* secondary text color — keeps the spinner subtle */
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chipError {
+  background: #3a1f1f;
+}
+
 .messages {
   flex-grow: 1;
   overflow-y: auto;
@@ -75,6 +187,15 @@
   flex-direction: column;
   order: 2;
   overflow-anchor: none;
+}
+
+/* Pin the conversation to the bottom. .messages flex-grows to fill the height,
+   so a short conversation would otherwise float at the top with a large empty
+   gap below it. margin-top:auto on the first message absorbs that free space
+   (last message sits just above the input) and collapses to 0 once the content
+   overflows — so scrolling still reaches the top. */
+.messages > *:first-child {
+  margin-top: auto;
 }
 
 .userMessage,

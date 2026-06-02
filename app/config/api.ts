@@ -107,6 +107,18 @@ export const API_ENDPOINTS = {
     }
     return `/api/files/upload`;
   },
+
+  // File processing status — polled after upload while the backend ingests
+  // (extraction/OCR/chunking/embedding) in a background task.
+  uploadStatus: (filename: string, userId?: string) => {
+    const params = new URLSearchParams({ filename });
+    if (userId) params.set("user_id", userId);
+    const qs = params.toString();
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/upload/status?${qs}`;
+    }
+    return `/api/files/upload/status?${qs}`;
+  },
   
   listFiles: () => {
     if (BACKEND_TYPE === 'python') {

@@ -169,3 +169,103 @@ Please provide a detailed answer:"""
     except Exception as e:
         raise Exception(f"Failed to generate answer with Groq: {str(e)}")
 
+
+# Deterministic summary-request detection. The rewriter LLM is unreliable for
+# these (with long histories it expands "summarize..." into a real topic query
+# instead of returning NONE), so we catch them with cheap patterns first.
+# Extend this list as we observe phrasings that slip through.
+SUMMARY_TRIGGERS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^summari[sz]e",
+        r"^sum up",
+        r"^recap",
+        r"^tl;?dr",
+        r"what (have|did) we (discuss|talk about|cover)",
+        r"what was (the|our) (discussion|conversation) about",
+        r"give me a summary",
+        r"can you summari[sz]e",
+    )
+]
+
+
+async def rewrite_query_with_history(
+    query: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """
+    Rewrite a (possibly vague) follow-up message into a standalone retrieval
+    query using recent conversation context, so the vector search sees the full
+    topic rather than just "ok" / "how does it differ".
+
+    Returns one of:
+        - a short standalone search query (str) to embed + search, or
+        - "NONE" when the user is asking for a summary of the conversation —
+          the caller should then skip retrieval and answer from history alone.
+
+    Falls back to returning the raw query unchanged when there is no history,
+    no API key, or the LLM call fails — so retrieval still happens.
+    """
+    if not history:
+        return query
+
+    # Deterministic summary detection — skip retrieval (and the rewriter LLM
+    # call) entirely when the user asks to summarize the conversation.
+    normalized = query.strip().lower()
+    if any(pat.search(normalized) for pat in SUMMARY_TRIGGERS):
+        print(f'[QUERY_REWRITE] Original: "{query}" -> SKIPPED (summary detected, no LLM call)')
+        return "NONE"
+
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        # No key — don't block retrieval, just use the raw query.
+        return query
+
+    # Dedicated low-temperature, short-output instance for deterministic,
+    # cheap rewrites (separate from the answer LLM which runs at temp 0.3).
+    rewriter = Groq(
+        model=GROQ_MODEL,
+        api_key=groq_api_key,
+        temperature=0,
+        max_tokens=120,
+        request_timeout=30.0,
+    )
+
+    # Last 4 turns are enough context to resolve a follow-up.
+    recent = history[-4:]
+    history_block = "\n".join(
+        f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in recent
+    )
+
+    rewrite_prompt = f"""Given the conversation history below, rewrite the user's latest message as a standalone search query that captures the full topic context. Output ONLY the rewritten query, nothing else. If the message is just an acknowledgement ('ok', 'thanks', 'continue'), output the previous user question instead. If the message is asking for a summary of the conversation, output NONE.
+
+CONVERSATION HISTORY:
+{history_block}
+
+LATEST MESSAGE: {query}
+
+Standalone search query:"""
+
+    try:
+        response = await rewriter.acomplete(rewrite_prompt)
+        rewritten = (response.text or "").strip()
+
+        # Defensive cleanup: drop surrounding quotes/backticks and keep only the
+        # first line in case the model adds commentary.
+        if rewritten:
+            rewritten = rewritten.splitlines()[0].strip().strip('"').strip("'").strip("`").strip()
+
+        if not rewritten:
+            return query
+        if rewritten.upper() == "NONE":
+            return "NONE"
+
+        # Keep it short (~30 words) — guard against the model over-expanding.
+        words = rewritten.split()
+        if len(words) > 30:
+            rewritten = " ".join(words[:30])
+        return rewritten
+    except Exception as e:
+        print(f"[QUERY_REWRITE] Rewrite failed ({e}); using raw query")
+        return query
+

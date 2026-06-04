@@ -12,7 +12,7 @@ from typing import List, Dict
 from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse
 from app.core.config import USER_ID
 from app.core.database import conversations_collection, files_collection, messages_collection
-from app.services.llm_service import get_llm, generate_answer_with_groq
+from app.services.llm_service import get_llm, generate_answer_with_groq, rewrite_query_with_history
 from app.services.rag_service import query_with_context, query_vector_store, get_clean_title
 from app.services.cache_service import get_redis_client
 
@@ -121,48 +121,11 @@ async def chat_with_rag(request: RAGChatRequest):
         except Exception as cache_error:
             print(f"[WARNING]  Cache check failed: {cache_error}")
         
-        # Step 1: Query vector store with prioritized search
-        # Note: query_vector_store now returns up to 8 results (5 user + 3 KB)
-        chunks = await query_vector_store(request.query, top_k=8)
-        print(f"[SEARCH] Retrieved {len(chunks)} total chunks (user uploads prioritized)")
-        
-        # Step 2: Format context with academic titles and extract unique sources
-        if chunks and len(chunks) > 0:
-            context = "\n\n".join([
-                f"[Source: {get_clean_title(chunk['filename'])['title']}]\n{chunk['text']}"
-                for chunk in chunks
-            ])
-            seen_titles: set[str] = set()
-            sources: list[dict] = []
-            for chunk in chunks:
-                info = get_clean_title(chunk["filename"])
-                if info["title"] in seen_titles:
-                    continue
-                seen_titles.add(info["title"])
-                # Expose fileType so the UI can render the right icon next to
-                # each citation (PDF vs Word vs Excel vs slide vs OCR'd image).
-                meta = chunk.get("metadata") or {}
-                file_type = meta.get("fileType")
-                if not file_type:
-                    fn = chunk.get("filename", "")
-                    file_type = ("." + fn.rsplit(".", 1)[-1].lower()) if "." in fn else ""
-                sources.append({
-                    "title": info["title"],
-                    "url": info["url"],
-                    "filename": chunk.get("filename"),
-                    "fileType": file_type,
-                })
-            print(f"   Sources: {', '.join(s['title'] for s in sources)}")
-        else:
-            context = ""
-            sources = []
-            print("   [WARNING]  No relevant chunks found")
-
-        # Step 2.5: Load prior conversation turns for this thread so follow-up
+        # Step 1: Load prior conversation turns for this thread so follow-up
         # questions ("ok", "summarize everything") have context. History lives in
-        # MongoDB; the current user turn is saved later (Step 4), so it is not yet
-        # in the DB and won't be duplicated here. (request.history is ignored —
-        # the frontend sends []; the DB is the source of truth.)
+        # MongoDB; the current user turn is saved later, so it is not yet in the
+        # DB and won't be duplicated here. (request.history is ignored — the
+        # frontend sends []; the DB is the source of truth.)
         conversation_history: List[Dict[str, str]] = []
         if thread_id:
             try:
@@ -204,6 +167,66 @@ async def chat_with_rag(request: RAGChatRequest):
                 conversation_history = []
         else:
             print("[HISTORY] No thread_id provided — sending empty history")
+
+        # Step 1.5: History-aware query rewrite. Vague follow-ups ("ok",
+        # "how does it differ") retrieve poorly on their own, so rewrite them into
+        # a standalone query using the conversation context. With no history we
+        # keep the raw message (no extra LLM call). A "NONE" result means a
+        # summary request — skip retrieval and answer from history alone.
+        retrieval_query = request.query
+        skip_retrieval = False
+        if conversation_history:
+            rewritten = await rewrite_query_with_history(request.query, conversation_history)
+            if rewritten == "NONE":
+                skip_retrieval = True
+                print(f'[QUERY_REWRITE] Original: "{request.query}" -> SKIPPED (no retrieval)')
+            elif rewritten and rewritten != request.query:
+                retrieval_query = rewritten
+                print(f'[QUERY_REWRITE] Original: "{request.query}" -> Rewritten: "{retrieval_query}"')
+            else:
+                print(f'[QUERY_REWRITE] Original: "{request.query}" -> unchanged')
+
+        # Step 2: Query vector store with prioritized search using the (possibly
+        # rewritten) standalone query. query_vector_store returns up to 8 results
+        # (5 user + 3 KB). For a summary request we skip retrieval entirely.
+        if skip_retrieval:
+            chunks = []
+            print("[SEARCH] Retrieval skipped for summary request - relying on conversation history")
+        else:
+            chunks = await query_vector_store(retrieval_query, top_k=8)
+            print(f"[SEARCH] Retrieved {len(chunks)} total chunks (user uploads prioritized)")
+        
+        # Step 2b: Format context with academic titles and extract unique sources
+        if chunks and len(chunks) > 0:
+            context = "\n\n".join([
+                f"[Source: {get_clean_title(chunk['filename'])['title']}]\n{chunk['text']}"
+                for chunk in chunks
+            ])
+            seen_titles: set[str] = set()
+            sources: list[dict] = []
+            for chunk in chunks:
+                info = get_clean_title(chunk["filename"])
+                if info["title"] in seen_titles:
+                    continue
+                seen_titles.add(info["title"])
+                # Expose fileType so the UI can render the right icon next to
+                # each citation (PDF vs Word vs Excel vs slide vs OCR'd image).
+                meta = chunk.get("metadata") or {}
+                file_type = meta.get("fileType")
+                if not file_type:
+                    fn = chunk.get("filename", "")
+                    file_type = ("." + fn.rsplit(".", 1)[-1].lower()) if "." in fn else ""
+                sources.append({
+                    "title": info["title"],
+                    "url": info["url"],
+                    "filename": chunk.get("filename"),
+                    "fileType": file_type,
+                })
+            print(f"   Sources: {', '.join(s['title'] for s in sources)}")
+        else:
+            context = ""
+            sources = []
+            print("   [WARNING]  No relevant chunks found")
 
         # Step 3: Generate answer with Groq
         print("[AI] Generating answer with Groq...")

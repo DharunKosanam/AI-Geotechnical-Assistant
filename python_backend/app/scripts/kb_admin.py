@@ -268,6 +268,96 @@ async def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _add_one_file(
+    pdf_path: Path,
+    existing_filenames: set,
+    skip_existing: bool,
+    stats: Dict[str, Any],
+    progress: Optional[Progress] = None,
+) -> None:
+    """
+    Ingest a single file into the KB, updating `stats` in place.
+
+    `stats` keys: added (int), total_chunks (int), skipped (int),
+    failed (List[Tuple[filename, error]]).
+
+    When the filename already exists in the KB:
+      - skip_existing=True  -> log a yellow SKIP line and move on (no prompt)
+      - skip_existing=False -> prompt to overwrite (backward-compatible)
+    """
+    filename = pdf_path.name
+
+    if filename in existing_filenames:
+        if skip_existing:
+            console.print(f"[yellow]SKIP: {filename} (already in KB)[/yellow]")
+            stats["skipped"] += 1
+            return
+
+        # Backward-compatible interactive overwrite prompt. Pause the live
+        # progress display (if any) so the prompt renders cleanly.
+        if progress is not None:
+            progress.stop()
+        try:
+            overwrite = Confirm.ask(
+                f"[yellow]'{filename}' already exists. Overwrite?[/yellow]",
+                default=False,
+            )
+        finally:
+            if progress is not None:
+                progress.start()
+
+        if not overwrite:
+            console.print(f"[yellow]SKIP: {filename} (declined overwrite)[/yellow]")
+            stats["skipped"] += 1
+            return
+
+        console.print(f"  Deleting existing chunks for {filename}...")
+        await delete_document(filename)
+
+    try:
+        content = pdf_path.read_bytes()
+        result = await ingest_document(filename, content, category=KB_CATEGORY)
+        chunks = result["chunks_created"]
+        console.print(
+            f"[green]ADD: {filename}[/green] — {chunks} chunks "
+            f"({result['total_characters']} chars, v{result['chunking_version']})"
+        )
+        stats["added"] += 1
+        stats["total_chunks"] += chunks
+    except Exception as e:
+        console.print(f"[red]FAIL: {filename} — {e}[/red]")
+        stats["failed"].append((filename, str(e)))
+
+
+def _print_add_summary(stats: Dict[str, Any]) -> None:
+    """Print the end-of-run summary table (always shown)."""
+    failed = stats["failed"]
+
+    table = Table(title="Add Summary", show_header=False, box=None, pad_edge=False)
+    table.add_column("Result", style="bold")
+    table.add_column("Detail")
+    table.add_row(
+        "[green]Added:[/green]",
+        f"{stats['added']} files ({stats['total_chunks']} total chunks created)",
+    )
+    table.add_row(
+        "[yellow]Skipped:[/yellow]",
+        f"{stats['skipped']} files (already in KB)",
+    )
+    table.add_row(
+        "[red]Failed:[/red]",
+        f"{len(failed)} files",
+    )
+
+    console.print()
+    console.print(table)
+
+    if failed:
+        console.print("\n[red]Failed files:[/red]")
+        for fn, err in failed:
+            console.print(f"  [red]•[/red] {fn}: {err}")
+
+
 async def cmd_add(args: argparse.Namespace) -> int:
     paths: List[Path] = []
     if args.folder:
@@ -302,44 +392,54 @@ async def cmd_add(args: argparse.Namespace) -> int:
             return 1
         paths = [p]
 
+    # Query existing KB filenames ONCE up front. Querying per-file would be far
+    # too slow for large batches (173+ files).
     existing_filenames = set(
         await files_collection.distinct(
             "filename", {"category": KB_CATEGORY, "userId": USER_ID}
         )
     )
 
-    added = skipped = failed = 0
-    for pdf_path in paths:
-        filename = pdf_path.name
-        console.print(f"\n[cyan]==> {filename}[/cyan]")
+    stats: Dict[str, Any] = {
+        "added": 0,
+        "total_chunks": 0,
+        "skipped": 0,
+        "failed": [],  # List[Tuple[filename, error]]
+    }
 
-        if filename in existing_filenames:
-            if not Confirm.ask(
-                f"  [yellow]'{filename}' already exists. Overwrite?[/yellow]",
-                default=False,
-            ):
-                console.print("  [yellow]Skipped.[/yellow]")
-                skipped += 1
-                continue
-            console.print("  Deleting existing chunks...")
-            await delete_document(filename)
-
-        try:
-            content = pdf_path.read_bytes()
-            result = await ingest_document(filename, content, category=KB_CATEGORY)
-            console.print(
-                f"  [green]OK[/green] {result['chunks_created']} chunks "
-                f"({result['total_characters']} chars, v{result['chunking_version']})"
+    if args.folder:
+        # Show a progress bar for batch (folder) adds so large runs are visible.
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Adding", total=len(paths))
+            for pdf_path in paths:
+                progress.update(task, description=f"Adding {pdf_path.name[:40]}")
+                await _add_one_file(
+                    pdf_path,
+                    existing_filenames,
+                    args.skip_existing,
+                    stats,
+                    progress,
+                )
+                progress.advance(task)
+    else:
+        for pdf_path in paths:
+            await _add_one_file(
+                pdf_path,
+                existing_filenames,
+                args.skip_existing,
+                stats,
+                None,
             )
-            added += 1
-        except Exception as e:
-            console.print(f"  [red]FAILED:[/red] {e}")
-            failed += 1
 
-    console.print(
-        f"\n[bold]Done.[/bold] added={added} skipped={skipped} failed={failed}"
-    )
-    return 0 if failed == 0 else 1
+    _print_add_summary(stats)
+    return 0 if not stats["failed"] else 1
 
 
 async def cmd_remove(args: argparse.Namespace) -> int:
@@ -472,9 +572,31 @@ def build_parser() -> argparse.ArgumentParser:
     re_p.add_argument("--filename", help="Reindex only this filename")
     re_p.add_argument("--dry-run", action="store_true", help="Preview without changes")
 
-    add_p = sub.add_parser("add", help="Add a PDF (or folder of PDFs) to the KB")
-    add_p.add_argument("path", nargs="?", help="Path to a single PDF")
-    add_p.add_argument("--folder", help="Add every *.pdf inside this folder")
+    add_p = sub.add_parser(
+        "add",
+        help="Add a file (or folder of files) to the KB",
+        description=(
+            "Add one file, or every supported file in a folder, to the "
+            "knowledge base. By default you are prompted before overwriting a "
+            "file whose name is already in the KB; use --skip-existing to skip "
+            "such files silently instead. A summary of added/skipped/failed "
+            "files is printed at the end of every run."
+        ),
+    )
+    add_p.add_argument("path", nargs="?", help="Path to a single file to add")
+    add_p.add_argument(
+        "--folder",
+        help="Add every supported file inside this folder (shows a progress bar)",
+    )
+    add_p.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help=(
+            "Skip files whose filename is already in the KB instead of "
+            "prompting to overwrite. Logs 'SKIP: <filename> (already in KB)' "
+            "and moves on. Works with single-file and --folder mode."
+        ),
+    )
 
     rm_p = sub.add_parser("remove", help="Remove KB docs matching a filename regex")
     rm_p.add_argument("pattern", help="Regex matched against filename")

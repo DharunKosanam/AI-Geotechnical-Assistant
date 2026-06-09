@@ -12,7 +12,7 @@ from typing import List, Dict
 from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse
 from app.core.config import USER_ID
 from app.core.database import conversations_collection, files_collection, messages_collection
-from app.services.llm_service import get_llm, generate_answer_with_groq, rewrite_query_with_history
+from app.services.llm_service import get_llm, generate_answer_with_groq, rewrite_query_with_history, safe_print
 from app.services.rag_service import query_with_context, query_vector_store, get_clean_title
 from app.services.cache_service import get_redis_client
 
@@ -168,23 +168,25 @@ async def chat_with_rag(request: RAGChatRequest):
         else:
             print("[HISTORY] No thread_id provided — sending empty history")
 
-        # Step 1.5: History-aware query rewrite. Vague follow-ups ("ok",
-        # "how does it differ") retrieve poorly on their own, so rewrite them into
-        # a standalone query using the conversation context. With no history we
-        # keep the raw message (no extra LLM call). A "NONE" result means a
+        # Step 1.5: Query rewrite — history-aware resolution + language
+        # normalization. Vague follow-ups ("ok", "how does it differ") retrieve
+        # poorly on their own, and non-English queries miss the English KB
+        # entirely, so we rewrite into a standalone English query using the
+        # conversation context. The rewriter is cost-aware: a plain-English first
+        # message (no history) returns unchanged with no LLM call, while a
+        # non-English first message is still translated. A "NONE" result means a
         # summary request — skip retrieval and answer from history alone.
         retrieval_query = request.query
         skip_retrieval = False
-        if conversation_history:
-            rewritten = await rewrite_query_with_history(request.query, conversation_history)
-            if rewritten == "NONE":
-                skip_retrieval = True
-                print(f'[QUERY_REWRITE] Original: "{request.query}" -> SKIPPED (no retrieval)')
-            elif rewritten and rewritten != request.query:
-                retrieval_query = rewritten
-                print(f'[QUERY_REWRITE] Original: "{request.query}" -> Rewritten: "{retrieval_query}"')
-            else:
-                print(f'[QUERY_REWRITE] Original: "{request.query}" -> unchanged')
+        rewritten = await rewrite_query_with_history(request.query, conversation_history)
+        if rewritten == "NONE":
+            skip_retrieval = True
+            safe_print(f'[QUERY_REWRITE] Original: "{request.query}" -> SKIPPED (no retrieval)')
+        elif rewritten and rewritten != request.query:
+            retrieval_query = rewritten
+            safe_print(f'[QUERY_REWRITE] Original: "{request.query}" -> Rewritten: "{retrieval_query}"')
+        else:
+            safe_print(f'[QUERY_REWRITE] Original: "{request.query}" -> unchanged')
 
         # Step 2: Query vector store with prioritized search using the (possibly
         # rewritten) standalone query. query_vector_store returns up to 8 results

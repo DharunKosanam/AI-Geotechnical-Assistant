@@ -14,6 +14,7 @@ from app.core.config import USER_ID
 from app.core.database import conversations_collection, files_collection, messages_collection
 from app.services.llm_service import get_llm, generate_answer_with_groq, rewrite_query_with_history, safe_print
 from app.services.rag_service import query_with_context, query_vector_store, get_clean_title
+from app.services.citation_filter import filter_sources_by_citations
 from app.services.cache_service import get_redis_client
 
 router = APIRouter(tags=["chat"])
@@ -199,14 +200,24 @@ async def chat_with_rag(request: RAGChatRequest):
             print(f"[SEARCH] Retrieved {len(chunks)} total chunks (user uploads prioritized)")
         
         # Step 2b: Format context with academic titles and extract unique sources
+        no_high_confidence_sources = False
         if chunks and len(chunks) > 0:
+            # Context includes ALL chunks (high- and low-confidence) so the LLM
+            # always has something to work with. Sources, below, exclude the
+            # low-confidence ones.
             context = "\n\n".join([
                 f"[Source: {get_clean_title(chunk['filename'])['title']}]\n{chunk['text']}"
                 for chunk in chunks
             ])
+            # When every retrieved chunk is below the reranker threshold they are
+            # tagged low_confidence (see rag_service._apply_rerank_threshold):
+            # the LLM still gets them as context, but we display NO sources.
+            no_high_confidence_sources = all(c.get("low_confidence") for c in chunks)
             seen_titles: set[str] = set()
             sources: list[dict] = []
             for chunk in chunks:
+                if chunk.get("low_confidence"):
+                    continue  # below reranker threshold: context only, not displayed
                 info = get_clean_title(chunk["filename"])
                 if info["title"] in seen_titles:
                     continue
@@ -255,7 +266,22 @@ async def chat_with_rag(request: RAGChatRequest):
         if any(kw in clean_answer.lower() for kw in refusal_keywords):
             sources = []
             print("[GUARD] Off-topic refusal detected - clearing sources")
-        
+
+        # Step 3b: Narrow displayed sources to what the LLM actually cited in its
+        # formal [Source: ...] block. Retrieval/rerank/prompt are untouched; this
+        # only trims the sources list so users don't see references the model
+        # never used. filter_sources_by_citations falls back to all sources when
+        # there is no citation block or nothing matches. Skipped when sources is
+        # already empty (off-topic refusal, or the Problem 2 no-high-confidence
+        # path), per the design.
+        if sources:
+            high_conf_chunks = [c for c in chunks if not c.get("low_confidence")]
+            cited_chunks = filter_sources_by_citations(clean_answer, high_conf_chunks)
+            cited_titles = {
+                get_clean_title(c["filename"])["title"] for c in cited_chunks
+            }
+            sources = [s for s in sources if s["title"] in cited_titles]
+
         print(f"    Final answer to return ({len(clean_answer)} chars)")
         
         # Step 4: Save messages to database for history
@@ -304,7 +330,8 @@ async def chat_with_rag(request: RAGChatRequest):
         # Step 6: Return simple JSON response
         return RAGChatResponse(
             answer=clean_answer,
-            sources=sources
+            sources=sources,
+            no_high_confidence_sources=no_high_confidence_sources,
         )
         
     except Exception as error:

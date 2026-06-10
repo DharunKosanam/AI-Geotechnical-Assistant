@@ -38,6 +38,8 @@ from app.core.config import (
     RERANKER_ENABLED,
     RERANKER_MODEL,
     RERANK_TOP_K,
+    RERANK_SCORE_THRESHOLD,
+    LOW_CONF_CONTEXT_CHUNKS,
     PRE_RERANK_POOL_USER,
     PRE_RERANK_POOL_KB,
     OCR_ENABLED,
@@ -584,6 +586,53 @@ async def _search_by_category(
     return results[:limit]
 
 
+def _apply_rerank_threshold(
+    ranked: List[Dict[str, Any]],
+    threshold: float = RERANK_SCORE_THRESHOLD,
+    top_k: int = RERANK_TOP_K,
+    low_conf_context: int = LOW_CONF_CONTEXT_CHUNKS,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """
+    Drop reranked chunks the cross-encoder scored as irrelevant.
+
+    ``ranked`` must already be sorted by ``rerank_score`` descending. We cap to
+    the top ``top_k`` (as before), then keep only chunks scoring >= ``threshold``.
+    ms-marco-MiniLM scores go negative for "not relevant", so sub-threshold
+    chunks are retrieval noise that must not be shown to the user as sources.
+
+    Returns ``(chunks, no_high_confidence)``:
+      * Some chunk clears the threshold -> those chunks, each tagged
+        ``low_confidence = False``; ``no_high_confidence = False``.
+      * Nothing clears it -> the top ``low_conf_context`` chunks tagged
+        ``low_confidence = True`` so the LLM still gets *some* context to attempt
+        an answer; ``no_high_confidence = True``. Callers must exclude
+        low-confidence chunks from the displayed sources.
+    """
+    top = ranked[:top_k]
+    high_conf = [c for c in top if c.get("rerank_score", 0.0) >= threshold]
+
+    if high_conf:
+        for c in high_conf:
+            c["low_confidence"] = False
+        dropped = len(top) - len(high_conf)
+        print(
+            f"[RERANK] Threshold {threshold} applied: kept {len(high_conf)}, "
+            f"dropped {dropped} (lowest kept: {high_conf[-1]['rerank_score']:+.2f})"
+        )
+        return high_conf, False
+
+    # Every candidate is below the threshold — no high-confidence sources. Keep a
+    # tiny low-confidence context set for the LLM; the caller hides these.
+    fallback = ranked[:low_conf_context]
+    for c in fallback:
+        c["low_confidence"] = True
+    print(
+        f"[RERANK] All {len(top)} chunks below threshold {threshold} "
+        f"- no high-confidence sources"
+    )
+    return fallback, True
+
+
 async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
     """
     Two-stage vector search with optional cross-encoder reranking.
@@ -640,9 +689,13 @@ async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]
             combined.sort(key=lambda c: c["rerank_score"], reverse=True)
             top = combined[:RERANK_TOP_K]
             print(f"[RERANK] Reranked {len(combined)} candidates -> kept top {len(top)}")
-            for c in top[:3]:
+            # Drop sub-threshold (noise) chunks. When nothing clears the bar the
+            # helper returns the top 1-2 chunks tagged low_confidence=True so the
+            # LLM still gets context; chat.py hides those from the sources list.
+            kept, _no_high_conf = _apply_rerank_threshold(combined)
+            for c in kept[:3]:
                 print(f"   {c['rerank_score']:+.3f} | {c['filename']} (vec {c['score']:.3f})")
-            return top
+            return kept
         except Exception as rerank_err:
             print(f"[WARNING] Rerank failed ({rerank_err}); falling back to vector order")
             # Fall through to legacy filtering path below

@@ -57,6 +57,17 @@ RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
 RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "5"))
 
+# Absolute cross-encoder score floor applied AFTER reranking (and after the
+# top-K cap). ms-marco-MiniLM scores go negative for "not relevant", so chunks
+# below this are dropped from the displayed sources — they are retrieval noise.
+# Tune here without touching the pipeline code.
+RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.0"))
+
+# When every reranked chunk falls below RERANK_SCORE_THRESHOLD we still hand the
+# LLM this many top chunks as low-confidence context (so it can attempt an
+# answer); these are NOT shown as sources.
+LOW_CONF_CONTEXT_CHUNKS = int(os.getenv("LOW_CONF_CONTEXT_CHUNKS", "2"))
+
 # Pre-rerank candidate pool sizes (per category). With reranker disabled,
 # the legacy 5/3 limits are used instead.
 PRE_RERANK_POOL_USER = int(os.getenv("PRE_RERANK_POOL_USER", "15"))

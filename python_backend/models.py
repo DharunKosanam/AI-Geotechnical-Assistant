@@ -111,3 +111,11 @@ class RAGChatResponse(BaseModel):
         ...,
         description="List of source objects ({title, url}) or legacy strings",
     )
+    no_high_confidence_sources: bool = Field(
+        default=False,
+        description=(
+            "True when every retrieved chunk scored below the reranker "
+            "threshold: 'sources' is empty and the answer is built only from "
+            "low-confidence context. Defaults False for cached/legacy responses."
+        ),
+    )

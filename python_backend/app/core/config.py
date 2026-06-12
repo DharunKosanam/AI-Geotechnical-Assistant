@@ -68,10 +68,12 @@ RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.0"))
 # answer); these are NOT shown as sources.
 LOW_CONF_CONTEXT_CHUNKS = int(os.getenv("LOW_CONF_CONTEXT_CHUNKS", "2"))
 
-# Pre-rerank candidate pool sizes (per category). With reranker disabled,
-# the legacy 5/3 limits are used instead.
-PRE_RERANK_POOL_USER = int(os.getenv("PRE_RERANK_POOL_USER", "15"))
-PRE_RERANK_POOL_KB = int(os.getenv("PRE_RERANK_POOL_KB", "10"))
+# Single combined candidate pool size. KB chunks and the current user's uploads
+# compete in ONE vector search ranked purely by similarity (no per-category
+# slots, no user-upload prioritization) before reranking. This replaces the old
+# split PRE_RERANK_POOL_USER (15) + PRE_RERANK_POOL_KB (10) pools. Held at 25 to
+# keep reranker cost constant vs the old 15+10 budget.
+COMBINED_SEARCH_LIMIT = int(os.getenv("COMBINED_SEARCH_LIMIT", "25"))
 
 # Folder of source PDFs used by the kb_admin CLI for reindex/add operations.
 # Required for reindex when chunks don't carry the original PDF binary.

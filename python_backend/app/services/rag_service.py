@@ -40,8 +40,7 @@ from app.core.config import (
     RERANK_TOP_K,
     RERANK_SCORE_THRESHOLD,
     LOW_CONF_CONTEXT_CHUNKS,
-    PRE_RERANK_POOL_USER,
-    PRE_RERANK_POOL_KB,
+    COMBINED_SEARCH_LIMIT,
     OCR_ENABLED,
     OCR_MIN_TEXT_LEN,
     PDF_IMAGE_OCR_MIN_DIM,
@@ -525,15 +524,38 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
 # ---------------------------------------------------------------------------
 # Vector search helpers
 # ---------------------------------------------------------------------------
-async def _search_by_category(
+def _combined_search_filter() -> Dict[str, Any]:
+    """
+    Mongo ``$match`` filter for the single combined search.
+
+    Knowledge-base chunks are global (no user scoping); user_upload chunks are
+    scoped to the current ``USER_ID`` so a user never sees another user's
+    uploads. Factored out so the query construction can be unit-tested without a
+    live DB. (Today USER_ID is a single hardcoded id, so KB chunks happen to
+    carry it too — but keeping KB unscoped here matches the intended semantics:
+    KB is shared, uploads are private.)
+    """
+    return {
+        "$or": [
+            {"category": "knowledge_base"},
+            {"category": "user_upload", "userId": USER_ID},
+        ]
+    }
+
+
+async def _search_combined(
     query_vector: List[float],
-    category: str,
     limit: int,
 ) -> List[Dict[str, Any]]:
     """
-    Vector search filtered by category. We over-fetch and filter client-side
-    because the Atlas vector index doesn't include ``category`` as a
-    filterable field — see project README for the index spec.
+    Single vector search across KB + the current user's uploads, ranked purely
+    by vector similarity. There are no per-category slots and no upload
+    prioritization: a user_upload chunk only enters the pool if it scores well
+    on the query.
+
+    We over-fetch and filter client-side because the Atlas vector index doesn't
+    include ``category`` as a filterable field — see project README for the
+    index spec.
     """
     search_limit = limit * 20
 
@@ -547,12 +569,7 @@ async def _search_by_category(
                 "limit": search_limit,
             }
         },
-        {
-            "$match": {
-                "category": category,
-                "userId": USER_ID,
-            }
-        },
+        {"$match": _combined_search_filter()},
         {"$limit": limit},
         {
             "$project": {
@@ -635,48 +652,48 @@ def _apply_rerank_threshold(
 
 async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
     """
-    Two-stage vector search with optional cross-encoder reranking.
+    Single combined vector search with optional cross-encoder reranking.
+
+    KB chunks and the current user's uploads compete in ONE search
+    (COMBINED_SEARCH_LIMIT = 25) ranked purely by vector similarity — no
+    per-category slots, no user-upload prioritization (Problem 5).
 
     When RERANKER_ENABLED:
-      * Pulls PRE_RERANK_POOL_USER (15) + PRE_RERANK_POOL_KB (10) candidates.
-      * Reranks all survivors TOGETHER on query relevance.
-      * Returns the top RERANK_TOP_K (5) regardless of original category — the
-        cross-encoder picks purely on relevance, so the explicit user-first
-        ordering is dropped in this mode by design.
+      * Reranks all combined candidates TOGETHER on query relevance.
+      * Returns the top RERANK_TOP_K (5) after the score threshold, regardless
+        of original category.
 
     When RERANKER_ENABLED is False (fallback):
-      * Uses the legacy 5/3 pools, MIN_SCORE 0.5 floor, and user-first ordering.
+      * Applies a single MIN_SCORE floor over the combined pool, still purely by
+        vector relevance (no category priority).
 
     ``top_k`` is retained for signature stability but is effectively superseded
     by RERANK_TOP_K when the reranker is on.
     """
-    print(f"[SEARCH] Two-stage search for: {query[:50]}...")
+    print(f"[SEARCH] Combined search (limit {COMBINED_SEARCH_LIMIT})...")
 
     model = get_embedding_model()
     query_vector = list(model.embed([query]))[0].tolist()
 
-    user_pool = PRE_RERANK_POOL_USER if RERANKER_ENABLED else 5
-    kb_pool = PRE_RERANK_POOL_KB if RERANKER_ENABLED else 3
+    combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT)
 
-    # STEP 1: user uploads
-    print(f"[SEARCH] Step 1: Searching user uploads (limit {user_pool})...")
-    user_results = await _search_by_category(query_vector, "user_upload", user_pool)
-    print(f"   Found {len(user_results)} chunks from user uploads")
-    if user_results:
-        user_files = list({r['filename'] for r in user_results})
-        print(f"   Files: {', '.join(user_files[:3])}")
-
-    # STEP 2: knowledge base
-    print(f"[SEARCH] Step 2: Searching knowledge base (limit {kb_pool})...")
-    kb_results = await _search_by_category(query_vector, "knowledge_base", kb_pool)
-    print(f"   Found {len(kb_results)} chunks from knowledge base")
+    # Category split is informational only — useful for debugging "why is this
+    # upload still showing up." It does not affect ranking.
+    kb_results = [c for c in combined if c.get("category") == "knowledge_base"]
+    user_results = [c for c in combined if c.get("category") == "user_upload"]
+    print(
+        f"   Found {len(combined)} candidates: {len(kb_results)} from knowledge "
+        f"base, {len(user_results)} from user uploads"
+    )
     if kb_results:
-        kb_files = list({r['filename'] for r in kb_results})
-        print(f"   Files: {', '.join(kb_files[:3])}")
+        kb_files = list(dict.fromkeys(r["filename"] for r in kb_results))
+        print(f"   KB files (top): {', '.join(kb_files[:3])}")
+    if user_results:
+        upload_files = list(dict.fromkeys(r["filename"] for r in user_results))
+        print(f"   Upload files (top): {', '.join(upload_files[:3])}")
 
     # STEP 3a: reranker path
     if RERANKER_ENABLED:
-        combined = user_results + kb_results
         if not combined:
             print("[RERANK] No candidates to rerank")
             return []
@@ -700,18 +717,14 @@ async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]
             print(f"[WARNING] Rerank failed ({rerank_err}); falling back to vector order")
             # Fall through to legacy filtering path below
 
-    # STEP 3b: legacy path — score floors + user-first ordering
+    # STEP 3b: legacy fallback — single relevance floor, no category priority
     MIN_SCORE = 0.5
-    user_results = [r for r in user_results if r.get("score", 0) >= MIN_SCORE]
-    if user_results:
-        kb_results = [r for r in kb_results if r.get("score", 0) >= 0.75]
-    else:
-        kb_results = [r for r in kb_results if r.get("score", 0) >= MIN_SCORE]
-
-    combined = user_results + kb_results
-    print(f"[SEARCH] After relevance filtering: {len(combined)} chunks")
-    print(f"   Kept: {len(user_results)} user + {len(kb_results)} knowledge base")
-    return combined
+    filtered = [c for c in combined if c.get("score", 0) >= MIN_SCORE]
+    print(
+        f"[SEARCH] After relevance filtering: {len(filtered)} chunks "
+        f"(vector-ranked, no category priority)"
+    )
+    return filtered
 
 
 async def query_with_context(query: str, top_k: int = 5) -> Dict[str, Any]:

@@ -11,8 +11,8 @@ Usage:
 import os
 import sys
 
-# Add parent dir to path so we can run standalone (matches test_rerank_threshold.py).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add python_backend/ to path so we can run standalone (file is under tests/unit/).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.services.citation_filter import filter_sources_by_citations
 

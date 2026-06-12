@@ -128,6 +128,27 @@ def _token_set_ratio(a_tokens: set, b_tokens: set) -> float:
     )
 
 
+def build_fingerprint(first_text: str, filename: str) -> Dict[str, Any]:
+    """Build the comparable fingerprint for one document from its first-page /
+    first-chunk text.
+
+    Shared by the diagnostic (existing KB docs, text from the first stored chunk)
+    and the index-time check in kb_admin (a not-yet-indexed PDF, text from the
+    raw file). Both sides go through the SAME title extraction and token
+    normalization here, so extraction differences wash out before comparison.
+
+    Returns ``{"title", "snippet", "tokens"}`` -- ``tokens`` is what
+    ``_token_set_ratio`` consumes.
+    """
+    title = _extract_title(first_text, filename)
+    fingerprint_text = title + " " + first_text[:FINGERPRINT_CHARS]
+    return {
+        "title": title,
+        "snippet": _collapse_ws(first_text)[:SNIPPET_CHARS],
+        "tokens": _norm_tokens(fingerprint_text),
+    }
+
+
 async def _load_documents() -> List[Dict[str, Any]]:
     """One record per KB filename: first chunk text, chunk count, first-indexed.
 
@@ -154,17 +175,16 @@ async def _load_documents() -> List[Dict[str, Any]]:
     async for row in cursor:
         filename = row.get("_id") or "(unknown)"
         first_text = row.get("first_text") or ""
-        title = _extract_title(first_text, filename)
-        fingerprint = title + " " + first_text[:FINGERPRINT_CHARS]
+        fp = build_fingerprint(first_text, filename)
         indexed: Optional[datetime] = row.get("first_indexed")
         docs.append(
             {
                 "filename": filename,
-                "title": title,
-                "snippet": _collapse_ws(first_text)[:SNIPPET_CHARS],
+                "title": fp["title"],
+                "snippet": fp["snippet"],
                 "chunk_count": int(row.get("chunk_count", 0) or 0),
                 "first_indexed": indexed.strftime("%Y-%m-%d") if indexed else None,
-                "tokens": _norm_tokens(fingerprint),
+                "tokens": fp["tokens"],
             }
         )
     return docs

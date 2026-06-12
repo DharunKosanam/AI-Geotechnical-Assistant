@@ -189,15 +189,16 @@ async def chat_with_rag(request: RAGChatRequest):
         else:
             safe_print(f'[QUERY_REWRITE] Original: "{request.query}" -> unchanged')
 
-        # Step 2: Query vector store with prioritized search using the (possibly
-        # rewritten) standalone query. query_vector_store returns up to 8 results
-        # (5 user + 3 KB). For a summary request we skip retrieval entirely.
+        # Step 2: Query vector store using the (possibly rewritten) standalone
+        # query. KB chunks and the user's uploads compete in one combined search
+        # ranked purely by relevance (no upload prioritization), then reranking
+        # returns the top survivors. For a summary request we skip retrieval.
         if skip_retrieval:
             chunks = []
             print("[SEARCH] Retrieval skipped for summary request - relying on conversation history")
         else:
             chunks = await query_vector_store(retrieval_query, top_k=8)
-            print(f"[SEARCH] Retrieved {len(chunks)} total chunks (user uploads prioritized)")
+            print(f"[SEARCH] Retrieved {len(chunks)} total chunks")
         
         # Step 2b: Format context with academic titles and extract unique sources
         no_high_confidence_sources = False

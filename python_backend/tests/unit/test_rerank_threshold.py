@@ -11,8 +11,8 @@ Usage:
 import os
 import sys
 
-# Add parent dir to path so we can run standalone (matches test_e2e.py).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add python_backend/ to path so we can run standalone (file is under tests/unit/).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.services.rag_service import _apply_rerank_threshold
 

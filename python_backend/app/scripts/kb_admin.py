@@ -52,11 +52,30 @@ from app.services.rag_service import (
     delete_document,
     ingest_document,
 )
+# Index-time duplicate prevention reuses the diagnostic's fingerprint + scoring
+# (Problem 3 Part A) so both halves of the dedup workflow stay in lockstep.
+from app.scripts.kb_find_duplicates import (
+    build_fingerprint,
+    _load_documents,
+    _token_set_ratio,
+    _safe_print,
+    _ascii,
+)
 
 console = Console()
 
 KB_CATEGORY = "knowledge_base"
 USER_CATEGORY = "user_upload"
+
+# ---------------------------------------------------------------------------
+# Index-time duplicate prevention (Problem 3 Part B) -- tunable knobs
+# ---------------------------------------------------------------------------
+# A new PDF whose fingerprint scores >= this against an existing KB document is
+# treated as a likely duplicate and requires interactive confirmation.
+DUPLICATE_SIMILARITY_THRESHOLD = 0.90
+# Number of closest existing matches to show in the warning. By design we show
+# only the single top match; raising this also needs warning-format changes.
+SHOW_TOP_N_MATCHES = 1
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +287,109 @@ async def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Index-time duplicate check
+# ---------------------------------------------------------------------------
+def _extract_pdf_head_text(pdf_path: Path, max_chars: int = 1500) -> str:
+    """First ~max_chars of raw text from a PDF file, for fingerprinting a
+    not-yet-indexed candidate. Reads pages until the budget is met. Returns ""
+    on any failure -- the caller treats empty as 'cannot fingerprint, skip the
+    check' and proceeds (fail open, so a bad read never blocks a real add).
+    """
+    try:
+        import fitz  # PyMuPDF -- already a dependency of the ingestion pipeline
+
+        parts: List[str] = []
+        total = 0
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                page_text = page.get_text()
+                parts.append(page_text)
+                total += len(page_text)
+                if total >= max_chars:
+                    break
+        return "".join(parts)[:max_chars]
+    except Exception as exc:
+        console.print(
+            f"[yellow]Could not read PDF text for duplicate check: {exc}[/yellow]"
+        )
+        return ""
+
+
+def _duplicate_preflight(pdf_path: Path, kb_docs: List[Dict[str, Any]]) -> bool:
+    """Index-time duplicate check for ONE candidate PDF.
+
+    Returns True to proceed with indexing, False to abort (user cancelled). No
+    DB writes, no side effects -- runs entirely on the in-memory ``kb_docs``
+    fingerprint store (from kb_find_duplicates._load_documents()) plus the raw
+    PDF text. EOF / closed stdin is treated as cancel.
+    """
+    filename = pdf_path.name
+    _safe_print(
+        f"[INFO] Running duplicate check "
+        f"(threshold={DUPLICATE_SIMILARITY_THRESHOLD:.2f}) for {filename}..."
+    )
+
+    head_text = _extract_pdf_head_text(pdf_path)
+    if not head_text:
+        # Could not fingerprint the candidate -> fail open, do not block.
+        _safe_print(
+            "[OK] No duplicates found above threshold - proceeding with index."
+        )
+        return True
+
+    new_tokens = build_fingerprint(head_text, filename)["tokens"]
+
+    best_score = 0.0
+    best_doc: Optional[Dict[str, Any]] = None
+    for doc in kb_docs:
+        score = _token_set_ratio(new_tokens, doc["tokens"])
+        if score > best_score:
+            best_score = score
+            best_doc = doc
+
+    if best_doc is None or best_score < DUPLICATE_SIMILARITY_THRESHOLD:
+        _safe_print(
+            "[OK] No duplicates found above threshold - proceeding with index."
+        )
+        return True
+
+    # Likely duplicate -> show ONLY the top match and require typed confirmation.
+    divider = "-" * 52
+    _safe_print(f"[WARN] Possible duplicate detected for: {_ascii(filename)}")
+    _safe_print(f"[WARN] Similarity to existing KB document: {best_score:.2f}")
+    _safe_print(f"[WARN] {divider}")
+    _safe_print(f"[WARN] Existing: {_ascii(best_doc['filename'])}")
+    _safe_print(f"[WARN]   Title: {_ascii(best_doc.get('title') or '(not available)')}")
+    _safe_print(f"[WARN]   Chunks: {best_doc.get('chunk_count', 0)}")
+    _safe_print(
+        f"[WARN]   First 200 chars: "
+        f"{_ascii(best_doc.get('snippet') or '(not available)')}"
+    )
+    _safe_print(f"[WARN] {divider}")
+    _safe_print("[WARN] Type 'add' to index anyway, anything else to cancel:")
+
+    try:
+        answer = input()
+    except EOFError:
+        answer = ""
+
+    if answer != "add":
+        _safe_print(f"[INFO] Cancelled by user - {filename} NOT indexed.")
+        return False
+
+    _safe_print("[INFO] User confirmed - indexing despite duplicate warning.")
+    return True
+
+
 async def _add_one_file(
     pdf_path: Path,
     existing_filenames: set,
     skip_existing: bool,
     stats: Dict[str, Any],
     progress: Optional[Progress] = None,
+    kb_docs: Optional[List[Dict[str, Any]]] = None,
+    force_dup: bool = False,
 ) -> None:
     """
     Ingest a single file into the KB, updating `stats` in place.
@@ -286,6 +402,28 @@ async def _add_one_file(
       - skip_existing=False -> prompt to overwrite (backward-compatible)
     """
     filename = pdf_path.name
+
+    # Index-time duplicate prevention (Problem 3 Part B). Runs BEFORE any
+    # overwrite / delete / ingest, so cancelling here has zero side effects.
+    # Skipped for: --force, non-PDF files (the fingerprint is PDF-oriented), and
+    # exact-name re-adds (handled by the overwrite prompt just below).
+    if force_dup:
+        _safe_print(f"[INFO] Duplicate check skipped (--force flag) for {filename}.")
+    elif (
+        kb_docs is not None
+        and filename.lower().endswith(".pdf")
+        and filename not in existing_filenames
+    ):
+        if progress is not None:
+            progress.stop()
+        try:
+            proceed = _duplicate_preflight(pdf_path, kb_docs)
+        finally:
+            if progress is not None:
+                progress.start()
+        if not proceed:
+            stats["skipped"] += 1
+            return
 
     if filename in existing_filenames:
         if skip_existing:
@@ -400,6 +538,14 @@ async def cmd_add(args: argparse.Namespace) -> int:
         )
     )
 
+    # Load the existing-KB fingerprint store ONCE for the index-time duplicate
+    # check (Problem 3 Part B). Skipped entirely under --force to save the scan.
+    kb_docs: Optional[List[Dict[str, Any]]] = None
+    if not args.force:
+        console.print("[cyan]Loading KB fingerprints for duplicate check...[/cyan]")
+        kb_docs = await _load_documents()
+        console.print(f"[cyan]Loaded {len(kb_docs)} KB fingerprints.[/cyan]")
+
     stats: Dict[str, Any] = {
         "added": 0,
         "total_chunks": 0,
@@ -426,6 +572,8 @@ async def cmd_add(args: argparse.Namespace) -> int:
                     args.skip_existing,
                     stats,
                     progress,
+                    kb_docs,
+                    args.force,
                 )
                 progress.advance(task)
     else:
@@ -436,6 +584,8 @@ async def cmd_add(args: argparse.Namespace) -> int:
                 args.skip_existing,
                 stats,
                 None,
+                kb_docs,
+                args.force,
             )
 
     _print_add_summary(stats)
@@ -595,6 +745,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Skip files whose filename is already in the KB instead of "
             "prompting to overwrite. Logs 'SKIP: <filename> (already in KB)' "
             "and moves on. Works with single-file and --folder mode."
+        ),
+    )
+    add_p.add_argument(
+        "--force",
+        "--skip-duplicate-check",
+        dest="force",
+        action="store_true",
+        help=(
+            "Bypass the index-time duplicate fingerprint check entirely. Use for "
+            "legitimate re-adds (e.g. re-ingesting a fixed paper). Default is "
+            "always to check."
         ),
     )
 

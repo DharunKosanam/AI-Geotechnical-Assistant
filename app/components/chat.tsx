@@ -14,7 +14,7 @@ import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistant
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
 import ThreadList from "./thread-list";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
-import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle } from "lucide-react";
+import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users } from "lucide-react";
 
 // --- File attachment config (mirrors python_backend file_processing.SUPPORTED_EXTENSIONS) ---
 const SUPPORTED_EXTENSIONS = [
@@ -315,14 +315,57 @@ const Message = ({ role, text, annotations }: MessageProps) => {
   }
 };
 
-const WelcomeMessage = () => {
+const STARTER_CARDS = [
+  {
+    title: "Explain a concept",
+    example: "What is MICP and how does it work?",
+    attach: false,
+  },
+  {
+    title: "Compare methods",
+    example: "EICP vs MICP for soil improvement",
+    attach: false,
+  },
+  {
+    title: "Understand a phenomenon",
+    example: "What causes soil liquefaction?",
+    attach: false,
+  },
+  {
+    title: "Analyze a document",
+    example: "Upload a paper and ask questions about it",
+    attach: true,
+  },
+];
+
+type WelcomeMessageProps = {
+  onPromptSelect: (text: string) => void;
+  onAttachClick: () => void;
+};
+
+const WelcomeMessage = ({ onPromptSelect, onAttachClick }: WelcomeMessageProps) => {
   return (
     <div className={styles.welcomeContainer}>
       <div className={styles.welcomeMessage}>
-        <h1>Hello! 👋</h1>
-        <p>How can I assist you with your geotechnical reports today?</p>
-        <div className={styles.welcomeHints}>
-          <p>💡 Start a new conversation or select a previous chat from the sidebar.</p>
+        <h1>GeoTech AI Assistant</h1>
+        <p>
+          Ask questions grounded in geotechnical research papers, or upload
+          your own document to analyze.
+        </p>
+        <div className={styles.starterGrid}>
+          {STARTER_CARDS.map((card) => (
+            <button
+              key={card.title}
+              type="button"
+              className={styles.starterCard}
+              onClick={() =>
+                card.attach ? onAttachClick() : onPromptSelect(card.example)
+              }
+            >
+              <span className={styles.starterTitle}>{card.title}</span>
+              <span className={styles.starterExample}>{card.example}</span>
+            </button>
+          ))}
         </div>
       </div>
     </div>
@@ -346,6 +389,7 @@ const Chat = ({
   const threadListRef = useRef<any>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinThreadInput, setJoinThreadInput] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // --- File attachment UI state (replaces the removed right-hand file panel) ---
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1496,19 +1540,51 @@ const Chat = ({
     return result;
   }, [messages]);
 
+  // Starter card click: fill the input, then wait one frame for the
+  // controlled value to render before focusing and placing the caret at the end.
+  const handleStarterSelect = (text: string) => {
+    setUserInput(text);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+    });
+  };
+
   return (
     <div className={styles.container}>
       <div className={styles.leftPanel}>
-        <ThreadList 
+        <button
+          type="button"
+          onClick={createNewThread}
+          className={styles.newChatBtn}
+        >
+          <SquarePen size={16} />
+          New Chat
+        </button>
+        <ThreadList
           ref={threadListRef}
           currentThreadId={threadId}
           onThreadSelect={handleThreadSelect}
         />
+        <button
+          type="button"
+          onClick={() => setShowJoinModal(true)}
+          className={styles.joinTeamBtn}
+        >
+          <Users size={16} />
+          Join Team Chat
+        </button>
       </div>
     <div className={styles.chatContainer}>
       <div className={styles.messages} ref={messagesContainerRef}>
         {!threadId ? (
-          <WelcomeMessage />
+          <WelcomeMessage
+            onPromptSelect={handleStarterSelect}
+            onAttachClick={() => fileInputRef.current?.click()}
+          />
         ) : (
           <>
             {deduplicatedMessages.map((msg, index) => (
@@ -1522,20 +1598,6 @@ const Chat = ({
         onSubmit={handleSubmit}
         className={`${styles.inputForm} ${styles.clearfix}`}
       >
-        <button
-          type="button" 
-          onClick={createNewThread}
-          className={styles.newChatBtn}
-        >
-          New Chat
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowJoinModal(true)}
-          className={styles.newChatBtn}
-        >
-          Join Team Chat
-        </button>
         {showJoinModal && (
           <div className={styles.modal}>
             <div className={styles.modalContent}>
@@ -1625,6 +1687,7 @@ const Chat = ({
               <Plus size={20} />
             </button>
             <textarea
+              ref={textareaRef}
               className={styles.input}
               value={userInput}
               onChange={(e) => setUserInput(e.target.value)}

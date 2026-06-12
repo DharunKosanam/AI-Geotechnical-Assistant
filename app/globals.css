@@ -1,6 +1,15 @@
 :root {
   --max-width: 1100px;
   --border-radius: 12px;
+
+  /* Layered off-white palette */
+  --bg-base: #fafafa;      /* main app background */
+  --bg-sidebar: #f5f5f5;   /* sidebar, slightly darker */
+  --bg-surface: #ffffff;   /* cards, messages, input - pops against off-white */
+  --text-primary: #1a1a1a;
+  --text-secondary: #737373;
+  --border-subtle: #e5e5e5;
+
   --font-mono: ui-monospace, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono",
     "Roboto Mono", "Oxygen Mono", "Ubuntu Monospace", "Source Code Pro",
     "Fira Mono", "Droid Sans Mono", "Courier New", monospace;
@@ -26,7 +35,8 @@ body {
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
+  color: var(--text-primary);
+  background-color: var(--bg-base);
 }
 
 a {

@@ -41,6 +41,28 @@ REDIS_USER = os.getenv("REDIS_USER", "default")
 USER_ID = "default-user"  # Hardcoded user ID to match Next.js implementation
 
 # ---------------------------------------------------------------------------
+# JWT Authentication
+# ---------------------------------------------------------------------------
+# Secret used to sign access tokens. No default on purpose -- it MUST be set in
+# .env. Generate one with:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not JWT_SECRET_KEY:
+    raise ValueError("JWT_SECRET_KEY is not set in environment variables")
+
+# Signing algorithm and token lifetime. Env-overridable, with sane defaults.
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
+
+# Secure attribute for the access_token cookie set at login.
+#   * Production (HTTPS): set COOKIE_SECURE=True so the cookie is transmitted
+#     ONLY over TLS and never leaks over plain http.
+#   * Local dev (http://localhost): leave it False. A Secure cookie is NOT sent
+#     over http, so the browser would silently drop it -- login would appear to
+#     succeed but every following request would be unauthenticated.
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "False").lower() == "true"
+
+# ---------------------------------------------------------------------------
 # Chunking & Retrieval (v2)
 # ---------------------------------------------------------------------------
 # CHUNKING_VERSION tags new chunks so old (500-char v1) chunks can coexist.
@@ -99,11 +121,14 @@ OCR_MIN_TEXT_LEN = int(os.getenv("OCR_MIN_TEXT_LEN", "50"))
 # OCRing figures/diagrams — tiny images are usually icons/decorations.
 PDF_IMAGE_OCR_MIN_DIM = int(os.getenv("PDF_IMAGE_OCR_MIN_DIM", "200"))
 
-# CORS Origins
+# CORS Origins. NOTE: no "*" wildcard here. The frontend sends credentials (the
+# httpOnly access_token cookie), and the CORS spec forbids pairing
+# Access-Control-Allow-Credentials: true with a "*" origin -- browsers reject
+# it. So every allowed origin must be listed explicitly. Add the production UVic
+# HTTPS origin to this list when deploying.
 CORS_ORIGINS = [
     "https://ai-geotechnical-assistant-production.up.railway.app",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "*",
 ]
 

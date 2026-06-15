@@ -4,14 +4,14 @@ Chat endpoints for handling messages with simple JSON responses using Groq + RAG
 import asyncio
 import json
 import re
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 from typing import List, Dict
 
-from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse
-from app.core.config import USER_ID
+from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse, User
 from app.core.database import conversations_collection, files_collection, messages_collection
+from app.dependencies.auth import get_current_user
 from app.services.llm_service import get_llm, generate_answer_with_groq, rewrite_query_with_history, safe_print
 from app.services.rag_service import query_with_context, query_vector_store, get_clean_title
 from app.services.citation_filter import filter_sources_by_citations
@@ -24,7 +24,7 @@ _thread_messages = {}
 
 
 @router.get("/chat/{thread_id}/history")
-async def get_chat_history(thread_id: str):
+async def get_chat_history(thread_id: str, current_user: User = Depends(get_current_user)):
     """
     Get chat history for a specific thread from MongoDB.
     Returns all messages sorted by timestamp (oldest first).
@@ -35,7 +35,7 @@ async def get_chat_history(thread_id: str):
         # Query MongoDB for messages in this thread
         cursor = messages_collection.find({
             "threadId": thread_id,
-            "userId": USER_ID
+            "userId": current_user.id
         }).sort("createdAt", 1)  # Oldest first
         
         messages = []
@@ -59,14 +59,18 @@ async def get_chat_history(thread_id: str):
 
 
 @router.post("/chat", response_model=RAGChatResponse)
-async def chat_with_rag(request: RAGChatRequest):
+async def chat_with_rag(request: RAGChatRequest, current_user: User = Depends(get_current_user)):
     """
     Main RAG endpoint with simple JSON response.
     Returns: { "answer": "...", "sources": [...] }
     """
     try:
         print(f"[RECEIVED] Received query: {request.query}")
-        
+
+        # Cache is namespaced per user so a cached answer derived from one user's
+        # private uploads can never be served to another user.
+        cache_query = f"{current_user.id}:{request.query}"
+
         # Extract threadId from request
         thread_id = None
         if hasattr(request, 'threadId') and request.threadId:
@@ -83,7 +87,7 @@ async def chat_with_rag(request: RAGChatRequest):
         cached_answer = None
         try:
             redis_client = get_redis_client()
-            cached_answer = await redis_client.get_cached_answer(request.query)
+            cached_answer = await redis_client.get_cached_answer(cache_query)
             
             if cached_answer:
                 cached_text = cached_answer["answer"]
@@ -95,7 +99,7 @@ async def chat_with_rag(request: RAGChatRequest):
                     try:
                         user_msg = {
                             "threadId": thread_id,
-                            "userId": USER_ID,
+                            "userId": current_user.id,
                             "role": "user",
                             "content": request.query,
                             "createdAt": datetime.now()
@@ -104,7 +108,7 @@ async def chat_with_rag(request: RAGChatRequest):
                         
                         assistant_msg = {
                             "threadId": thread_id,
-                            "userId": USER_ID,
+                            "userId": current_user.id,
                             "role": "assistant",
                             "content": cached_text,
                             "sources": cached_sources,
@@ -134,7 +138,7 @@ async def chat_with_rag(request: RAGChatRequest):
                 # chronological order for the prompt.
                 cursor = (
                     messages_collection
-                    .find({"threadId": thread_id, "userId": USER_ID})
+                    .find({"threadId": thread_id, "userId": current_user.id})
                     .sort("createdAt", -1)
                     .limit(20)
                 )
@@ -197,7 +201,7 @@ async def chat_with_rag(request: RAGChatRequest):
             chunks = []
             print("[SEARCH] Retrieval skipped for summary request - relying on conversation history")
         else:
-            chunks = await query_vector_store(retrieval_query, top_k=8)
+            chunks = await query_vector_store(retrieval_query, top_k=8, user_id=current_user.id)
             print(f"[SEARCH] Retrieved {len(chunks)} total chunks")
         
         # Step 2b: Format context with academic titles and extract unique sources
@@ -293,7 +297,7 @@ async def chat_with_rag(request: RAGChatRequest):
                 # Save user message
                 user_message = {
                     "threadId": thread_id,
-                    "userId": USER_ID,
+                    "userId": current_user.id,
                     "role": "user",
                     "content": request.query,
                     "createdAt": datetime.now()
@@ -304,7 +308,7 @@ async def chat_with_rag(request: RAGChatRequest):
                 # Save assistant message
                 assistant_message = {
                     "threadId": thread_id,
-                    "userId": USER_ID,
+                    "userId": current_user.id,
                     "role": "assistant",
                     "content": clean_answer,
                     "sources": sources,
@@ -324,7 +328,7 @@ async def chat_with_rag(request: RAGChatRequest):
         # Step 5: Cache the answer (skip if Redis unavailable)
         if redis_client:
             try:
-                await redis_client.set_cached_answer(request.query, clean_answer, sources=sources, ttl=3600)
+                await redis_client.set_cached_answer(cache_query, clean_answer, sources=sources, ttl=3600)
             except Exception as cache_error:
                 print(f"[WARNING] Failed to cache answer: {cache_error}")
         

@@ -524,28 +524,31 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
 # ---------------------------------------------------------------------------
 # Vector search helpers
 # ---------------------------------------------------------------------------
-def _combined_search_filter() -> Dict[str, Any]:
+def _combined_search_filter(user_id: Optional[str]) -> Dict[str, Any]:
     """
     Mongo ``$match`` filter for the single combined search.
 
-    Knowledge-base chunks are global (no user scoping); user_upload chunks are
-    scoped to the current ``USER_ID`` so a user never sees another user's
-    uploads. Factored out so the query construction can be unit-tested without a
-    live DB. (Today USER_ID is a single hardcoded id, so KB chunks happen to
-    carry it too — but keeping KB unscoped here matches the intended semantics:
-    KB is shared, uploads are private.)
+    Knowledge-base chunks are GLOBAL: the knowledge_base branch carries NO
+    userId, so every authenticated user retrieves the shared KB. user_upload
+    chunks are PRIVATE: they are included only when scoped to ``user_id``, so a
+    user never sees another user's uploads.
+
+    ``user_id`` is the authenticated user's id (a stringified ObjectId). When it
+    is None (e.g. the offline eval harness), the user_upload branch is omitted
+    entirely and the search returns knowledge_base chunks only.
+
+    Factored out so the query construction can be unit-tested without a live DB.
     """
-    return {
-        "$or": [
-            {"category": "knowledge_base"},
-            {"category": "user_upload", "userId": USER_ID},
-        ]
-    }
+    user_upload_branch = (
+        [{"category": "user_upload", "userId": user_id}] if user_id else []
+    )
+    return {"$or": [{"category": "knowledge_base"}, *user_upload_branch]}
 
 
 async def _search_combined(
     query_vector: List[float],
     limit: int,
+    user_id: Optional[str],
 ) -> List[Dict[str, Any]]:
     """
     Single vector search across KB + the current user's uploads, ranked purely
@@ -569,7 +572,7 @@ async def _search_combined(
                 "limit": search_limit,
             }
         },
-        {"$match": _combined_search_filter()},
+        {"$match": _combined_search_filter(user_id)},
         {"$limit": limit},
         {
             "$project": {
@@ -650,7 +653,9 @@ def _apply_rerank_threshold(
     return fallback, True
 
 
-async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+async def query_vector_store(
+    query: str, top_k: int = 5, user_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """
     Single combined vector search with optional cross-encoder reranking.
 
@@ -675,7 +680,7 @@ async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]
     model = get_embedding_model()
     query_vector = list(model.embed([query]))[0].tolist()
 
-    combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT)
+    combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT, user_id)
 
     # Category split is informational only — useful for debugging "why is this
     # upload still showing up." It does not affect ranking.
@@ -727,9 +732,11 @@ async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]
     return filtered
 
 
-async def query_with_context(query: str, top_k: int = 5) -> Dict[str, Any]:
+async def query_with_context(
+    query: str, top_k: int = 5, user_id: Optional[str] = None
+) -> Dict[str, Any]:
     """Query the vector store and return results with formatted context."""
-    results = await query_vector_store(query, top_k)
+    results = await query_vector_store(query, top_k, user_id)
 
     context = "\n\n".join([
         f"[Source: {r['filename']}]\n{r['text']}"
@@ -782,6 +789,7 @@ async def ingest_document(
     filename: str,
     file_content: bytes,
     category: str = "user_upload",
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Multi-format ingest: extract pages, v2 chunk, embed, store.
@@ -789,7 +797,15 @@ async def ingest_document(
     Supported types are defined in file_processing.SUPPORTED_EXTENSIONS.
     Chunks carry chunkingVersion, pageStart, sectionHeader, fileType, and
     (for OCR-derived pages) metadata.ocrExtracted = True.
+
+    user_upload chunks are tagged with ``user_id`` (the uploading user's id) so
+    retrieval can scope them per-user. KB ingestion via the kb_admin CLI passes
+    no user_id and falls back to the legacy shared-KB owner id (config.USER_ID),
+    so that admin tooling -- which locates KB chunks by that id -- keeps working
+    unchanged. No HTTP route relies on this fallback; routes always pass an
+    explicit user_id.
     """
+    owner_id = user_id if user_id is not None else USER_ID
     # Lazy import to avoid a circular dependency at module load
     from app.services.file_processing import (
         extract_pages_from_file,
@@ -847,7 +863,7 @@ async def ingest_document(
             "filename": filename,
             "source": filename,
             "embedding": embedding,
-            "userId": USER_ID,
+            "userId": owner_id,
             "category": category,
             "chunkIndex": c["chunk_index"],
             "totalChunks": len(chunk_records),

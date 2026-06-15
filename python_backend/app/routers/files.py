@@ -1,14 +1,14 @@
 """
 File management endpoints - MongoDB storage with vector embeddings
 """
-from fastapi import APIRouter, HTTPException, status, File, UploadFile, Form, Body, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Body, BackgroundTasks
 from fastapi.responses import StreamingResponse, Response
 from datetime import datetime
 from typing import Optional, List
 import io
 from bson import ObjectId
-from app.core.config import USER_ID
 from app.core.database import files_collection
+from app.dependencies.auth import get_current_user
 from app.services.file_processing import (
     convert_image_to_pdf,
     needs_image_conversion,
@@ -19,6 +19,7 @@ from app.services.file_processing import (
     SUPPORTED_EXTENSIONS,
 )
 from app.services.rag_service import ingest_document, extract_text_from_pdf, get_embedding_model
+from models import User
 
 router = APIRouter(prefix="/api", tags=["files"])
 
@@ -57,20 +58,26 @@ def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
 
 
 @router.get("/files")
-async def list_files_simple(category: Optional[str] = None):
+async def list_files_simple(
+    category: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+):
     """
     Simple files list endpoint for frontend compatibility
-    
+
     Args:
         category: Optional filter by category ("user_upload" or "knowledge_base")
     """
     try:
-        query = {"userId": USER_ID}
-        
-        # Add category filter if specified
-        if category:
-            query["category"] = category
-        
+        # knowledge_base is shared across all users (never userId-scoped);
+        # everything else is the caller's own data.
+        if category == "knowledge_base":
+            query = {"category": "knowledge_base"}
+        elif category:
+            query = {"userId": current_user.id, "category": category}
+        else:
+            query = {"userId": current_user.id}
+
         # CRITICAL FIX: Exclude heavy fields to prevent memory limit error
         # Projection excludes: text content, embeddings (can be 100s of MB)
         projection = {
@@ -131,6 +138,7 @@ async def process_file_ingestion(
     file_content: bytes,
     category: str = "user_upload",
     parent_id: Optional[ObjectId] = None,
+    user_id: Optional[str] = None,
 ):
     """
     Background task to process file ingestion.
@@ -142,7 +150,7 @@ async def process_file_ingestion(
     import gc
     try:
         print(f"[LOADING] Background processing started for: {filename} (category: {category})")
-        result = await ingest_document(filename, file_content, category)
+        result = await ingest_document(filename, file_content, category, user_id=user_id)
         print(f"[OK] Background processing completed: {result}")
         if parent_id is not None:
             await files_collection.update_one(
@@ -175,7 +183,8 @@ async def process_file_ingestion(
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    category: str = Form("user_upload")
+    category: str = Form("user_upload"),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Upload a document (PDF/DOCX/XLSX/CSV/PPTX/image) for background ingestion.
@@ -199,7 +208,7 @@ async def upload_document(
         parent_doc = {
             "docType": "file",
             "filename": file.filename,
-            "userId": USER_ID,
+            "userId": current_user.id,
             "category": category,
             "bytes": len(file_content),
             "purpose": "assistants",
@@ -221,6 +230,7 @@ async def upload_document(
             file_content,
             category,
             parent_id,
+            current_user.id,
         )
 
         return {
@@ -243,7 +253,10 @@ async def upload_document(
 
 
 @router.get("/upload/status")
-async def upload_status(filename: str, user_id: Optional[str] = None):
+async def upload_status(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+):
     """
     Report ingest progress for an uploaded file so the UI can keep its chip
     spinner running until embeddings actually land.
@@ -251,20 +264,19 @@ async def upload_status(filename: str, user_id: Optional[str] = None):
     `/api/upload` returns 200 immediately and runs extraction/OCR/chunking/
     embedding in a background task. That task flips the parent file-metadata
     doc's `status` to "processed" only AFTER ingest_document() fully completes
-    (embeddings written) — or "failed" with an `error`. So the parent doc's
+    (embeddings written) -- or "failed" with an `error`. So the parent doc's
     status is an accurate signal that needs no extra state and no changes to
     the ingest pipeline.
 
-    user_id is optional: this deployment is single-user (config.USER_ID), so it
-    defaults to USER_ID when the caller omits it.
+    Scoped to the authenticated user so one user cannot poll another user's
+    upload status.
     """
-    uid = user_id or USER_ID
     try:
         # Latest parent (file-level) doc for this filename. Chunks are excluded
         # via chunkIndex, matching the listing endpoints.
         doc = await files_collection.find_one(
             {
-                "userId": uid,
+                "userId": current_user.id,
                 "filename": filename,
                 "chunkIndex": {"$exists": False},
             },
@@ -303,25 +315,36 @@ async def upload_status(filename: str, user_id: Optional[str] = None):
 
 
 @router.get("/assistants/files")
-async def list_files(type: Optional[str] = None, category: Optional[str] = None):
+async def list_files(
+    type: Optional[str] = None,
+    category: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+):
     """
     List files from MongoDB with deduplication by filename
-    
+
     Args:
         type: Legacy parameter for filtering ("user" or "knowledge_base")
         category: Direct category filter ("user_upload" or "knowledge_base")
     """
     try:
-        query = {"userId": USER_ID}
-        
-        # Support both 'category' and legacy 'type' parameter
-        if category:
-            query["category"] = category
-        elif type == "user":
-            query["category"] = "user_upload"
-        elif type == "knowledge_base":
-            query["category"] = "knowledge_base"
-        
+        # Resolve the requested category from the direct param or legacy `type`.
+        requested = category
+        if not requested:
+            if type == "user":
+                requested = "user_upload"
+            elif type == "knowledge_base":
+                requested = "knowledge_base"
+
+        # knowledge_base is shared across all users (never userId-scoped); any
+        # other category is the caller's own data.
+        if requested == "knowledge_base":
+            query = {"category": "knowledge_base"}
+        elif requested:
+            query = {"userId": current_user.id, "category": requested}
+        else:
+            query = {"userId": current_user.id}
+
         # Restrict to file-level docs (skip chunk records). Chunks have
         # chunkIndex set; parent file docs do not. We accept both the explicit
         # docType="file" marker (new uploads) and legacy parent docs that
@@ -380,7 +403,10 @@ async def list_files(type: Optional[str] = None, category: Optional[str] = None)
 
 
 @router.post("/assistants/files")
-async def upload_file(files: UploadFile = File(...)):
+async def upload_file(
+    files: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
     """
     Legacy synchronous upload: stores the file binary + a file-level embedding.
     Now accepts every supported format via the unified extractor.
@@ -422,7 +448,7 @@ async def upload_file(files: UploadFile = File(...)):
             "embedding": embedding,  # Store 384-dim embedding
             "purpose": "assistants",
             "bytes": len(file_content),
-            "userId": USER_ID,
+            "userId": current_user.id,
             "category": "user_upload",
             "createdAt": datetime.now(),
             "metadata": {
@@ -460,7 +486,10 @@ async def upload_file(files: UploadFile = File(...)):
 
 
 @router.delete("/assistants/files")
-async def delete_file(fileId: str = Body(..., embed=True)):
+async def delete_file(
+    fileId: str = Body(..., embed=True),
+    current_user: User = Depends(get_current_user),
+):
     """
     Delete a user-uploaded file and all of its chunks from MongoDB.
     Scoped to category="user_upload" — knowledge_base chunks are never
@@ -478,7 +507,7 @@ async def delete_file(fileId: str = Body(..., embed=True)):
 
         # Look up the parent doc first so we know its filename for chunk cleanup.
         parent = await files_collection.find_one(
-            {"_id": object_id, "userId": USER_ID},
+            {"_id": object_id, "userId": current_user.id},
             {"filename": 1, "category": 1},
         )
         if not parent:
@@ -498,12 +527,12 @@ async def delete_file(fileId: str = Body(..., embed=True)):
 
         # Delete the parent doc.
         parent_result = await files_collection.delete_one(
-            {"_id": object_id, "userId": USER_ID}
+            {"_id": object_id, "userId": current_user.id}
         )
 
         # Delete ALL chunks for this filename, scoped to user_upload only.
         chunk_result = await files_collection.delete_many({
-            "userId": USER_ID,
+            "userId": current_user.id,
             "category": "user_upload",
             "$or": [{"filename": filename}, {"source": filename}],
             "chunkIndex": {"$exists": True},
@@ -532,8 +561,8 @@ async def delete_file(fileId: str = Body(..., embed=True)):
 
 
 @router.get("/files/{file_id}")
-async def get_file(file_id: str):
-    """Download a file from MongoDB"""
+async def get_file(file_id: str, current_user: User = Depends(get_current_user)):
+    """Download a file from MongoDB (own upload or shared knowledge_base only)"""
     try:
         # Convert string ID to ObjectId
         try:
@@ -545,7 +574,11 @@ async def get_file(file_id: str):
             )
         
         # Retrieve from MongoDB
-        file_doc = await files_collection.find_one({"_id": object_id})
+        # A user may fetch a shared knowledge_base file or their OWN upload --
+        # never another user's upload.
+        file_doc = await files_collection.find_one(
+            {"_id": object_id, "$or": [{"category": "knowledge_base"}, {"userId": current_user.id}]}
+        )
         
         if not file_doc:
             raise HTTPException(
@@ -575,7 +608,7 @@ async def get_file(file_id: str):
 
 
 @router.delete("/files/delete/{filename:path}")
-async def delete_file_by_name(filename: str):
+async def delete_file_by_name(filename: str, current_user: User = Depends(get_current_user)):
     """
     Delete a user-uploaded file and all of its vector chunks by filename.
     Scoped to category="user_upload" — knowledge_base material is never
@@ -586,7 +619,7 @@ async def delete_file_by_name(filename: str):
 
         # Scoped delete: parent file doc + all chunks, user_upload only.
         result = await files_collection.delete_many({
-            "userId": USER_ID,
+            "userId": current_user.id,
             "category": "user_upload",
             "$or": [{"filename": filename}, {"source": filename}],
         })
@@ -617,8 +650,8 @@ async def delete_file_by_name(filename: str):
 
 
 @router.get("/files/{file_id}/content")
-async def get_file_content(file_id: str):
-    """View a file from MongoDB in the browser"""
+async def get_file_content(file_id: str, current_user: User = Depends(get_current_user)):
+    """View a file from MongoDB in the browser (own upload or shared knowledge_base only)"""
     try:
         print(f"[FILE] Fetching file content for: {file_id}")
         
@@ -632,7 +665,11 @@ async def get_file_content(file_id: str):
             )
         
         # Retrieve from MongoDB
-        file_doc = await files_collection.find_one({"_id": object_id})
+        # A user may fetch a shared knowledge_base file or their OWN upload --
+        # never another user's upload.
+        file_doc = await files_collection.find_one(
+            {"_id": object_id, "$or": [{"category": "knowledge_base"}, {"userId": current_user.id}]}
+        )
         
         if not file_doc:
             raise HTTPException(

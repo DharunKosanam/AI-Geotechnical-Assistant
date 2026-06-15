@@ -1,7 +1,7 @@
 """
 Thread management endpoints - MongoDB-based storage
 """
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from datetime import datetime
 from typing import Dict
 import uuid
@@ -13,10 +13,11 @@ from models import (
     DeleteThreadRequest,
     CreateThreadHistoryRequest,
     TitleGenerationRequest,
-    SubmitActionsRequest
+    SubmitActionsRequest,
+    User,
 )
-from app.core.config import USER_ID
 from app.core.database import conversations_collection
+from app.dependencies.auth import get_current_user
 from app.services.llm_service import get_llm
 
 router = APIRouter(prefix="/api/assistants/threads", tags=["threads"])
@@ -26,7 +27,7 @@ from app.routers.chat import _thread_messages
 
 
 @router.post("", response_model=ThreadCreateResponse)
-async def create_thread():
+async def create_thread(current_user: User = Depends(get_current_user)):
     """Create a new thread (stored in MongoDB)"""
     try:
         # Generate a unique thread ID
@@ -42,12 +43,12 @@ async def create_thread():
 
 
 @router.get("/history")
-async def list_threads():
+async def list_threads(current_user: User = Depends(get_current_user)):
     """Get all conversation threads for the user"""
     try:
-        print(f"[LIST] Fetching thread history for user: {USER_ID}")
+        print(f"[LIST] Fetching thread history for user: {current_user.id}")
         cursor = conversations_collection.find(
-            {"userId": USER_ID}
+            {"userId": current_user.id}
         ).sort("updatedAt", -1)
         
         threads = []
@@ -72,11 +73,14 @@ async def list_threads():
 
 
 @router.post("/history")
-async def create_thread_history(request: CreateThreadHistoryRequest):
+async def create_thread_history(
+    request: CreateThreadHistoryRequest,
+    current_user: User = Depends(get_current_user),
+):
     """Create a new thread entry in MongoDB history"""
     try:
         conversation_doc = {
-            "userId": USER_ID,
+            "userId": current_user.id,
             "threadId": request.threadId,
             "name": request.name,
             "isGroup": request.isGroup,
@@ -98,7 +102,10 @@ async def create_thread_history(request: CreateThreadHistoryRequest):
 
 
 @router.put("/history")
-async def update_thread(request: UpdateThreadRequest):
+async def update_thread(
+    request: UpdateThreadRequest,
+    current_user: User = Depends(get_current_user),
+):
     """Update thread metadata"""
     try:
         if not request.threadId or request.threadId == "null":
@@ -116,7 +123,7 @@ async def update_thread(request: UpdateThreadRequest):
             update_fields["isGroup"] = request.isGroup
         
         result = await conversations_collection.update_one(
-            {"userId": USER_ID, "threadId": request.threadId},
+            {"userId": current_user.id, "threadId": request.threadId},
             {"$set": update_fields}
         )
         
@@ -132,11 +139,14 @@ async def update_thread(request: UpdateThreadRequest):
 
 
 @router.delete("/history")
-async def delete_thread(request: DeleteThreadRequest):
+async def delete_thread(
+    request: DeleteThreadRequest,
+    current_user: User = Depends(get_current_user),
+):
     """Delete a thread from MongoDB history"""
     try:
         result = await conversations_collection.delete_one(
-            {"userId": USER_ID, "threadId": request.threadId}
+            {"userId": current_user.id, "threadId": request.threadId}
         )
         
         if result.deleted_count == 0:
@@ -163,7 +173,11 @@ async def delete_thread(request: DeleteThreadRequest):
 
 
 @router.post("/{thread_id}/title")
-async def generate_thread_title(thread_id: str, request: TitleGenerationRequest):
+async def generate_thread_title(
+    thread_id: str,
+    request: TitleGenerationRequest,
+    current_user: User = Depends(get_current_user),
+):
     """Generate a concise title for a thread using Groq"""
     try:
         message_text = request.text
@@ -235,7 +249,10 @@ Title:"""
 
 
 @router.get("/{thread_id}/messages-history")
-async def get_messages_history(thread_id: str):
+async def get_messages_history(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+):
     """Get the message history for a specific thread"""
     try:
         # Get messages from in-memory storage
@@ -274,13 +291,16 @@ async def get_messages_history(thread_id: str):
 
 
 @router.get("/{thread_id}/history")
-async def get_thread_messages_history(thread_id: str):
+async def get_thread_messages_history(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+):
     """Alias for get_messages_history"""
-    return await get_messages_history(thread_id)
+    return await get_messages_history(thread_id, current_user)
 
 
 @router.post("/cache/clear")
-async def clear_citation_cache():
+async def clear_citation_cache(current_user: User = Depends(get_current_user)):
     """Clear cache (placeholder for compatibility)"""
     try:
         print("[CLEAR]  Cache clear requested (no-op in current implementation)")
@@ -297,7 +317,11 @@ async def clear_citation_cache():
 
 
 @router.post("/{thread_id}/actions")
-async def submit_tool_actions(thread_id: str, request: SubmitActionsRequest):
+async def submit_tool_actions(
+    thread_id: str,
+    request: SubmitActionsRequest,
+    current_user: User = Depends(get_current_user),
+):
     """Submit tool actions (placeholder for compatibility)"""
     try:
         print(f"[WARNING]  Tool actions not implemented in Groq migration")

@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from app.core.config import CORS_ORIGINS
 from app.core.database import close_mongo_connection, ensure_indexes
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
-from app.routers import chat, threads, files, auth
+from app.routers import chat, threads, files, auth, health
 
 # Initialize FastAPI
 app = FastAPI(
@@ -42,6 +42,7 @@ app.include_router(chat.router)
 app.include_router(threads.router)
 app.include_router(files.router)
 app.include_router(auth.router)
+app.include_router(health.router)
 
 
 @app.get("/")

@@ -38,8 +38,12 @@ from app.core.config import (
     RERANKER_ENABLED,
     RERANKER_MODEL,
     RERANK_TOP_K,
-    PRE_RERANK_POOL_USER,
-    PRE_RERANK_POOL_KB,
+    RERANK_SCORE_THRESHOLD,
+    LOW_CONF_CONTEXT_CHUNKS,
+    COMBINED_SEARCH_LIMIT,
+    OCR_ENABLED,
+    OCR_MIN_TEXT_LEN,
+    PDF_IMAGE_OCR_MIN_DIM,
 )
 
 
@@ -182,6 +186,119 @@ def extract_text_from_pdf(file_content: bytes) -> str:
     upload path that doesn't carry page metadata.
     """
     return "\n".join(text for _, text in extract_pages_from_pdf(file_content))
+
+
+# ---------------------------------------------------------------------------
+# PDF extraction WITH OCR fallback — used by the multi-format ingest pipeline
+# ---------------------------------------------------------------------------
+def _ocr_pdf_page(page) -> str:
+    """Render a PDF page to a PNG bytes blob and OCR it."""
+    from app.services.file_processing import ocr_image_bytes, tesseract_available
+    if not tesseract_available():
+        return ""
+    try:
+        # 2x zoom — better OCR accuracy than the default 72dpi render
+        mat = fitz.Matrix(2.0, 2.0)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        png_bytes = pix.tobytes("png")
+        return ocr_image_bytes(png_bytes)
+    except Exception as e:
+        print(f"      [OCR ERROR] Page render/OCR failed: {e}")
+        return ""
+
+
+def _ocr_embedded_images(doc, page, min_dim: int) -> str:
+    """OCR every embedded image on a page that meets the min-dim threshold."""
+    from app.services.file_processing import ocr_image_bytes, tesseract_available
+    if not tesseract_available():
+        return ""
+    pieces: List[str] = []
+    try:
+        for img_info in page.get_images(full=True):
+            xref = img_info[0]
+            try:
+                base = doc.extract_image(xref)
+                width = base.get("width", 0)
+                height = base.get("height", 0)
+                if width < min_dim or height < min_dim:
+                    continue
+                img_bytes = base.get("image", b"")
+                if not img_bytes:
+                    continue
+                text = ocr_image_bytes(img_bytes).strip()
+                if text:
+                    pieces.append(text)
+            except Exception as inner:
+                print(f"      [OCR ERROR] Embedded image OCR failed: {inner}")
+    except Exception as e:
+        print(f"      [OCR ERROR] Listing embedded images failed: {e}")
+    return "\n".join(pieces)
+
+
+def extract_pages_from_pdf_with_ocr(file_content: bytes) -> List[Tuple[int, str, bool]]:
+    """
+    Page-aware PDF extraction with OCR fallback.
+
+    For each page:
+      1. PyMuPDF text layer (fast path).
+      2. If that yields < OCR_MIN_TEXT_LEN chars AND OCR is enabled, render
+         the page and OCR it.
+      3. Independently, OCR any large embedded images and append.
+
+    Returns (page_number, text, ocr_extracted). ``ocr_extracted`` is True
+    when any OCR contributed to the page text.
+    """
+    pages_pairs = extract_pages_from_pdf(file_content)  # uses existing retry logic
+    text_by_page = {p: t for p, t in pages_pairs}
+
+    if not OCR_ENABLED:
+        return [(p, t, False) for p, t in pages_pairs]
+
+    # Re-open once to drive OCR over all pages (we need fitz Page objects)
+    triples: List[Tuple[int, str, bool]] = []
+    doc = None
+    try:
+        doc = fitz.open(stream=file_content, filetype="pdf")
+        total_pages = len(doc)
+        for i in range(total_pages):
+            pn = i + 1
+            base_text = text_by_page.get(pn, "")
+            ocr_used = False
+
+            # (2) Page OCR fallback for sparse pages
+            if len(base_text.strip()) < OCR_MIN_TEXT_LEN:
+                try:
+                    page_obj = doc[i]
+                    ocr_text = _ocr_pdf_page(page_obj).strip()
+                    if ocr_text:
+                        print(f"      [OCR] Page {pn}: fallback OCR added {len(ocr_text)} chars")
+                        base_text = (base_text + "\n" + ocr_text).strip()
+                        ocr_used = True
+                except Exception as e:
+                    print(f"      [OCR ERROR] Page {pn} fallback failed: {e}")
+
+            # (3) Large embedded image OCR (figures, diagrams, scanned tables)
+            try:
+                page_obj = doc[i]
+                emb_text = _ocr_embedded_images(doc, page_obj, PDF_IMAGE_OCR_MIN_DIM).strip()
+                if emb_text:
+                    print(f"      [OCR] Page {pn}: embedded-image OCR added {len(emb_text)} chars")
+                    base_text = (base_text + "\n" + emb_text).strip() if base_text else emb_text
+                    ocr_used = True
+            except Exception as e:
+                print(f"      [OCR ERROR] Page {pn} embedded-image scan failed: {e}")
+
+            if base_text:
+                triples.append((pn, base_text, ocr_used))
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+    triples.sort(key=lambda t: t[0])
+    return triples
 
 
 # ---------------------------------------------------------------------------
@@ -407,15 +524,41 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
 # ---------------------------------------------------------------------------
 # Vector search helpers
 # ---------------------------------------------------------------------------
-async def _search_by_category(
+def _combined_search_filter(user_id: Optional[str]) -> Dict[str, Any]:
+    """
+    Mongo ``$match`` filter for the single combined search.
+
+    Knowledge-base chunks are GLOBAL: the knowledge_base branch carries NO
+    userId, so every authenticated user retrieves the shared KB. user_upload
+    chunks are PRIVATE: they are included only when scoped to ``user_id``, so a
+    user never sees another user's uploads.
+
+    ``user_id`` is the authenticated user's id (a stringified ObjectId). When it
+    is None (e.g. the offline eval harness), the user_upload branch is omitted
+    entirely and the search returns knowledge_base chunks only.
+
+    Factored out so the query construction can be unit-tested without a live DB.
+    """
+    user_upload_branch = (
+        [{"category": "user_upload", "userId": user_id}] if user_id else []
+    )
+    return {"$or": [{"category": "knowledge_base"}, *user_upload_branch]}
+
+
+async def _search_combined(
     query_vector: List[float],
-    category: str,
     limit: int,
+    user_id: Optional[str],
 ) -> List[Dict[str, Any]]:
     """
-    Vector search filtered by category. We over-fetch and filter client-side
-    because the Atlas vector index doesn't include ``category`` as a
-    filterable field — see project README for the index spec.
+    Single vector search across KB + the current user's uploads, ranked purely
+    by vector similarity. There are no per-category slots and no upload
+    prioritization: a user_upload chunk only enters the pool if it scores well
+    on the query.
+
+    We over-fetch and filter client-side because the Atlas vector index doesn't
+    include ``category`` as a filterable field — see project README for the
+    index spec.
     """
     search_limit = limit * 20
 
@@ -429,12 +572,7 @@ async def _search_by_category(
                 "limit": search_limit,
             }
         },
-        {
-            "$match": {
-                "category": category,
-                "userId": USER_ID,
-            }
-        },
+        {"$match": _combined_search_filter(user_id)},
         {"$limit": limit},
         {
             "$project": {
@@ -468,50 +606,99 @@ async def _search_by_category(
     return results[:limit]
 
 
-async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+def _apply_rerank_threshold(
+    ranked: List[Dict[str, Any]],
+    threshold: float = RERANK_SCORE_THRESHOLD,
+    top_k: int = RERANK_TOP_K,
+    low_conf_context: int = LOW_CONF_CONTEXT_CHUNKS,
+) -> Tuple[List[Dict[str, Any]], bool]:
     """
-    Two-stage vector search with optional cross-encoder reranking.
+    Drop reranked chunks the cross-encoder scored as irrelevant.
+
+    ``ranked`` must already be sorted by ``rerank_score`` descending. We cap to
+    the top ``top_k`` (as before), then keep only chunks scoring >= ``threshold``.
+    ms-marco-MiniLM scores go negative for "not relevant", so sub-threshold
+    chunks are retrieval noise that must not be shown to the user as sources.
+
+    Returns ``(chunks, no_high_confidence)``:
+      * Some chunk clears the threshold -> those chunks, each tagged
+        ``low_confidence = False``; ``no_high_confidence = False``.
+      * Nothing clears it -> the top ``low_conf_context`` chunks tagged
+        ``low_confidence = True`` so the LLM still gets *some* context to attempt
+        an answer; ``no_high_confidence = True``. Callers must exclude
+        low-confidence chunks from the displayed sources.
+    """
+    top = ranked[:top_k]
+    high_conf = [c for c in top if c.get("rerank_score", 0.0) >= threshold]
+
+    if high_conf:
+        for c in high_conf:
+            c["low_confidence"] = False
+        dropped = len(top) - len(high_conf)
+        print(
+            f"[RERANK] Threshold {threshold} applied: kept {len(high_conf)}, "
+            f"dropped {dropped} (lowest kept: {high_conf[-1]['rerank_score']:+.2f})"
+        )
+        return high_conf, False
+
+    # Every candidate is below the threshold — no high-confidence sources. Keep a
+    # tiny low-confidence context set for the LLM; the caller hides these.
+    fallback = ranked[:low_conf_context]
+    for c in fallback:
+        c["low_confidence"] = True
+    print(
+        f"[RERANK] All {len(top)} chunks below threshold {threshold} "
+        f"- no high-confidence sources"
+    )
+    return fallback, True
+
+
+async def query_vector_store(
+    query: str, top_k: int = 5, user_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Single combined vector search with optional cross-encoder reranking.
+
+    KB chunks and the current user's uploads compete in ONE search
+    (COMBINED_SEARCH_LIMIT = 25) ranked purely by vector similarity — no
+    per-category slots, no user-upload prioritization (Problem 5).
 
     When RERANKER_ENABLED:
-      * Pulls PRE_RERANK_POOL_USER (15) + PRE_RERANK_POOL_KB (10) candidates.
-      * Reranks all survivors TOGETHER on query relevance.
-      * Returns the top RERANK_TOP_K (5) regardless of original category — the
-        cross-encoder picks purely on relevance, so the explicit user-first
-        ordering is dropped in this mode by design.
+      * Reranks all combined candidates TOGETHER on query relevance.
+      * Returns the top RERANK_TOP_K (5) after the score threshold, regardless
+        of original category.
 
     When RERANKER_ENABLED is False (fallback):
-      * Uses the legacy 5/3 pools, MIN_SCORE 0.5 floor, and user-first ordering.
+      * Applies a single MIN_SCORE floor over the combined pool, still purely by
+        vector relevance (no category priority).
 
     ``top_k`` is retained for signature stability but is effectively superseded
     by RERANK_TOP_K when the reranker is on.
     """
-    print(f"[SEARCH] Two-stage search for: {query[:50]}...")
+    print(f"[SEARCH] Combined search (limit {COMBINED_SEARCH_LIMIT})...")
 
     model = get_embedding_model()
     query_vector = list(model.embed([query]))[0].tolist()
 
-    user_pool = PRE_RERANK_POOL_USER if RERANKER_ENABLED else 5
-    kb_pool = PRE_RERANK_POOL_KB if RERANKER_ENABLED else 3
+    combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT, user_id)
 
-    # STEP 1: user uploads
-    print(f"[SEARCH] Step 1: Searching user uploads (limit {user_pool})...")
-    user_results = await _search_by_category(query_vector, "user_upload", user_pool)
-    print(f"   Found {len(user_results)} chunks from user uploads")
-    if user_results:
-        user_files = list({r['filename'] for r in user_results})
-        print(f"   Files: {', '.join(user_files[:3])}")
-
-    # STEP 2: knowledge base
-    print(f"[SEARCH] Step 2: Searching knowledge base (limit {kb_pool})...")
-    kb_results = await _search_by_category(query_vector, "knowledge_base", kb_pool)
-    print(f"   Found {len(kb_results)} chunks from knowledge base")
+    # Category split is informational only — useful for debugging "why is this
+    # upload still showing up." It does not affect ranking.
+    kb_results = [c for c in combined if c.get("category") == "knowledge_base"]
+    user_results = [c for c in combined if c.get("category") == "user_upload"]
+    print(
+        f"   Found {len(combined)} candidates: {len(kb_results)} from knowledge "
+        f"base, {len(user_results)} from user uploads"
+    )
     if kb_results:
-        kb_files = list({r['filename'] for r in kb_results})
-        print(f"   Files: {', '.join(kb_files[:3])}")
+        kb_files = list(dict.fromkeys(r["filename"] for r in kb_results))
+        print(f"   KB files (top): {', '.join(kb_files[:3])}")
+    if user_results:
+        upload_files = list(dict.fromkeys(r["filename"] for r in user_results))
+        print(f"   Upload files (top): {', '.join(upload_files[:3])}")
 
     # STEP 3a: reranker path
     if RERANKER_ENABLED:
-        combined = user_results + kb_results
         if not combined:
             print("[RERANK] No candidates to rerank")
             return []
@@ -524,30 +711,32 @@ async def query_vector_store(query: str, top_k: int = 5) -> List[Dict[str, Any]]
             combined.sort(key=lambda c: c["rerank_score"], reverse=True)
             top = combined[:RERANK_TOP_K]
             print(f"[RERANK] Reranked {len(combined)} candidates -> kept top {len(top)}")
-            for c in top[:3]:
+            # Drop sub-threshold (noise) chunks. When nothing clears the bar the
+            # helper returns the top 1-2 chunks tagged low_confidence=True so the
+            # LLM still gets context; chat.py hides those from the sources list.
+            kept, _no_high_conf = _apply_rerank_threshold(combined)
+            for c in kept[:3]:
                 print(f"   {c['rerank_score']:+.3f} | {c['filename']} (vec {c['score']:.3f})")
-            return top
+            return kept
         except Exception as rerank_err:
             print(f"[WARNING] Rerank failed ({rerank_err}); falling back to vector order")
             # Fall through to legacy filtering path below
 
-    # STEP 3b: legacy path — score floors + user-first ordering
+    # STEP 3b: legacy fallback — single relevance floor, no category priority
     MIN_SCORE = 0.5
-    user_results = [r for r in user_results if r.get("score", 0) >= MIN_SCORE]
-    if user_results:
-        kb_results = [r for r in kb_results if r.get("score", 0) >= 0.75]
-    else:
-        kb_results = [r for r in kb_results if r.get("score", 0) >= MIN_SCORE]
-
-    combined = user_results + kb_results
-    print(f"[SEARCH] After relevance filtering: {len(combined)} chunks")
-    print(f"   Kept: {len(user_results)} user + {len(kb_results)} knowledge base")
-    return combined
+    filtered = [c for c in combined if c.get("score", 0) >= MIN_SCORE]
+    print(
+        f"[SEARCH] After relevance filtering: {len(filtered)} chunks "
+        f"(vector-ranked, no category priority)"
+    )
+    return filtered
 
 
-async def query_with_context(query: str, top_k: int = 5) -> Dict[str, Any]:
+async def query_with_context(
+    query: str, top_k: int = 5, user_id: Optional[str] = None
+) -> Dict[str, Any]:
     """Query the vector store and return results with formatted context."""
-    results = await query_vector_store(query, top_k)
+    results = await query_vector_store(query, top_k, user_id)
 
     context = "\n\n".join([
         f"[Source: {r['filename']}]\n{r['text']}"
@@ -600,26 +789,52 @@ async def ingest_document(
     filename: str,
     file_content: bytes,
     category: str = "user_upload",
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Ingest a PDF: page-aware extract, v2 chunk, embed, store.
-    Chunks are tagged with chunkingVersion + pageStart + sectionHeader.
+    Multi-format ingest: extract pages, v2 chunk, embed, store.
+
+    Supported types are defined in file_processing.SUPPORTED_EXTENSIONS.
+    Chunks carry chunkingVersion, pageStart, sectionHeader, fileType, and
+    (for OCR-derived pages) metadata.ocrExtracted = True.
+
+    user_upload chunks are tagged with ``user_id`` (the uploading user's id) so
+    retrieval can scope them per-user. KB ingestion via the kb_admin CLI passes
+    no user_id and falls back to the legacy shared-KB owner id (config.USER_ID),
+    so that admin tooling -- which locates KB chunks by that id -- keeps working
+    unchanged. No HTTP route relies on this fallback; routes always pass an
+    explicit user_id.
     """
-    if not filename.lower().endswith('.pdf'):
-        raise ValueError("Only PDF files are supported. Please upload a PDF file.")
+    owner_id = user_id if user_id is not None else USER_ID
+    # Lazy import to avoid a circular dependency at module load
+    from app.services.file_processing import (
+        extract_pages_from_file,
+        get_file_type,
+        is_supported_file,
+        SUPPORTED_EXTENSIONS,
+    )
 
-    print(f"[FILE] Ingesting document: {filename}")
+    file_type = get_file_type(filename)
+    if not is_supported_file(filename):
+        raise ValueError(
+            f"Unsupported file type: {file_type}. "
+            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
+        )
 
-    # 1. Page-aware text extraction
-    print("  1. Extracting text from PDF (page-aware)...")
-    pages = extract_pages_from_pdf(file_content)
+    print(f"[FILE] Ingesting document: {filename} (type: {file_type})")
+
+    # 1. Unified page-aware extraction (returns triples with OCR flag)
+    print(f"  1. Extracting text ({file_type})...")
+    page_triples = extract_pages_from_file(file_content, filename)
+    pages = [(p, t) for p, t, _ in page_triples]
+    ocr_by_page = {p: ocr for p, _, ocr in page_triples}
     total_chars = sum(len(t) for _, t in pages)
     print(f"      Extracted {len(pages)} pages, {total_chars} characters")
 
     if not pages or total_chars < 10:
-        raise ValueError("PDF appears to be empty or contains no extractable text")
+        raise ValueError(f"{filename} appears to be empty or contains no extractable text")
 
-    # 2. Structure-aware chunking (v2)
+    # 2. Structure-aware chunking (v2) — same chunker for every file type
     print(
         f"  2. Chunking text (v2, target={CHUNK_TARGET_SIZE}, "
         f"max={CHUNK_MAX_SIZE}, overlap={CHUNK_OVERLAP})..."
@@ -627,7 +842,7 @@ async def ingest_document(
     chunk_records = chunk_text_v2(pages)
     print(f"      Created {len(chunk_records)} chunks")
     if not chunk_records:
-        raise ValueError("No text chunks could be created from the PDF")
+        raise ValueError("No text chunks could be created from the file")
 
     # 3. Embeddings (batch)
     print("  3. Generating embeddings...")
@@ -637,21 +852,23 @@ async def ingest_document(
     embeddings = [e.tolist() for e in embeddings_list]
     print(f"      Generated {len(embeddings)} embeddings (384-dim)")
 
-    # 4. Build documents (carries v2 metadata)
+    # 4. Build documents — propagate fileType + per-page OCR flag
     print("  4. Creating document objects...")
     documents: List[Dict[str, Any]] = []
     for c, embedding in zip(chunk_records, embeddings):
+        page_start = c["page_start"]
+        ocr_extracted = bool(ocr_by_page.get(page_start, False))
         doc = {
             "text": c["text"],
             "filename": filename,
             "source": filename,
             "embedding": embedding,
-            "userId": USER_ID,
+            "userId": owner_id,
             "category": category,
             "chunkIndex": c["chunk_index"],
             "totalChunks": len(chunk_records),
             "chunkingVersion": CHUNKING_VERSION,
-            "pageStart": c["page_start"],
+            "pageStart": page_start,
             "sectionHeader": c["section_header"],
             "metadata": {
                 "chunkSize": len(c["text"]),
@@ -660,8 +877,10 @@ async def ingest_document(
                 "originalFilename": filename,
                 "category": category,
                 "chunkingVersion": CHUNKING_VERSION,
-                "pageStart": c["page_start"],
+                "pageStart": page_start,
                 "sectionHeader": c["section_header"],
+                "fileType": file_type,
+                "ocrExtracted": ocr_extracted,
             },
             "createdAt": datetime.now(),
         }

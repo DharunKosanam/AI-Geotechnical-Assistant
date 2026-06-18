@@ -3,7 +3,7 @@ Pydantic models for request/response validation.
 These mirror the TypeScript interfaces from the Next.js app.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List, Any, Dict
 from datetime import datetime
 
@@ -111,3 +111,49 @@ class RAGChatResponse(BaseModel):
         ...,
         description="List of source objects ({title, url}) or legacy strings",
     )
+    no_high_confidence_sources: bool = Field(
+        default=False,
+        description=(
+            "True when every retrieved chunk scored below the reranker "
+            "threshold: 'sources' is empty and the answer is built only from "
+            "low-confidence context. Defaults False for cached/legacy responses."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Authentication models (JWT email/password auth)
+# ---------------------------------------------------------------------------
+# Three-way split keeps the password hash off the wire:
+#   UserCreate  -- what the client sends to sign up (plain password in)
+#   User        -- the internal/stored shape (carries hashed_password)
+#   UserPublic  -- what the client gets back (NO password field, ever)
+class UserCreate(BaseModel):
+    """Signup input. The plain password is hashed before storage and never
+    persisted or returned."""
+    email: EmailStr
+    password: str = Field(..., description="Plain-text password (hashed before storage)")
+    full_name: Optional[str] = None
+
+
+class User(BaseModel):
+    """Internal user record as stored in the 'users' collection.
+
+    `id` is the stringified Mongo _id (None until inserted). `hashed_password`
+    is a bcrypt hash -- it must never be serialized to a client; use UserPublic
+    for responses.
+    """
+    id: Optional[str] = Field(default=None, description="Stringified Mongo _id")
+    email: EmailStr
+    hashed_password: str
+    full_name: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    role: str = "user"
+
+
+class UserPublic(BaseModel):
+    """Client-facing user shape. Deliberately omits hashed_password."""
+    id: str
+    email: EmailStr
+    full_name: Optional[str] = None
+    role: str = "user"

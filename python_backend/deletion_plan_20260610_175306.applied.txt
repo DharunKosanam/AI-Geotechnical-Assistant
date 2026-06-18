@@ -1,0 +1,27 @@
+# Deletion plan for KB duplicate cleanup.
+# One filename per line. Lines starting with # are ignored.
+# Blank lines are ignored.
+# Filenames must match the KB exactly (case-sensitive, including
+# spaces, parens, special chars).
+# Edit this file, then run:
+#   python -m app.scripts.kb_delete_duplicates           (dry-run)
+#   python -m app.scripts.kb_delete_duplicates --execute (real)
+
+Bonelli (2013) Book-Erosion in geomechanics ap.pdf
+Briaud_et_al_2017_Erosion_Charts_for_Selected_Geomaterials.pdf
+CAUSES AND MECHANISMS OF COHESIVE SOIL EROSION_Paaswell.pdf
+CFD study of Particle Flow Patterns in a Rotating Cylinder1.pdf
+EFA.pdf
+Briaud (2000) ErosionFunction apparatus for scour rate prededictions.pdf
+Ma_et al._2018_GTJ_Experimental_Investigation_of_the_Effects_of_Fluids_Physicochemical_Characteristics_on_Piping_Erosion_of.pdf
+le-et-al-2022-influence-of-shearing-strain-rate-on-the-mechanical-behaviour-of-three-structured-clays.pdf
+sedighi-et-al-2021-peridynamic-modelling-of-clay-erosion (1).pdf
+Quantification of the effects of structure on the compression of a stiff clay_2008_Gasparre_Coop2.pdf
+Xiao et al. (2018) JHE-Relative and interactive effects of fluids phiscochemical charracteristics.pdf
+Effect of acid rain on geotechnical properties of composite fine-grained soil_2012_Sarkar et al2.pdf
+Akinola et al 2019 Fluvial_Erosion_Rate_of_Cohesive_Streambanks_Is_Di.pdf
+Three-dimensional numerical simulation of local.pdf
+Three-dimensional scour simulations with a two-phase.pdf
+Modelling erodibility of cohesive soils based on rotating surface erosion tests_Lin.pdf
+
+

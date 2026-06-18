@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
 import styles from "./file-viewer.module.css";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_PYTHON_API_URL || "http://127.0.0.1:8000";
+// Single source of truth for the backend base URL. Uses "localhost" (not
+// 127.0.0.1) so the SameSite=Lax auth cookie is same-site with the frontend.
+import { PYTHON_BACKEND_URL as BACKEND_URL } from "../config/api";
 
 const TrashIcon = () => (
   <svg
@@ -24,6 +26,47 @@ interface FileData {
   file_id: string;
   filename: string;
   status?: string;
+  fileType?: string; // e.g. ".pdf" / ".docx" — supplied by backend listing
+}
+
+// Keep in sync with python_backend/app/services/file_processing.SUPPORTED_EXTENSIONS
+const SUPPORTED_EXTENSIONS = [
+  ".pdf", ".docx",
+  ".xlsx", ".xls", ".csv",
+  ".png", ".jpg", ".jpeg", ".tiff", ".tif",
+  ".pptx",
+];
+const ACCEPT_ATTR = SUPPORTED_EXTENSIONS.join(",");
+const SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, TIFF";
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — must match backend
+
+// Map an extension to a short, monospace-friendly label shown next to each file.
+const FILE_TYPE_LABEL: Record<string, string> = {
+  ".pdf": "PDF",
+  ".docx": "DOCX",
+  ".xlsx": "XLSX",
+  ".xls": "XLS",
+  ".csv": "CSV",
+  ".pptx": "PPTX",
+  ".png": "PNG",
+  ".jpg": "JPG",
+  ".jpeg": "JPEG",
+  ".tiff": "TIFF",
+  ".tif": "TIF",
+};
+
+function getExt(filename: string): string {
+  const i = filename.lastIndexOf(".");
+  return i >= 0 ? filename.slice(i).toLowerCase() : "";
+}
+
+function isSupportedFile(filename: string): boolean {
+  return SUPPORTED_EXTENSIONS.includes(getExt(filename));
+}
+
+function formatTypeLabel(file: FileData): string {
+  const ext = (file.fileType || getExt(file.filename || "")).toLowerCase();
+  return FILE_TYPE_LABEL[ext] || (ext ? ext.slice(1).toUpperCase() : "FILE");
 }
 
 const FileViewer = () => {
@@ -39,6 +82,7 @@ const FileViewer = () => {
       console.log("Fetching user uploaded files only...");
       // Use Python backend directly (same as upload and delete)
       const resp = await fetch(`${BACKEND_URL}/api/assistants/files?category=user_upload`, {
+        credentials: "include",
         method: "GET",
       });
       
@@ -110,6 +154,7 @@ const FileViewer = () => {
       
       // Call the new DELETE endpoint with filename (note: /api/files/delete/ prefix)
       const resp = await fetch(`${BACKEND_URL}/api/files/delete/${encodeURIComponent(filename)}`, {
+        credentials: "include",
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
@@ -145,16 +190,40 @@ const FileViewer = () => {
     try {
       const selectedFiles = event.target.files;
       if (!selectedFiles || selectedFiles.length === 0) return;
-      
-      console.log(`Starting upload of ${selectedFiles.length} file(s)...`);
-      
-      const uploadedFiles = [];
-      
-      // Upload files ONE AT A TIME to /api/upload endpoint
+
+      // Client-side pre-flight: filter out unsupported types and oversize files
+      // BEFORE we hit the backend. Bad files get a clear toast instead of a 400.
+      const valid: File[] = [];
       for (let i = 0; i < selectedFiles.length; i++) {
-        const file = selectedFiles[i];
-        console.log(`Uploading ${i + 1}/${selectedFiles.length}: ${file.name}`);
-        
+        const f = selectedFiles[i];
+        if (!isSupportedFile(f.name)) {
+          alert(
+            `"${f.name}" is not a supported file type.\n\nSupported: ${SUPPORTED_LABEL}`
+          );
+          continue;
+        }
+        if (f.size > MAX_UPLOAD_BYTES) {
+          alert(
+            `"${f.name}" is ${(f.size / 1024 / 1024).toFixed(1)} MB which exceeds the 50 MB limit.`
+          );
+          continue;
+        }
+        valid.push(f);
+      }
+      if (valid.length === 0) {
+        event.target.value = "";
+        return;
+      }
+
+      console.log(`Starting upload of ${valid.length} file(s)...`);
+
+      const uploadedFiles = [];
+
+      // Upload files ONE AT A TIME to /api/upload endpoint
+      for (let i = 0; i < valid.length; i++) {
+        const file = valid[i];
+        console.log(`Uploading ${i + 1}/${valid.length}: ${file.name}`);
+
         // Create FormData for THIS file
         const data = new FormData();
         data.append("file", file); // Note: "file" (singular) for /upload endpoint
@@ -162,6 +231,7 @@ const FileViewer = () => {
         
         try {
           const resp = await fetch(`${BACKEND_URL}/api/upload`, {
+            credentials: "include",
             method: "POST",
             body: data,
           });
@@ -184,6 +254,7 @@ const FileViewer = () => {
           setOptimisticFiles(prev => [...prev, {
             file_id: `temp-${Date.now()}-${i}`,
             filename: file.name,
+            fileType: getExt(file.name),
             status: hasProcessingError
               ? `Warning: ${result.error || "Processing issue - file may be partially indexed"}`
               : "Processing..."
@@ -241,7 +312,25 @@ const FileViewer = () => {
           allFiles.map((file) => (
             <div key={file.file_id} className={styles.fileEntry}>
               <div className={styles.fileName}>
-                <span className={styles.fileName}>{file.filename}</span>
+                <span className={styles.fileName}>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      padding: "1px 5px",
+                      marginRight: 6,
+                      borderRadius: 3,
+                      background: "#eef1f5",
+                      color: "#475569",
+                      verticalAlign: "middle",
+                    }}
+                    title={`File type: ${formatTypeLabel(file)}`}
+                  >
+                    {formatTypeLabel(file)}
+                  </span>
+                  {file.filename}
+                </span>
                 <span className={styles.fileStatus}>{file.status}</span>
               </div>
               <span 
@@ -256,7 +345,11 @@ const FileViewer = () => {
         )}
       </div>
       <div className={styles.fileUploadContainer}>
-        <label htmlFor="file-upload" className={styles.fileUploadBtn}>
+        <label
+          htmlFor="file-upload"
+          className={styles.fileUploadBtn}
+          title={`Supported: ${SUPPORTED_LABEL} (max 50 MB)`}
+        >
           Attach files
         </label>
         <input
@@ -264,6 +357,7 @@ const FileViewer = () => {
           id="file-upload"
           name="file-upload"
           className={styles.fileUploadInput}
+          accept={ACCEPT_ATTR}
           multiple
           onChange={handleFileUpload}
         />

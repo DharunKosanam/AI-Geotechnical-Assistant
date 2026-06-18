@@ -11,6 +11,11 @@ Tests cover:
 import pytest
 import io
 
+# In-process API tests: they exercise the real retrieval pipeline (vector search,
+# embeddings) and need a DB, so they are integration, not unit. Opt-in via
+# `pytest tests/integration`.
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.asyncio
 async def test_health_check(async_client):

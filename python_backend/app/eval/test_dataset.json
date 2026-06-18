@@ -1,0 +1,277 @@
+{
+  "version": "2.0",
+  "created": "2026-05-27",
+  "description": "Golden test dataset for Geo Assistant RAG evaluation. Add 25-45 more questions covering your knowledge base papers. For each question, verify the ground_truth by checking the actual PDF content.",
+  "questions": [
+    {
+      "id": "q001",
+      "question": "What is the typical range of friction angle for dense sand?",
+      "ground_truth": "Dense sand typically has a peak friction angle in the range of 35 to 45 degrees for very dense sand (Dr=85-100%) and 30 to 40 degrees for dense sand (Dr=65-85%), depending on relative density, confining pressure, grain shape, and mineralogy. Bolton (1986) proposed correlations linking peak friction angle to critical-state friction angle and dilatancy.",
+      "source_documents": ["StrengthanddilatancyofsandsBolton1986discussion1987.pdf", "chakraborty-salgado-dilatancy-and-shear-strength-of-sand-at-low-confining-pressures.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q002",
+      "question": "Explain how internal erosion in earth dams progresses from initiation to breach.",
+      "ground_truth": "Internal erosion progresses through four phases: (1) initiation of erosion, where seepage forces detach particles; (2) continuation of erosion, where particles are transported through the soil; (3) progression to form a pipe, where a continuous conduit develops; and (4) initiation of a breach, where the pipe undermines the structure causing failure. The four mechanisms of initiation are concentrated leak erosion, backward erosion piping, suffusion, and contact erosion.",
+      "source_documents": ["Bonelli (2013) Book-Erosion in geomechanics ap.pdf"],
+      "source_pages": [19, 20],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q003",
+      "question": "How does the critical state framework reconcile the Mohr-Coulomb failure criterion with stress-dilatancy theory?",
+      "ground_truth": "The critical state framework reconciles Mohr-Coulomb with stress-dilatancy by treating the peak friction angle as the sum of a constant-volume critical-state friction angle plus a dilation component. At critical state, dilatancy vanishes and the peak angle equals the critical-state angle. The Hvorslev-Coulomb surface describes peak stress ratios on the dry side of critical, while the critical state line q=Mp' represents the ultimate condition approached at large strains.",
+      "source_documents": ["Critical-State-Of-Soil-Mechanics-Schofield-Wroth.pdf", "Rowe-StressDilatancyRelationStatic-1962.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q004",
+      "question": "What is the Erosion Function Apparatus (EFA) and how does it work?",
+      "ground_truth": "The EFA is a laboratory device that measures soil erodibility by pushing a soil sample through a circular opening into a rectangular flume where water flows at controlled velocities. The erosion rate is measured by tracking how fast the soil surface erodes at different flow velocities. The results plot erosion rate versus shear stress, producing an erosion function curve specific to that soil. It was developed by Briaud and colleagues for predicting scour rates at bridge piers.",
+      "source_documents": ["EFA.pdf", "briaud-et-al-2001-erosion-function-apparatus-for-scour-rate-predictions.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q005",
+      "question": "What was the magnitude of the 2011 Tohoku earthquake and how did it affect liquefaction in Tokyo Bay?",
+      "ground_truth": "UNANSWERABLE - this question is outside the geotechnical knowledge base contents. The knowledge base does not contain papers specifically about the 2011 Tohoku earthquake or Tokyo Bay liquefaction.",
+      "source_documents": [],
+      "source_pages": [],
+      "difficulty": "unanswerable",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q006",
+      "question": "What is the SRICOS method for predicting scour at bridge piers?",
+      "ground_truth": "SRICOS (Scour Rate In Cohesive Soils) is a method developed by Briaud et al. for predicting scour depth at bridge piers in cohesive soils. It combines the erosion function from the EFA test with hydraulic calculations of shear stress around the pier to predict scour depth versus time. Unlike methods for granular soils that predict only maximum scour depth, SRICOS accounts for the time-dependent nature of scour in cohesive soils.",
+      "source_documents": ["Briaud et al (1999) SRICOS_ PREDICTION OF SCOUR RATE IN COHESIVE SOILS AT Bridge piers.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q007",
+      "question": "How does enzyme-induced carbonate precipitation (EICP) improve soil erosion resistance?",
+      "ground_truth": "EICP uses the enzyme urease to catalyze the hydrolysis of urea, producing carbonate ions that precipitate as calcium carbonate crystite in the soil matrix. This bio-cementation bonds soil particles together, increasing cohesion and reducing erodibility. EICP has been applied for dust control, surface erosion resistance, and soil stabilization. It is considered more practical than MICP because it uses free enzyme rather than bacteria.",
+      "source_documents": ["Application of enzymatic calcification for dust control and rainfall erosion_2021_Sun et al.pdf", "Applications of enzyme induced carbonate precipitation (EICP) for soil_2015_Hamdan.pdf", "Application of Enzyme-Induced Carbonate Precipitation (EICP) to Improve the_2021_Chandra_Ravi.pdf"],
+      "source_pages": [],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q008",
+      "question": "What is the stress-dilatancy relation proposed by Rowe for granular soils?",
+      "ground_truth": "Rowe's stress-dilatancy theory relates the mobilized friction angle to the rate of dilation during shearing. It states that the ratio of major to minor principal effective stress at any stage of deformation is related to the rate of volumetric strain to axial strain. At peak stress, dense sand dilates and the peak friction angle exceeds the critical state angle by an amount related to the dilatancy rate. At constant volume (critical state), the dilatancy component vanishes.",
+      "source_documents": ["Rowe-StressDilatancyRelationStatic-1962.pdf"],
+      "source_pages": [],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q009",
+      "question": "What factors affect the erodibility of cohesive soils?",
+      "ground_truth": "Cohesive soil erodibility is influenced by many factors including: clay content and mineralogy, water content and degree of saturation, soil structure and compaction, plasticity index, undrained shear strength, pH and pore water chemistry, ionic concentration and cation type, organic content, and stress history. The interplay between these factors makes predicting cohesive soil erosion much more complex than for granular soils.",
+      "source_documents": ["CAUSES AND MECHANISMS OF COHESIVE SOIL EROSION_Paaswell.pdf", "Cohesive Soil Erosion_2008_Utley_Wynn Thompson.pdf", "A review of soil erodibility in water and wind erosion research_2005_Song et al.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q010",
+      "question": "How does the pocket erodometer test work?",
+      "ground_truth": "The pocket erodometer test is a simple, portable field test developed by Briaud et al. for estimating soil erodibility. A small water jet is applied to the surface of a soil sample at a standard pressure, and the depth of erosion is measured after a set number of jet impulses. The erosion depth is then correlated to erodibility categories. It provides a quick screening tool for assessing erosion potential without needing full laboratory EFA testing.",
+      "source_documents": ["Briaud et al (2012) The pocket erodometer test.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q011",
+      "question": "What is the effect of pH on the Atterberg limits of cohesive soils?",
+      "ground_truth": "Changes in pH affect the surface charge of clay minerals, altering the double-layer thickness and inter-particle forces. Acidic conditions generally reduce the liquid limit and plasticity index of clays, while alkaline conditions can increase them. The magnitude of the effect depends on the clay mineralogy, with kaolinite and smectite responding differently to pH changes due to their different charge characteristics.",
+      "source_documents": ["(PDF) EFFECT OF IONIC CONCENTRATIONS AND pH ON THE ATTERBERG LIMIT OF COHESIVE_.pdf"],
+      "source_pages": [],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q012",
+      "question": "What are the four mechanisms of backward erosion piping and how do they differ?",
+      "ground_truth": "The four mechanisms of internal erosion initiation are: (1) concentrated leak erosion, where water flows through a crack or gap and erodes the walls; (2) backward erosion piping, where erosion starts at the downstream exit and progresses upstream; (3) suffusion, where fine particles are washed out through the voids of coarser particles without disturbing the soil skeleton; and (4) contact erosion, where seepage at the interface between a fine and coarse soil layer erodes the fine soil.",
+      "source_documents": ["Bonelli (2013) Book-Erosion in geomechanics ap.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q013",
+      "question": "Compare the rotating erosion testing apparatus (RETA) with the EFA for measuring soil erodibility.",
+      "ground_truth": "The RETA uses a rotating cylinder or disk to generate shear stress on a soil surface, while the EFA pushes soil into a flowing water channel. The RETA can test smaller samples and is simpler mechanically, but the flow conditions are different from natural erosion. The EFA more closely simulates unidirectional flow conditions found in rivers and around bridge piers. Both produce erosion rate vs shear stress curves but may give different results for the same soil due to the different flow mechanisms.",
+      "source_documents": ["Bloomquist et al. 2012 The rorating erosion testing apparatus RETA.pdf", "EFA.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q014",
+      "question": "How does the Borehole Erosion Test (BET) measure in-situ soil erodibility?",
+      "ground_truth": "The Borehole Erosion Test measures soil erodibility in-situ by circulating water through a pre-drilled borehole at controlled flow rates. The increase in borehole diameter over time is measured using a caliper or similar device, which gives the erosion rate. The hydraulic shear stress is calculated from the flow rate and borehole geometry. This provides erosion function data without needing to extract and transport soil samples to the lab.",
+      "source_documents": ["Briaud et al. (2017) Borehole Erosion Test.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q015",
+      "question": "What is the best programming language for machine learning?",
+      "ground_truth": "UNANSWERABLE - this question is completely outside the scope of geotechnical engineering and the knowledge base.",
+      "source_documents": [],
+      "source_pages": [],
+      "difficulty": "unanswerable",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q016",
+      "question": "How does cement stabilization improve the mechanical properties of soft soils?",
+      "ground_truth": "Cement stabilization improves soil strength through hydration reactions that produce calcium silicate hydrate (CSH) and calcium aluminate hydrate (CAH) gels, which bond soil particles together. The unconfined compressive strength increases with cement content and curing time. The clay-water/cement ratio is a key parameter controlling the strength of cement-admixed clays. Cement also reduces compressibility and increases stiffness of soft soils.",
+      "source_documents": ["Clay\u2013Water\u2215Cement Ratio Identity for Cement Admixed Soft Clays_2005_Horpibulsuk et al.pdf", "Assessment of mechanical properties of cement stabilized soils_2019_Pongsivasathit et al.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q017",
+      "question": "What is the effect of fines content on the surface erosion of cohesive soils?",
+      "ground_truth": "Fines content significantly affects surface erosion rates. Increasing fines content generally increases erosion resistance up to a point because the cohesive fines bind the soil matrix. However, the relationship is not monotonic and depends on stress history, plasticity of the fines, and packing. Lin and Lin (2025) studied the effects of fines content and stress history on surface erosion and found that both factors interact to control erodibility.",
+      "source_documents": ["lin-lin-2025-effects-of-fines-content-and-stress-history-on-surface-erosion-of-cohesive-soils.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q018",
+      "question": "Explain the general framework for mechanical behaviour of clays proposed by Cotecchia and Chandler.",
+      "ground_truth": "Cotecchia and Chandler (2000) proposed a framework that distinguishes between the intrinsic properties of reconstituted clay and the additional strength and stiffness provided by natural structure. The sensitivity framework uses the ratio of the yield stress of natural clay to that of the reconstituted clay at the same void ratio to quantify the degree of structure. Destructuring occurs during loading and brings the clay behavior progressively closer to the intrinsic behavior.",
+      "source_documents": ["A general framework for the mechanical behaviour of clays_2000_Cotecchia_Chandler.pdf"],
+      "source_pages": [],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q019",
+      "question": "How do CFD-DEM coupled methods simulate soil erosion at the particle scale?",
+      "ground_truth": "CFD-DEM coupling combines computational fluid dynamics for the water flow with the discrete element method for individual soil particles. The fluid exerts drag, lift, and pressure forces on each particle, while particles affect the fluid through reaction forces. This allows simulation of particle detachment, transport, and deposition at the micro-scale. It has been applied to simulate piping erosion, surface erosion in the EFA, and internal erosion processes.",
+      "source_documents": ["CFD-DEM model for simulating soil surface erosion.pdf", "Quantitative analysis of piping erosion micro-mechanisms with coupled CFD and DEM method.pdf", "Using CFD-DEM to simulate EFA2.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q020",
+      "question": "What is the effect of saturation on soil erodibility?",
+      "ground_truth": "Saturation significantly affects soil erodibility. Lin and Lin (2024) conducted experimental studies showing that the degree of saturation influences the erosion rate of soils. Partially saturated soils can have different erosion behavior compared to fully saturated soils due to the presence of matric suction which provides additional inter-particle bonding. As saturation increases, matric suction decreases and erodibility generally increases.",
+      "source_documents": ["An Experimental Study of the Saturation Effect on Soil Erodibility Using_2024_Lin_Lin.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q021",
+      "question": "What erosion charts did Briaud develop for geomaterials and what do they show?",
+      "ground_truth": "Briaud et al. (2017) developed erosion charts that categorize geomaterials into erodibility categories based on erosion rate versus shear stress or velocity. The charts classify soils from Category I (very high erodibility, like fine sand) to Category VI (non-erosive, like intact rock). These charts allow engineers to quickly estimate the erodibility category of a soil and are widely used in scour prediction and erosion assessment for infrastructure.",
+      "source_documents": ["Briaud_et_al_2017_Erosion_Charts_for_Selected_Geomaterials.pdf", "Case Histories in Soil and Rock Erosion_2008_Briaud.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q022",
+      "question": "How do acid rain and acidic environments affect the geotechnical properties of clay soils?",
+      "ground_truth": "Acidic environments alter clay mineral surfaces, dissolve cementing agents, and modify the double-layer thickness around clay particles. This can reduce the liquid limit, plasticity index, and shear strength of clays. Sarkar et al. (2012) studied the effect of acid rain on composite fine-grained soils, and Gratchev and Towhata (2016) investigated compressibility of kaolinite-bearing soils in acidic environments, finding that acidic conditions change the consolidation behavior and compressibility characteristics.",
+      "source_documents": ["Effect of acid rain on geotechnical properties of composite fine-grained soil_2012_Sarkar et al.pdf", "Compressibility of soils containing kaolinite in acidic environments_2016_Gratchev_Towhata.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q023",
+      "question": "What is the role of microbial-induced calcite precipitation (MICP) in preventing soil surface erosion?",
+      "ground_truth": "MICP uses ureolytic bacteria to precipitate calcium carbonate within the soil pore space, cementing particles together and increasing erosion resistance. Bao et al. (2019) demonstrated that MICP treatment significantly reduces surface erosion and scour of granular soils. The treatment creates a bio-cemented crust that resists hydraulic shear forces. MICP combined with polymer modification can further enhance surface stabilization against water-induced erosion.",
+      "source_documents": ["bao-et-al-2019-effect-of-microbial-induced-calcite-precipitation-on-surface-erosion-and-scour-of-granular-soils-proof.pdf", "tao-et-al-surficial-soil-stabilization-against-water-induced-erosion-using-polymer-modified-microbially-induced.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q024",
+      "question": "How do you calculate the compressive strength of concrete?",
+      "ground_truth": "UNANSWERABLE - this question is about concrete, not soil mechanics or geotechnical engineering topics covered in the knowledge base.",
+      "source_documents": [],
+      "source_pages": [],
+      "difficulty": "unanswerable",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q025",
+      "question": "What is the relationship between soil erodibility and electrical or chemical parameters?",
+      "ground_truth": "Arulanandan et al. investigated the application of chemical and electrical parameters to predict soil erodibility. They found that the critical shear stress for erosion can be correlated with the sodium adsorption ratio (SAR), dielectric dispersion, and pore fluid chemistry. Soils with higher SAR values tend to be more erodible. The electrical properties of the soil-water system reflect the double-layer characteristics that control inter-particle bonding and thus erosion resistance.",
+      "source_documents": ["Arulanandan et al. Application of chemical and electrical parameter to prediction of erodibility.pdf"],
+      "source_pages": [],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q026",
+      "question": "How does Bolton's strength and dilatancy framework relate peak friction angle to relative density and stress level?",
+      "ground_truth": "Bolton (1986) proposed that the peak friction angle of sand exceeds the critical-state friction angle by an amount proportional to a relative dilatancy index IR. This index depends on both relative density and mean effective stress: IR = DR(Q - ln(p')) - R, where DR is relative density, p' is mean effective stress in kPa, and Q and R are empirical constants. For triaxial conditions, the peak friction angle increment is approximately 3*IR degrees, and for plane strain about 5*IR degrees.",
+      "source_documents": ["StrengthanddilatancyofsandsBolton1986discussion1987.pdf"],
+      "source_pages": [],
+      "difficulty": "factual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q027",
+      "question": "What is the effect of temperature on the behavior of saturated soils?",
+      "ground_truth": "Elevated temperatures affect saturated soil behavior in multiple ways. Saggu et al. (2023) studied this and found that temperature changes influence pore water pressure, consolidation behavior, shear strength, and volumetric response. Heating causes thermal expansion of pore water, which can generate excess pore pressures in undrained conditions. Temperature also affects the viscosity of pore water, the rate of consolidation, and can cause thermally-induced volume changes in clays.",
+      "source_documents": ["Behavior of Saturated Soils at Elevated Temperatures_2023_Saggu et al.pdf"],
+      "source_pages": [],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q028",
+      "question": "How does the Material Point Method (MPM) simulate earthquake-induced submarine landslides?",
+      "ground_truth": "The MPM-ICE framework couples the Material Point Method with fluid dynamics to simulate large-deformation problems like submarine landslides. It models the soil as material points that move through a background mesh, handling large deformations without mesh distortion. For earthquake-induced submarine landslides, it applies ground shaking as input motion and uses constitutive models like Mohr-Coulomb with strain softening to capture progressive failure and retrogressive sliding behavior.",
+      "source_documents": ["MPMICE.pdf"],
+      "source_pages": [],
+      "difficulty": "conceptual",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q029",
+      "question": "What are the advantages of the Borehole Erosion Test over lab-based erosion tests like the EFA?",
+      "ground_truth": "The Borehole Erosion Test has the advantage of testing soil in-situ, preserving the natural structure, stress state, and water content that are disturbed during sampling and lab testing. It can test soils at depth that are difficult to sample, and it accounts for the actual field conditions. Lab tests like the EFA require extracting samples, which causes disturbance and may not represent the in-situ erodibility accurately, especially for structured or sensitive soils.",
+      "source_documents": ["Briaud et al. (2017) Borehole Erosion Test.pdf", "briaud-et-al-2001-erosion-function-apparatus-for-scour-rate-predictions.pdf"],
+      "source_pages": [],
+      "difficulty": "cross_document",
+      "category": "knowledge_base"
+    },
+    {
+      "id": "q030",
+      "question": "Who won the FIFA World Cup in 2022?",
+      "ground_truth": "UNANSWERABLE - this question is completely outside the scope of geotechnical engineering and the knowledge base.",
+      "source_documents": [],
+      "source_pages": [],
+      "difficulty": "unanswerable",
+      "category": "knowledge_base"
+    }
+  ]
+}

@@ -19,6 +19,17 @@ db = mongo_client["ai-geotech-db"]
 conversations_collection = db["conversations"]
 files_collection = db["files"]
 messages_collection = db["messages"]  # For persistent chat history
+users_collection = db["users"]  # JWT email/password auth
+
+
+async def ensure_indexes():
+    """Create required indexes. Idempotent -- safe to call on every startup.
+
+    users.email gets a UNIQUE index so duplicate signups are rejected at the
+    DB level (a second insert with the same email raises DuplicateKeyError).
+    create_index is a no-op if the index already exists.
+    """
+    await users_collection.create_index("email", unique=True, name="uniq_email")
 
 
 async def close_mongo_connection():

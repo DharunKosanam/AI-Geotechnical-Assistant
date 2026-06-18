@@ -6,6 +6,16 @@ python-dotenv
 pydantic
 pydantic-settings
 python-multipart
+# Authentication (JWT email/password auth).
+#   passlib[bcrypt]        -- password hashing (Phase 1)
+#   python-jose[crypto]    -- JWT signing/verification (used from Phase 2+)
+#   email-validator        -- required for Pydantic EmailStr fields
+# bcrypt is pinned <4.1: passlib 1.7.4's bcrypt backend self-test breaks on
+# bcrypt 4.1+ (removed __about__ and now raises on >72-byte secrets).
+passlib[bcrypt]
+bcrypt<4.1
+python-jose[cryptography]
+email-validator
 Pillow
 img2pdf
 httpx
@@ -15,5 +25,16 @@ fastembed
 # pypdf  # Replaced with PyMuPDF for better text extraction
 pymupdf
 redis
+slowapi
 pytest
 pytest-asyncio
+rich
+python-docx
+openpyxl
+pandas
+tabulate
+pytesseract
+python-pptx
+# Eval-only deps (used by app/eval/evaluate_rag.py)
+# Custom Groq-direct LLM judge -- relies only on httpx (already above).
+langchain-groq

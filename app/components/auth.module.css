@@ -1,0 +1,198 @@
+/* Shared styles for the /login and /signup pages.
+
+   Signature motif: a vertical "borehole log" / stratigraphic column down the
+   left edge of the card -- the most characteristic artifact in a geotechnical
+   engineer's world, read top-down by depth. The desaturated earth ramp
+   (fill -> sand -> silt -> clay -> till/bedrock) is the ONE place color is
+   spent; everything else stays in the app's neutral off-white palette. */
+
+.page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  padding: 24px;
+  background-color: var(--bg-base);
+  overflow-y: auto; /* own scroll container: globals.css sets body overflow:hidden */
+}
+
+.card {
+  position: relative;
+  display: flex;
+  width: 100%;
+  max-width: 430px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 14px 36px rgba(0, 0, 0, 0.06);
+}
+
+/* The stratigraphic column. Layer flex values are uneven on purpose, the way
+   real strata have uneven thicknesses. */
+.strata {
+  flex-shrink: 0;
+  width: 10px;
+  display: flex;
+  flex-direction: column;
+}
+.strata > span {
+  display: block;
+  width: 100%;
+}
+.strata > span:nth-child(1) { flex: 1.2; background-color: #cdbb9e; } /* fill   */
+.strata > span:nth-child(2) { flex: 1.6; background-color: #b59b78; } /* sand   */
+.strata > span:nth-child(3) { flex: 2.0; background-color: #8f7458; } /* silt   */
+.strata > span:nth-child(4) { flex: 1.4; background-color: #6a5746; } /* clay   */
+.strata > span:nth-child(5) { flex: 2.2; background-color: #463f39; } /* bedrock*/
+
+.body {
+  flex: 1;
+  min-width: 0;
+  padding: 38px 34px 32px;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+
+.heading {
+  font-size: 27px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+
+.subhead {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: 0 0 24px;
+}
+
+.notice {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #3f4a3a;
+  background-color: #f1f4ee;
+  border: 1px solid #dbe4d4;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 20px;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.input {
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background-color: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input::placeholder {
+  color: #a3a3a3;
+}
+.input:focus {
+  border-color: #8f7458; /* silt stratum */
+  box-shadow: 0 0 0 3px rgba(143, 116, 88, 0.15);
+}
+
+.assist {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.error {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #b42318;
+  background-color: #fef3f2;
+  border: 1px solid #fecdca;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.button {
+  height: 44px;
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fafafa;
+  background-color: #463f39; /* bedrock -- ties the CTA to the strata column */
+  border: 1px solid #463f39;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+.button:hover:not(:disabled) {
+  background-color: #5b5149;
+}
+.button:focus-visible {
+  outline: 2px solid #8f7458;
+  outline-offset: 2px;
+}
+.button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.footer {
+  margin-top: 24px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.link {
+  color: #6a5746; /* clay stratum */
+  font-weight: 600;
+}
+.link:hover {
+  text-decoration: underline;
+}
+.link:focus-visible {
+  outline: 2px solid #8f7458;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input,
+  .button {
+    transition: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .body {
+    padding: 30px 22px 26px;
+  }
+}

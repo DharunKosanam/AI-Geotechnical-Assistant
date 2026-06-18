@@ -3,10 +3,12 @@ FastAPI Application Entry Point - Modular Structure
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
 
 from app.core.config import CORS_ORIGINS
-from app.core.database import close_mongo_connection
-from app.routers import chat, threads, files
+from app.core.database import close_mongo_connection, ensure_indexes
+from app.core.rate_limit import limiter, rate_limit_exceeded_handler
+from app.routers import chat, threads, files, auth, health
 
 # Initialize FastAPI
 app = FastAPI(
@@ -15,7 +17,18 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# Configure CORS
+# Rate limiting (slowapi). Register the limiter on app.state and a clean 429
+# handler so a tripped limit returns JSON, never a 500. Limits are applied
+# per-route via @limiter.limit decorators (see auth/chat/files routers).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+# Configure CORS. allow_credentials=True is REQUIRED so the browser will send
+# and accept the httpOnly access_token cookie on cross-origin requests
+# (http://localhost:3000 -> http://localhost:8000 in dev). The CORS spec forbids
+# combining credentials with a "*" origin and browsers reject it, so
+# allow_origins MUST be an explicit list of exact origins -- see CORS_ORIGINS in
+# config (the "*" entry was removed for exactly this reason).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -28,6 +41,8 @@ app.add_middleware(
 app.include_router(chat.router)
 app.include_router(threads.router)
 app.include_router(files.router)
+app.include_router(auth.router)
+app.include_router(health.router)
 
 
 @app.get("/")
@@ -39,6 +54,12 @@ async def root():
         "version": "2.0.0",
         "architecture": "modular"
     }
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Ensure DB indexes (e.g. unique users.email) exist before serving."""
+    await ensure_indexes()
 
 
 @app.on_event("shutdown")

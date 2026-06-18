@@ -1,0 +1,37 @@
+[
+  {
+    "question": "What is the typical range of friction angle for dense sand?",
+    "ground_truth": "Dense sand typically has a friction angle in the range of 35 to 45 degrees, depending on grain shape, mineralogy, and confining pressure.",
+    "source_documents": ["bolton_1986_strength_dilatancy.pdf"],
+    "source_pages": [3, 4],
+    "difficulty": "factual"
+  },
+  {
+    "question": "Explain how internal erosion in earth dams progresses from initiation to breach.",
+    "ground_truth": "Internal erosion progresses through four stages: (1) initiation, where seepage forces detach particles at a defect or contact; (2) continuation, where eroded particles are transported through the soil skeleton; (3) progression, where a continuous pipe forms and enlarges; and (4) breach or collapse, when the pipe undermines the dam crest or causes sinkhole formation.",
+    "source_documents": ["fell_2003_internal_erosion.pdf"],
+    "source_pages": [12, 13, 14],
+    "difficulty": "conceptual"
+  },
+  {
+    "question": "How does the critical state framework reconcile the Mohr-Coulomb failure criterion with stress-dilatancy theory?",
+    "ground_truth": "The critical state framework reconciles Mohr-Coulomb with stress-dilatancy by treating the peak friction angle as the sum of a constant-volume (critical state) friction angle plus a dilation component that depends on the relative density and confining stress. At critical state, dilatancy vanishes and the peak angle collapses to the critical-state angle, eliminating the apparent cohesion that classical Mohr-Coulomb attributes to dense soils.",
+    "source_documents": ["bolton_1986_strength_dilatancy.pdf", "schofield_wroth_critical_state.pdf"],
+    "source_pages": [5, 8, 22],
+    "difficulty": "cross_document"
+  },
+  {
+    "question": "What is the recommended filter design criterion to prevent piping in granular filters?",
+    "ground_truth": "Terzaghi's filter criterion requires D15(filter) / D85(base) <= 4 to 5 to prevent base particles from migrating through the filter, combined with D15(filter) / D15(base) >= 4 to 5 to maintain adequate permeability.",
+    "source_documents": ["terzaghi_filter_design.pdf"],
+    "source_pages": [2],
+    "difficulty": "factual"
+  },
+  {
+    "question": "What was the magnitude of the 2011 Tohoku earthquake on the moment scale and how did it affect Tokyo Bay liquefaction?",
+    "ground_truth": "UNANSWERABLE — this question is outside the geotechnical knowledge base contents.",
+    "source_documents": [],
+    "source_pages": [],
+    "difficulty": "unanswerable"
+  }
+]

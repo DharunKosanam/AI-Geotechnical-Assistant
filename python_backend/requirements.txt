@@ -25,6 +25,7 @@ fastembed
 # pypdf  # Replaced with PyMuPDF for better text extraction
 pymupdf
 redis
+slowapi
 pytest
 pytest-asyncio
 rich

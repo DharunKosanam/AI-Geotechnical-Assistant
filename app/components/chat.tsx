@@ -13,6 +13,7 @@ import "katex/dist/katex.min.css";
 import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistants";
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
 import ThreadList from "./thread-list";
+import SidebarAccount from "./sidebar-account";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
 import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users } from "lucide-react";
 
@@ -487,7 +488,7 @@ const Chat = ({
 
   // SWR fetcher function for message history
   const fetcher = async (url: string) => {
-    const res = await fetch(url);
+    const res = await fetch(url, { credentials: "include" });
     if (!res.ok) throw new Error('Failed to fetch messages');
     return res.json();
   };
@@ -561,6 +562,7 @@ const Chat = ({
 
       const titleEndpoint = API_ENDPOINTS.generateTitle(targetThreadId);
       const response = await fetch(titleEndpoint, {
+        credentials: "include",
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -581,6 +583,7 @@ const Chat = ({
       // Update thread name in history
       const updateEndpoint = API_ENDPOINTS.updateThread();
       await fetch(updateEndpoint, {
+        credentials: "include",
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -720,6 +723,7 @@ const Chat = ({
       console.log("🆔 Thread ID:", actualThreadId);
       
       const response = await fetch(endpoint, {
+        credentials: "include",
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -807,6 +811,7 @@ const Chat = ({
       const response = await fetch(
         API_ENDPOINTS.submitActions(threadId),
         {
+          credentials: "include",
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -878,6 +883,7 @@ const Chat = ({
         // 1. Create new thread
         const createEndpoint = API_ENDPOINTS.createThread();
         const res = await fetch(createEndpoint, {
+          credentials: "include",
           method: "POST",
         });
         const data = await res.json();
@@ -891,6 +897,7 @@ const Chat = ({
         const defaultName = getDefaultThreadName();
         const historyEndpoint = API_ENDPOINTS.createThreadHistory();
         await fetch(historyEndpoint, {
+          credentials: "include",
           method: "POST",
           body: JSON.stringify({ 
             threadId: newThreadId,
@@ -928,6 +935,7 @@ const Chat = ({
           console.log("Generating title for new thread:", newThreadId);
           const titleEndpoint = API_ENDPOINTS.generateTitle(newThreadId);
           const titleResponse = await fetch(titleEndpoint, {
+            credentials: "include",
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -945,6 +953,7 @@ const Chat = ({
             // Update thread name in history
             const updateEndpoint = API_ENDPOINTS.updateThread();
             await fetch(updateEndpoint, {
+              credentials: "include",
               method: "PUT",
               headers: {
                 "Content-Type": "application/json",
@@ -1172,6 +1181,7 @@ const Chat = ({
       console.log(`[LOAD] Fetching history for thread: ${targetThreadId}`);
       console.log(`[LOAD] URL: ${endpoint}`);
       const response = await fetch(endpoint, {
+        credentials: "include",
         cache: 'no-store',
         headers: { 'Cache-Control': 'no-cache' }
       });
@@ -1399,7 +1409,7 @@ const Chat = ({
       }
 
       try {
-        const resp = await fetch(API_ENDPOINTS.uploadStatus(filename));
+        const resp = await fetch(API_ENDPOINTS.uploadStatus(filename), { credentials: "include" });
         if (!resp.ok) return; // transient server hiccup — keep polling until timeout
         const data = await resp.json();
 
@@ -1435,6 +1445,7 @@ const Chat = ({
 
     try {
       const resp = await fetch(API_ENDPOINTS.uploadFile(), {
+        credentials: "include",
         method: "POST",
         body: data,
       });
@@ -1577,6 +1588,7 @@ const Chat = ({
           <Users size={16} />
           Join Team Chat
         </button>
+        <SidebarAccount />
       </div>
     <div className={styles.chatContainer}>
       <div className={styles.messages} ref={messagesContainerRef}>

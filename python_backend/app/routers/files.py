@@ -1,13 +1,15 @@
 """
 File management endpoints - MongoDB storage with vector embeddings
 """
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Body, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, status, File, UploadFile, Form, Body, BackgroundTasks
 from fastapi.responses import StreamingResponse, Response
 from datetime import datetime
 from typing import Optional, List
 import io
 from bson import ObjectId
+from app.core.config import RATE_LIMIT_UPLOAD
 from app.core.database import files_collection
+from app.core.rate_limit import limiter, rate_limit_identify, user_id_key
 from app.dependencies.auth import get_current_user
 from app.services.file_processing import (
     convert_image_to_pdf,
@@ -180,11 +182,13 @@ async def process_file_ingestion(
 
 
 @router.post("/upload")
+@limiter.limit(RATE_LIMIT_UPLOAD, key_func=user_id_key)
 async def upload_document(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     category: str = Form("user_upload"),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(rate_limit_identify),
 ):
     """
     Upload a document (PDF/DOCX/XLSX/CSV/PPTX/image) for background ingestion.

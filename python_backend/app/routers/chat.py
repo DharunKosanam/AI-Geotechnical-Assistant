@@ -4,13 +4,15 @@ Chat endpoints for handling messages with simple JSON responses using Groq + RAG
 import asyncio
 import json
 import re
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 from typing import List, Dict
 
 from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse, User
+from app.core.config import RATE_LIMIT_CHAT
 from app.core.database import conversations_collection, files_collection, messages_collection
+from app.core.rate_limit import limiter, rate_limit_identify, user_id_key
 from app.dependencies.auth import get_current_user
 from app.services.llm_service import get_llm, generate_answer_with_groq, rewrite_query_with_history, safe_print
 from app.services.rag_service import query_with_context, query_vector_store, get_clean_title
@@ -59,24 +61,29 @@ async def get_chat_history(thread_id: str, current_user: User = Depends(get_curr
 
 
 @router.post("/chat", response_model=RAGChatResponse)
-async def chat_with_rag(request: RAGChatRequest, current_user: User = Depends(get_current_user)):
+@limiter.limit(RATE_LIMIT_CHAT, key_func=user_id_key)
+async def chat_with_rag(
+    request: Request,
+    payload: RAGChatRequest,
+    current_user: User = Depends(rate_limit_identify),
+):
     """
     Main RAG endpoint with simple JSON response.
     Returns: { "answer": "...", "sources": [...] }
     """
     try:
-        print(f"[RECEIVED] Received query: {request.query}")
+        print(f"[RECEIVED] Received query: {payload.query}")
 
         # Cache is namespaced per user so a cached answer derived from one user's
         # private uploads can never be served to another user.
-        cache_query = f"{current_user.id}:{request.query}"
+        cache_query = f"{current_user.id}:{payload.query}"
 
         # Extract threadId from request
         thread_id = None
-        if hasattr(request, 'threadId') and request.threadId:
-            thread_id = request.threadId
-        elif hasattr(request, 'thread_id') and request.thread_id:
-            thread_id = request.thread_id
+        if hasattr(payload, 'threadId') and payload.threadId:
+            thread_id = payload.threadId
+        elif hasattr(payload, 'thread_id') and payload.thread_id:
+            thread_id = payload.thread_id
         
         print(f"[THREAD] Thread ID: {thread_id}")
         if not thread_id:
@@ -101,7 +108,7 @@ async def chat_with_rag(request: RAGChatRequest, current_user: User = Depends(ge
                             "threadId": thread_id,
                             "userId": current_user.id,
                             "role": "user",
-                            "content": request.query,
+                            "content": payload.query,
                             "createdAt": datetime.now()
                         }
                         await messages_collection.insert_one(user_msg)
@@ -181,17 +188,17 @@ async def chat_with_rag(request: RAGChatRequest, current_user: User = Depends(ge
         # message (no history) returns unchanged with no LLM call, while a
         # non-English first message is still translated. A "NONE" result means a
         # summary request — skip retrieval and answer from history alone.
-        retrieval_query = request.query
+        retrieval_query = payload.query
         skip_retrieval = False
-        rewritten = await rewrite_query_with_history(request.query, conversation_history)
+        rewritten = await rewrite_query_with_history(payload.query, conversation_history)
         if rewritten == "NONE":
             skip_retrieval = True
-            safe_print(f'[QUERY_REWRITE] Original: "{request.query}" -> SKIPPED (no retrieval)')
-        elif rewritten and rewritten != request.query:
+            safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> SKIPPED (no retrieval)')
+        elif rewritten and rewritten != payload.query:
             retrieval_query = rewritten
-            safe_print(f'[QUERY_REWRITE] Original: "{request.query}" -> Rewritten: "{retrieval_query}"')
+            safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> Rewritten: "{retrieval_query}"')
         else:
-            safe_print(f'[QUERY_REWRITE] Original: "{request.query}" -> unchanged')
+            safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> unchanged')
 
         # Step 2: Query vector store using the (possibly rewritten) standalone
         # query. KB chunks and the user's uploads compete in one combined search
@@ -249,7 +256,7 @@ async def chat_with_rag(request: RAGChatRequest, current_user: User = Depends(ge
         # Step 3: Generate answer with Groq
         print("[AI] Generating answer with Groq...")
         answer = await generate_answer_with_groq(
-            query=request.query,
+            query=payload.query,
             context=context,
             history=conversation_history
         )
@@ -299,7 +306,7 @@ async def chat_with_rag(request: RAGChatRequest, current_user: User = Depends(ge
                     "threadId": thread_id,
                     "userId": current_user.id,
                     "role": "user",
-                    "content": request.query,
+                    "content": payload.query,
                     "createdAt": datetime.now()
                 }
                 user_result = await messages_collection.insert_one(user_message)

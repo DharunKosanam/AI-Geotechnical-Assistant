@@ -80,7 +80,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const fetchThreads = async () => {
-    const response = await fetch(API_ENDPOINTS.getThreadHistory());
+    const response = await fetch(API_ENDPOINTS.getThreadHistory(), { credentials: "include" });
     const data = await response.json();
     // 确保访问 threads 数组属性并进行反转
     const raw: Thread[] = data.threads || [];
@@ -136,6 +136,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
     try {
       // 1. Send delete request to backend
       const response = await fetch(API_ENDPOINTS.deleteThread(), {
+        credentials: "include",
         method: 'DELETE',
         body: JSON.stringify({ 
           threadId,
@@ -176,6 +177,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
   const updateThreadName = async (threadId: string) => {
     try {
       const response = await fetch(API_ENDPOINTS.updateThread(), {
+        credentials: "include",
         method: 'PUT',
         body: JSON.stringify({ threadId, newName: newThreadName }),
         headers: {
@@ -218,6 +220,7 @@ const toggleGroupStatus = async (threadId: string, isGroup: boolean, e: React.Mo
   if (!isGroup) {
     try {
       const response = await fetch(API_ENDPOINTS.updateThread(), {
+        credentials: "include",
         method: 'PUT',
         body: JSON.stringify({ threadId, isGroup: true }),
         headers: {

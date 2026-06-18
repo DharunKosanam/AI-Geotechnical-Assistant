@@ -2,6 +2,8 @@
 Configuration management for the application
 """
 import os
+from urllib.parse import quote
+
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -36,6 +38,23 @@ if not REDIS_PASSWORD:
     raise ValueError("REDIS_PASSWORD is not set in environment variables")
 
 REDIS_USER = os.getenv("REDIS_USER", "default")
+
+# Redis connection URI assembled from the REDIS_* settings above (SAME server,
+# no new Redis config). slowapi's limits storage uses this so rate-limit
+# counters live in Redis -- they survive restarts and are shared across workers.
+# Override with REDIS_URL in .env if your Redis needs TLS (use rediss://...).
+REDIS_URL = os.getenv(
+    "REDIS_URL",
+    f"redis://{quote(REDIS_USER)}:{quote(REDIS_PASSWORD)}@{REDIS_HOST}:{REDIS_PORT}",
+)
+
+# Rate limits, slowapi "<count>/<period>" syntax. Env-overridable for tuning.
+#   login : tight brute-force protection, keyed by client IP (no user yet)
+#   chat  : generous for normal use, keyed by authenticated user id
+#   upload: keyed by authenticated user id
+RATE_LIMIT_LOGIN = os.getenv("RATE_LIMIT_LOGIN", "5/minute")
+RATE_LIMIT_CHAT = os.getenv("RATE_LIMIT_CHAT", "20/minute")
+RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "10/minute")
 
 # Application Constants
 USER_ID = "default-user"  # Hardcoded user ID to match Next.js implementation

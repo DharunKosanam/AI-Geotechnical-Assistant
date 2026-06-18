@@ -3,9 +3,11 @@ FastAPI Application Entry Point - Modular Structure
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
 
 from app.core.config import CORS_ORIGINS
 from app.core.database import close_mongo_connection, ensure_indexes
+from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import chat, threads, files, auth
 
 # Initialize FastAPI
@@ -14,6 +16,12 @@ app = FastAPI(
     description="RAG-powered Geotechnical AI Assistant using Groq, MongoDB Atlas, and Redis",
     version="2.0.0"
 )
+
+# Rate limiting (slowapi). Register the limiter on app.state and a clean 429
+# handler so a tripped limit returns JSON, never a 500. Limits are applied
+# per-route via @limiter.limit decorators (see auth/chat/files routers).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Configure CORS. allow_credentials=True is REQUIRED so the browser will send
 # and accept the httpOnly access_token cookie on cross-origin requests

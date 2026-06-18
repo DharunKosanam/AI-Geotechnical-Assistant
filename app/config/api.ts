@@ -11,8 +11,13 @@
 type BackendType = 'python' | 'nextjs';
 export const BACKEND_TYPE: BackendType = 'python' as BackendType;
 
-// Python backend URL
-const PYTHON_BACKEND_URL = process.env.NEXT_PUBLIC_PYTHON_API_URL || 'http://127.0.0.1:8000';
+// Python backend URL.
+// Default host is "localhost" (NOT 127.0.0.1) on purpose: the frontend runs on
+// http://localhost:3000, and for SameSite=Lax auth cookies localhost and
+// 127.0.0.1 count as DIFFERENT sites -- a cookie set on 127.0.0.1 would not be
+// sent on requests from localhost:3000. localhost:3000 <-> localhost:8000 are
+// same-site (port is ignored), so the httpOnly access_token cookie flows.
+export const PYTHON_BACKEND_URL = process.env.NEXT_PUBLIC_PYTHON_API_URL || 'http://localhost:8000';
 
 // API endpoints based on backend type
 export const API_ENDPOINTS = {

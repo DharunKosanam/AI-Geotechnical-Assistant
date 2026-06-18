@@ -8,12 +8,13 @@ the legacy USER_ID = "default-user" constant is no longer read by any route.
 """
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr
 from pymongo.errors import DuplicateKeyError
 
-from app.core.config import COOKIE_SECURE, JWT_EXPIRE_DAYS
+from app.core.config import COOKIE_SECURE, JWT_EXPIRE_DAYS, RATE_LIMIT_LOGIN
 from app.core.database import users_collection
+from app.core.rate_limit import limiter
 from app.dependencies.auth import get_current_user
 from app.services.auth_service import (
     create_access_token,
@@ -89,7 +90,8 @@ async def signup(payload: UserCreate):
 
 
 @router.post("/login")
-async def login(payload: LoginRequest, response: Response):
+@limiter.limit(RATE_LIMIT_LOGIN)
+async def login(request: Request, payload: LoginRequest, response: Response):
     """Verify credentials, set the JWT as an httpOnly cookie, and ALSO return it
     in the JSON body (back-compat with header-based clients/tests).
 

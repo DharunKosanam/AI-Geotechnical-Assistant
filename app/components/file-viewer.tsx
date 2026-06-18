@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
 import styles from "./file-viewer.module.css";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_PYTHON_API_URL || "http://127.0.0.1:8000";
+// Single source of truth for the backend base URL. Uses "localhost" (not
+// 127.0.0.1) so the SameSite=Lax auth cookie is same-site with the frontend.
+import { PYTHON_BACKEND_URL as BACKEND_URL } from "../config/api";
 
 const TrashIcon = () => (
   <svg
@@ -80,6 +82,7 @@ const FileViewer = () => {
       console.log("Fetching user uploaded files only...");
       // Use Python backend directly (same as upload and delete)
       const resp = await fetch(`${BACKEND_URL}/api/assistants/files?category=user_upload`, {
+        credentials: "include",
         method: "GET",
       });
       
@@ -151,6 +154,7 @@ const FileViewer = () => {
       
       // Call the new DELETE endpoint with filename (note: /api/files/delete/ prefix)
       const resp = await fetch(`${BACKEND_URL}/api/files/delete/${encodeURIComponent(filename)}`, {
+        credentials: "include",
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
@@ -227,6 +231,7 @@ const FileViewer = () => {
         
         try {
           const resp = await fetch(`${BACKEND_URL}/api/upload`, {
+            credentials: "include",
             method: "POST",
             body: data,
           });

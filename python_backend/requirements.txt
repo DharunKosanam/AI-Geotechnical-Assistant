@@ -20,6 +20,7 @@ Pillow
 img2pdf
 httpx
 llama-index-llms-groq
+llama-index-llms-ollama
 torch
 fastembed
 # pypdf  # Replaced with PyMuPDF for better text extraction

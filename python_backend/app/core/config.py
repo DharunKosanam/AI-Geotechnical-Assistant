@@ -9,15 +9,28 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Groq Configuration
+# LLM provider selection. "groq" (default) uses the hosted Groq API; "ollama"
+# uses a local llama-index Ollama LLM. Both share the same llama-index
+# interface, so everything downstream (.acomplete, RAG, citation filtering) is
+# provider-agnostic — only LLM construction differs.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
+
+# Groq Configuration. The API key is only REQUIRED when Groq is the active
+# provider; an Ollama-only deployment need not carry a Groq key, so we gate the
+# check on LLM_PROVIDER instead of failing startup unconditionally.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
+if LLM_PROVIDER == "groq" and not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY is not set in environment variables")
 
 # Model is env-overridable so we can swap without code changes. Llama 4 Scout
 # is the default since it doesn't emit <think> tags and has much higher TPM
 # headroom than qwen3-32b.
 GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+# Ollama Configuration (used when LLM_PROVIDER == "ollama"). Points at a local
+# Ollama server; the model must already be pulled/served on that host.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")

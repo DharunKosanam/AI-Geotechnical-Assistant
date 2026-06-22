@@ -5,10 +5,16 @@ import os
 import re
 import sys
 from typing import List, Dict, Optional
+import ollama
 from llama_index.llms.groq import Groq
 from dotenv import load_dotenv
 
-from app.core.config import GROQ_MODEL
+from app.core.config import (
+    GROQ_MODEL,
+    LLM_PROVIDER,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+)
 
 # Load environment variables
 load_dotenv()
@@ -29,24 +35,44 @@ def safe_print(message: str) -> None:
         print(message.encode(enc, errors="backslashreplace").decode(enc))
 
 
-def get_llm() -> Groq:
+def get_llm():
     """
-    Initialize and return a Groq LLM instance.
-    
+    Initialize and return the configured answer LLM instance.
+
+    Provider is chosen by LLM_PROVIDER ("groq" default, or "ollama"). Both
+    branches return a llama-index LLM exposing the same .acomplete() interface,
+    so the entire downstream RAG pipeline is provider-agnostic.
+
     Returns:
-        Groq: Configured Groq LLM instance
-        
+        A Groq or Ollama llama-index LLM instance.
+
     Raises:
-        ValueError: If GROQ_API_KEY is not set in environment variables
+        ValueError: If LLM_PROVIDER == "groq" and GROQ_API_KEY is not set.
     """
+    if LLM_PROVIDER == "ollama":
+        # Imported lazily so a Groq-only deployment doesn't need the package.
+        from llama_index.llms.ollama import Ollama
+
+        # thinking=False disables qwen3.5's chain-of-thought. The wrapper sends
+        # this as the ollama API's top-level `think` flag on every request,
+        # which collapses 100s+ responses to <1s. (NOT additional_kwargs -- that
+        # goes into model `options`, not the think flag; and a Modelfile
+        # PARAMETER does not work on this Ollama version.)
+        return Ollama(
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            request_timeout=120.0,
+            thinking=False,
+        )
+
     groq_api_key = os.getenv("GROQ_API_KEY")
-    
+
     if not groq_api_key:
         raise ValueError(
             "GROQ_API_KEY is not set in environment variables. "
             "Please add GROQ_API_KEY to your .env file."
         )
-    
+
     llm = Groq(
         model=GROQ_MODEL,
         api_key=groq_api_key,
@@ -61,6 +87,17 @@ def get_llm() -> Groq:
 def _model_emits_thinking_tags(model_name: str) -> bool:
     """Only qwen3 models wrap their chain-of-thought in <think>...</think>."""
     return "qwen" in (model_name or "").lower()
+
+
+def _active_model_emits_thinking_tags() -> bool:
+    """Whether the currently-configured provider/model emits <think> tags.
+
+    Ollama here serves qwen3.5, which always wraps its chain-of-thought in
+    <think>...</think>, so we always route Ollama output through the stripper.
+    For Groq it depends on the model name (only qwen* emit them)."""
+    if LLM_PROVIDER == "ollama":
+        return True
+    return _model_emits_thinking_tags(GROQ_MODEL)
 
 
 async def generate_answer_with_groq(
@@ -136,23 +173,35 @@ CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide dire
 USER QUESTION: {query}
 
 Please provide a detailed answer:"""
-    
+
     # Generate response
     try:
-        response = await llm.acomplete(full_prompt)
-        
-        # Capture raw response
-        raw_answer = response.text
+        if LLM_PROVIDER == "ollama":
+            # Bypass llama-index for Ollama: its wrapper does NOT reliably forward
+            # the think=false flag (constructor thinking=False -> 70s; the /no_think
+            # token -> 120s / 4000 thinking tokens, this model ignores it; a per-call
+            # think=False -> timeout). The raw ollama async client honors think=False:
+            # ~15s, ~310 tokens, no <think> block. Groq stays on llama-index (else).
+            client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+            resp = await client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": full_prompt}],
+                think=False,
+            )
+            raw_answer = resp["message"]["content"]
+        else:
+            response = await llm.acomplete(full_prompt)
+            raw_answer = response.text
         
         print(f"   [TEXT] Raw answer length: {len(raw_answer)} chars")
         if len(raw_answer) > 0:
             print(f"   [TEXT] First 300 chars: {raw_answer[:300]}")
         
-        # Strip <think>...</think> only for models that actually emit them
-        # (qwen3). Llama 4 Scout and other non-thinking models never produce
-        # these tags, so the scrub is skipped to avoid eating legitimate <>
-        # content.
-        if _model_emits_thinking_tags(GROQ_MODEL):
+        # Strip <think>...</think> only for providers/models that actually emit
+        # them (qwen3 on Groq, and all Ollama output since it serves qwen3.5).
+        # Llama 4 Scout and other non-thinking Groq models never produce these
+        # tags, so the scrub is skipped to avoid eating legitimate <> content.
+        if _active_model_emits_thinking_tags():
             cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
             cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
         else:
@@ -314,19 +363,24 @@ async def rewrite_query_with_history(
         return query
 
     groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        # No key — don't block retrieval, just use the raw query.
+    if LLM_PROVIDER == "groq" and not groq_api_key:
+        # No key — don't block retrieval, just use the raw query. (Only the Groq
+        # provider needs a key; Ollama runs locally without one.)
         return query
 
-    # Dedicated low-temperature, short-output instance for deterministic,
-    # cheap rewrites (separate from the answer LLM which runs at temp 0.3).
-    rewriter = Groq(
-        model=GROQ_MODEL,
-        api_key=groq_api_key,
-        temperature=0,
-        max_tokens=120,
-        request_timeout=30.0,
-    )
+    # Dedicated low-temperature, short-output rewriter, separate from the answer
+    # LLM (temp 0.3). Groq uses llama-index; Ollama bypasses it and calls the raw
+    # ollama async client in the try-block below (the wrapper won't forward
+    # think=false), so we only build a llama-index rewriter for the Groq path.
+    rewriter = None
+    if LLM_PROVIDER == "groq":
+        rewriter = Groq(
+            model=GROQ_MODEL,
+            api_key=groq_api_key,
+            temperature=0,
+            max_tokens=120,
+            request_timeout=30.0,
+        )
 
     # Last 4 turns are enough context to resolve a follow-up. On a first-turn
     # (translation-only) call there is no history, so say so explicitly.
@@ -342,8 +396,19 @@ async def rewrite_query_with_history(
     rewrite_prompt = QUERY_REWRITE_PROMPT.format(history_block=history_block, query=query)
 
     try:
-        response = await rewriter.acomplete(rewrite_prompt)
-        rewritten = (response.text or "").strip()
+        if LLM_PROVIDER == "ollama":
+            # Raw ollama client honors think=False; the llama-index wrapper does
+            # not (see generate_answer_with_groq for the full diagnosis).
+            client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+            resp = await client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": rewrite_prompt}],
+                think=False,
+            )
+            rewritten = (resp["message"]["content"] or "").strip()
+        else:
+            response = await rewriter.acomplete(rewrite_prompt)
+            rewritten = (response.text or "").strip()
 
         # Defensive cleanup: drop surrounding quotes/backticks and keep only the
         # first line in case the model adds commentary.

@@ -39,3 +39,6 @@ openai-v4.29.0-beta.1.tgz
 cookies.txt
 __pycache__/
 *.pyc
+venv/
+python_backend/venv/
+*.so

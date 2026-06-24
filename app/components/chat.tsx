@@ -735,14 +735,20 @@ const Chat = ({
 
       if (!response.ok) {
         let errorMessage = `Failed to send message (Status: ${response.status})`;
+        // Read the body exactly ONCE. A Response stream can only be consumed
+        // once, so we take the raw text and then try to parse it as JSON,
+        // instead of calling .json() and .text() on the same response (which
+        // throws "body stream already read" when the error body isn't JSON,
+        // e.g. an HTML 5xx page from the proxy).
+        const errorText = await response.text();
         try {
-          const errorData = await response.json();
-          errorMessage = errorData.error || errorMessage;
+          const errorData = JSON.parse(errorText);
+          // FastAPI errors use { detail }; some routes use { error }.
+          errorMessage = errorData.detail || errorData.error || errorMessage;
           if (errorData.details) {
             console.error("Error details:", errorData.details);
           }
         } catch {
-          const errorText = await response.text();
           errorMessage = errorText || errorMessage;
         }
         console.error(`Failed to send message. Status: ${response.status}`);
@@ -1019,7 +1025,7 @@ const Chat = ({
 
   // imageFileDone - show image in chat
   const handleImageFileDone = (image: any) => {
-    const backendUrl = process.env.NEXT_PUBLIC_PYTHON_API_URL || '';
+    const backendUrl = ''; // same-origin; /api/files/* is rewritten to FastAPI
     appendToLastMessage(`\n![${image.file_id}](${backendUrl}/api/files/${image.file_id})\n`);
   }
 
@@ -1151,7 +1157,7 @@ const Chat = ({
       };
       annotations.forEach((annotation) => {
         if (annotation.type === 'file_path') {
-          const backendUrl = process.env.NEXT_PUBLIC_PYTHON_API_URL || '';
+          const backendUrl = ''; // same-origin; /api/files/* is rewritten to FastAPI
           const fullPath = `${backendUrl}/api/files/${annotation.file_path.file_id}`;
           
           updatedLastMessage.text = updatedLastMessage.text.replaceAll(

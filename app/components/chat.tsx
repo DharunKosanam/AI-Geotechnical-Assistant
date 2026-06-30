@@ -425,12 +425,13 @@ const Chat = ({
     return new Date().toLocaleString();
   };
 
-  const scrollToBottom = (smooth = false) => {
-    if (smooth) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    } else {
-      const container = messagesContainerRef.current;
-      if (container) container.scrollTop = container.scrollHeight;
+  // Scroll ONLY the .messages container by its own scrollTop — never
+  // scrollIntoView, which walks the ancestor chain and (even past
+  // overflow:hidden) drags the header/sidebar off-screen.
+  const scrollToBottom = () => {
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
     }
   };
 
@@ -464,11 +465,11 @@ const Chat = ({
         rafId = null;
         if (shouldForceScrollRef.current) {
           shouldForceScrollRef.current = false;
-          scrollToBottom(true);
+          scrollToBottom();
           return;
         }
         if (isAtBottomRef.current) {
-          scrollToBottom(false);
+          scrollToBottom();
         }
       });
     });

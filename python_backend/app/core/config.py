@@ -32,6 +32,23 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 
+# Ollama generation tuning — passed as the `options` dict on the raw
+# ollama.AsyncClient.chat calls in llm_service.py.
+#   num_ctx     - context window. Ollama's runtime DEFAULT is 4096, but a
+#                 multi-turn RAG prompt (system + up to ~6000-token history +
+#                 retrieved chunks) reaches ~7.3k tokens. At 4096 the input fills
+#                 the window and leaves no output budget, so generation halts
+#                 after ~1 word ("Based") yet still returns HTTP 200. qwen3.5:9b
+#                 supports 262k, so we raise the window to hold the worst case.
+#   num_predict - upper bound on OUTPUT tokens so a long answer can't run away.
+#                 2048 sits safely above the largest observed good answer
+#                 (~4800 chars / ~1.3k tokens); 1024 would clip it.
+#   temperature - override the model Modelfile default (1.0, too high for
+#                 grounded RAG); 0.3 matches the Groq answer LLM.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:

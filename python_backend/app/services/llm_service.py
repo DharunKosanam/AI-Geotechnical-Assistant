@@ -14,6 +14,9 @@ from app.core.config import (
     LLM_PROVIDER,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
+    OLLAMA_NUM_CTX,
+    OLLAMA_NUM_PREDICT,
+    OLLAMA_TEMPERATURE,
 )
 
 # Load environment variables
@@ -100,6 +103,20 @@ def _active_model_emits_thinking_tags() -> bool:
     return _model_emits_thinking_tags(GROQ_MODEL)
 
 
+def _ollama_options() -> dict:
+    """Generation options for the raw ollama.AsyncClient.chat calls.
+
+    num_ctx is the critical one: the runtime default (4096) is smaller than a
+    multi-turn RAG prompt (~7.3k tokens), which starves the output budget and
+    truncates answers to a single word. See config.py for the full rationale.
+    """
+    return {
+        "num_ctx": OLLAMA_NUM_CTX,
+        "num_predict": OLLAMA_NUM_PREDICT,
+        "temperature": OLLAMA_TEMPERATURE,
+    }
+
+
 async def generate_answer_with_groq(
     query: str, 
     context: str, 
@@ -183,12 +200,37 @@ Please provide a detailed answer:"""
             # think=False -> timeout). The raw ollama async client honors think=False:
             # ~15s, ~310 tokens, no <think> block. Groq stays on llama-index (else).
             client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
-            resp = await client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": full_prompt}],
-                think=False,
-            )
-            raw_answer = resp["message"]["content"]
+
+            async def _ollama_generate() -> str:
+                resp = await client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": full_prompt}],
+                    think=False,
+                    options=_ollama_options(),
+                )
+                return resp["message"]["content"] or ""
+
+            raw_answer = await _ollama_generate()
+
+            # Safety net: a healthy generation is hundreds-to-thousands of chars.
+            # A sub-20-char raw answer means the model halted almost immediately
+            # (historically caused by num_ctx overflow eating the output budget).
+            # With num_ctx now sized for the worst-case prompt this should not
+            # happen; if it still does, retry once, then surface a clear message
+            # instead of rendering a one-word fragment like "Based".
+            SHORT_ANSWER_THRESHOLD = 20
+            if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
+                print(
+                    f"   [GUARD] Suspiciously short raw answer "
+                    f"({len(raw_answer.strip())} chars): {raw_answer!r} — retrying once"
+                )
+                raw_answer = await _ollama_generate()
+                if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
+                    print(
+                        f"   [GUARD] Still short after retry "
+                        f"({len(raw_answer.strip())} chars): {raw_answer!r} — returning fallback"
+                    )
+                    return "I couldn't generate a complete answer — please try again."
         else:
             response = await llm.acomplete(full_prompt)
             raw_answer = response.text
@@ -404,6 +446,7 @@ async def rewrite_query_with_history(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": rewrite_prompt}],
                 think=False,
+                options=_ollama_options(),
             )
             rewritten = (resp["message"]["content"] or "").strip()
         else:

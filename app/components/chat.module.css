@@ -37,6 +37,7 @@
   padding: 10px;
   padding-bottom: 40px;
   order: 1;
+  flex-shrink: 0;
 }
 
 .input {
@@ -182,6 +183,7 @@
 
 .messages {
   flex-grow: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 10px;
   display: flex;

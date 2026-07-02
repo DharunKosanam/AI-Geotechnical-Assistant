@@ -16,7 +16,7 @@ from models import (
     SubmitActionsRequest,
     User,
 )
-from app.core.database import conversations_collection
+from app.core.database import conversations_collection, messages_collection
 from app.dependencies.auth import get_current_user
 from app.services.llm_service import get_llm
 
@@ -154,13 +154,34 @@ async def delete_thread(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Thread not found"
             )
-        
+
+        # Cascade: remove this thread's persisted chat messages so they aren't
+        # orphaned. Scope is EXACTLY this user + this thread -- the same filter
+        # the conversation delete above used -- so no other user's data and no
+        # knowledge_base rows are ever touched. Log the count first (dry-run
+        # visibility) before actually deleting.
+        message_filter = {"userId": current_user.id, "threadId": request.threadId}
+        pending = await messages_collection.count_documents(message_filter)
+        print(
+            f"[CASCADE] Deleting {pending} message(s) for thread "
+            f"{request.threadId} (user {current_user.id})"
+        )
+        message_result = await messages_collection.delete_many(message_filter)
+        print(
+            f"[CASCADE] Deleted {message_result.deleted_count} message(s) for "
+            f"thread {request.threadId}"
+        )
+
         # Also delete the thread messages from memory
         if request.threadId in _thread_messages:
             del _thread_messages[request.threadId]
-        
+
         print(f"[OK] Deleted thread: {request.threadId}")
-        return {"success": True, "message": "Thread deleted successfully"}
+        return {
+            "success": True,
+            "message": "Thread deleted successfully",
+            "deleted_messages": message_result.deleted_count,
+        }
         
     except HTTPException:
         raise

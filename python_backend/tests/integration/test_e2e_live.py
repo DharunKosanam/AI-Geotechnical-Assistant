@@ -30,9 +30,9 @@ Safety / isolation:
   * Every thread and uploaded file this run creates is deleted in cleanup.
   * Uploads use category="user_upload" only. The shared knowledge_base and its
     chunks are NEVER written or deleted by this script.
-  * Known limitation (reported, not worked around): deleting a thread does NOT
-    delete its messages_collection rows -- there is no API to do so -- so a few
-    chat messages persist under the test user after a run.
+  * Deleting a thread now cascade-deletes its messages_collection rows (scoped
+    to the same user + thread), so cleanup leaves no orphaned chat messages
+    under the test user.
 
 All console output is plain ASCII (Windows cp1252 safe).
 """
@@ -564,8 +564,8 @@ async def cleanup(base_url, token, created_threads, created_files, res):
                          r.json().get("deleted_chunks") if r.status_code == 200 else "-"))
             except Exception as e:
                 print("    file %s -> cleanup error: %s" % (fid, e))
-    print("    NOTE: messages_collection rows are NOT deletable via API and remain "
-          "under the test user (documented limitation).")
+    print("    NOTE: thread deletion now cascade-deletes messages_collection rows "
+          "(same user + thread), so no orphaned messages remain.")
 
 
 # ============================================================

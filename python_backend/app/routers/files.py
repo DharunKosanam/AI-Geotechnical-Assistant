@@ -252,7 +252,7 @@ async def upload_document(
         print(f"[ERROR] Error uploading file: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload file: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -314,7 +314,7 @@ async def upload_status(
         print(f"[ERROR] Error getting upload status for {filename}: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get upload status: {str(error)}",
+            detail="An internal error occurred, please try again.",
         )
 
 
@@ -402,7 +402,7 @@ async def list_files(
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list files: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -485,7 +485,7 @@ async def upload_file(
         print(f"[ERROR] Error uploading file: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload file: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -560,7 +560,7 @@ async def delete_file(
         print(f"[ERROR] Error deleting file: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete file: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -607,7 +607,7 @@ async def get_file(file_id: str, current_user: User = Depends(get_current_user))
         print(f"[ERROR] Error retrieving file: {error}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"File not found: {str(error)}"
+            detail="File not found."
         )
 
 
@@ -649,7 +649,7 @@ async def delete_file_by_name(filename: str, current_user: User = Depends(get_cu
         print(f"[ERROR] Error deleting file {filename}: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete file: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -706,5 +706,5 @@ async def get_file_content(file_id: str, current_user: User = Depends(get_curren
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"File not found: {str(error)}"
+            detail="File not found."
         )

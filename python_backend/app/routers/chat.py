@@ -347,10 +347,12 @@ async def chat_with_rag(
         )
         
     except Exception as error:
+        # Full error stays in the server logs; the client gets a generic message
+        # so internal details (stack context, driver/DB errors) aren't leaked.
         print(f"[ERROR] Error in chat endpoint: {error}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate answer: {str(error)}"
+            detail="An internal error occurred, please try again."
         )

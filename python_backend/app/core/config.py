@@ -40,12 +40,15 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 #                 the window and leaves no output budget, so generation halts
 #                 after ~1 word ("Based") yet still returns HTTP 200. qwen3.5:9b
 #                 supports 262k, so we raise the window to hold the worst case.
+#                 12288 (up from 8192): the ~7.3k-token worst-case prompt plus
+#                 num_predict 2048 output left thin margin at 8192; 12288 gives
+#                 comfortable headroom without spilling to CPU.
 #   num_predict - upper bound on OUTPUT tokens so a long answer can't run away.
 #                 2048 sits safely above the largest observed good answer
 #                 (~4800 chars / ~1.3k tokens); 1024 would clip it.
 #   temperature - override the model Modelfile default (1.0, too high for
 #                 grounded RAG); 0.3 matches the Groq answer LLM.
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "12288"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
 

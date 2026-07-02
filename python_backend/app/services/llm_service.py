@@ -5,6 +5,7 @@ import os
 import re
 import sys
 from typing import List, Dict, Optional
+import httpx
 import ollama
 from llama_index.llms.groq import Groq
 from dotenv import load_dotenv
@@ -16,6 +17,8 @@ from app.core.config import (
     OLLAMA_MODEL,
     OLLAMA_NUM_CTX,
     OLLAMA_NUM_PREDICT,
+    OLLAMA_REQUEST_TIMEOUT,
+    OLLAMA_REWRITE_TIMEOUT,
     OLLAMA_TEMPERATURE,
 )
 
@@ -199,7 +202,11 @@ Please provide a detailed answer:"""
             # token -> 120s / 4000 thinking tokens, this model ignores it; a per-call
             # think=False -> timeout). The raw ollama async client honors think=False:
             # ~15s, ~310 tokens, no <think> block. Groq stays on llama-index (else).
-            client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+            # timeout bounds a hung generation (see OLLAMA_REQUEST_TIMEOUT); on
+            # expiry httpx raises TimeoutException, caught below for a clean message.
+            client = ollama.AsyncClient(
+                host=OLLAMA_BASE_URL, timeout=OLLAMA_REQUEST_TIMEOUT
+            )
 
             async def _ollama_generate() -> str:
                 resp = await client.chat(
@@ -273,6 +280,15 @@ Please provide a detailed answer:"""
         print(f"   [OK] Final answer length: {len(final_answer)} chars")
         
         return final_answer
+    except httpx.TimeoutException:
+        # Ollama generation exceeded OLLAMA_REQUEST_TIMEOUT (worker released, not
+        # hung). Return a graceful message inline — matching the short-answer
+        # fallback style above — rather than re-raising into a 500.
+        print(
+            f"   [TIMEOUT] Ollama answer generation exceeded "
+            f"{OLLAMA_REQUEST_TIMEOUT}s — returning graceful message"
+        )
+        return "The assistant took too long to respond. Please try again."
     except Exception as e:
         raise Exception(f"Failed to generate answer with Groq: {str(e)}")
 
@@ -440,8 +456,12 @@ async def rewrite_query_with_history(
     try:
         if LLM_PROVIDER == "ollama":
             # Raw ollama client honors think=False; the llama-index wrapper does
-            # not (see generate_answer_with_groq for the full diagnosis).
-            client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+            # not (see generate_answer_with_groq for the full diagnosis). Short
+            # timeout (OLLAMA_REWRITE_TIMEOUT): this is a tiny rewrite call, and a
+            # timeout is caught below to fall back to the raw query.
+            client = ollama.AsyncClient(
+                host=OLLAMA_BASE_URL, timeout=OLLAMA_REWRITE_TIMEOUT
+            )
             resp = await client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": rewrite_prompt}],

@@ -49,6 +49,23 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
 
+# Ollama request timeouts (seconds) — passed to the ollama.AsyncClient
+# constructor (forwarded to the underlying httpx client) so a hung generation
+# fails cleanly instead of holding a worker forever. Sized against the observed
+# concurrency worst case: under 6 concurrent /chat requests Ollama serializes on
+# the single MIG slice and the 6th answer call completed at ~148s. The chain is
+# ordered to fail inside-out: Ollama (180s) < Next route (240s) < nginx (300s).
+#   OLLAMA_REQUEST_TIMEOUT - ceiling for the ANSWER chat call. 180s = the ~148s
+#       observed worst case + ~22% margin, so a legitimately queued request (or
+#       the ~44.7s slow query landing last in the queue) still completes, while a
+#       genuinely stuck generation is released instead of hanging indefinitely.
+#   OLLAMA_REWRITE_TIMEOUT - ceiling for the tiny query-REWRITE chat call, which
+#       should finish in seconds. A short 30s cap keeps the worst-case combined
+#       path (rewrite 30s + answer 180s = 210s) comfortably under the 240s route
+#       limit. On timeout the rewriter falls back to the raw query.
+OLLAMA_REQUEST_TIMEOUT = float(os.getenv("OLLAMA_REQUEST_TIMEOUT", "180"))
+OLLAMA_REWRITE_TIMEOUT = float(os.getenv("OLLAMA_REWRITE_TIMEOUT", "30"))
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:

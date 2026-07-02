@@ -16,7 +16,10 @@ export const dynamic = "force-dynamic"; // never cache; always hit FastAPI
 export const maxDuration = 300;          // let the route run up to 300s
 
 const PYTHON_API_URL = process.env.PYTHON_API_URL || "http://localhost:8000";
-const UPSTREAM_TIMEOUT_MS = 180_000;     // 180s ceiling for the RAG response
+// 240s ceiling for the RAG response. Sits between the Ollama client timeout
+// (180s, inside FastAPI) and nginx proxy_read_timeout (300s) so the chain fails
+// inside-out and this route's clean 504 JSON fires before nginx's generic 504.
+const UPSTREAM_TIMEOUT_MS = 240_000;
 
 export async function POST(request: NextRequest) {
   // Read the JSON body once and forward it verbatim ({ query, history, threadId }).

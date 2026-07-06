@@ -159,6 +159,9 @@ Guidelines:
 - Be concise but thorough
 - Use technical terminology appropriately
 - Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points
+- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
+- If you use a table: put a blank line before it, include a proper header row and separator row (e.g. |---|---|), and put NO math/LaTeX inside cells — write any math in the surrounding prose or spell values out plainly in the cells.
+- Write ALL inline math with consistent $...$ delimiters (e.g. $D_{50}$, $\\sigma'$). Never write bare subscripts like D_{50} or "D 50" outside of $...$.
 - Do NOT add a "Sources" or "References" section at the end of your response. The application automatically appends a formatted, clickable Google Scholar Sources list below your answer.
 
 CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""

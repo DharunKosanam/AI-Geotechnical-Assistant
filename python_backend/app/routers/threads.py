@@ -38,7 +38,7 @@ async def create_thread(current_user: User = Depends(get_current_user)):
         print(f"[ERROR] Error creating thread: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create thread: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -97,7 +97,7 @@ async def create_thread_history(
         print(f"[ERROR] Error creating thread history: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create thread history: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -134,7 +134,7 @@ async def update_thread(
         print(f"[ERROR] Error updating thread: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update thread: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -189,7 +189,7 @@ async def delete_thread(
         print(f"[ERROR] Error deleting thread: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete thread: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -307,7 +307,7 @@ async def get_messages_history(
         print(f"[ERROR] Error fetching messages: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch messages: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -333,7 +333,7 @@ async def clear_citation_cache(current_user: User = Depends(get_current_user)):
         print(f"[ERROR] Error clearing cache: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to clear cache: {str(error)}"
+            detail="An internal error occurred, please try again."
         )
 
 
@@ -352,5 +352,5 @@ async def submit_tool_actions(
         print(f"[ERROR] Error submitting tool outputs: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to submit tool outputs: {str(error)}"
+            detail="An internal error occurred, please try again."
         )

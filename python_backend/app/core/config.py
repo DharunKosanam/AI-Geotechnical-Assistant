@@ -9,15 +9,65 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Groq Configuration
+# LLM provider selection. "groq" (default) uses the hosted Groq API; "ollama"
+# uses a local llama-index Ollama LLM. Both share the same llama-index
+# interface, so everything downstream (.acomplete, RAG, citation filtering) is
+# provider-agnostic — only LLM construction differs.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
+
+# Groq Configuration. The API key is only REQUIRED when Groq is the active
+# provider; an Ollama-only deployment need not carry a Groq key, so we gate the
+# check on LLM_PROVIDER instead of failing startup unconditionally.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
+if LLM_PROVIDER == "groq" and not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY is not set in environment variables")
 
 # Model is env-overridable so we can swap without code changes. Llama 4 Scout
 # is the default since it doesn't emit <think> tags and has much higher TPM
 # headroom than qwen3-32b.
 GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+# Ollama Configuration (used when LLM_PROVIDER == "ollama"). Points at a local
+# Ollama server; the model must already be pulled/served on that host.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
+
+# Ollama generation tuning — passed as the `options` dict on the raw
+# ollama.AsyncClient.chat calls in llm_service.py.
+#   num_ctx     - context window. Ollama's runtime DEFAULT is 4096, but a
+#                 multi-turn RAG prompt (system + up to ~6000-token history +
+#                 retrieved chunks) reaches ~7.3k tokens. At 4096 the input fills
+#                 the window and leaves no output budget, so generation halts
+#                 after ~1 word ("Based") yet still returns HTTP 200. qwen3.5:9b
+#                 supports 262k, so we raise the window to hold the worst case.
+#                 12288 (up from 8192): the ~7.3k-token worst-case prompt plus
+#                 num_predict 2048 output left thin margin at 8192; 12288 gives
+#                 comfortable headroom without spilling to CPU.
+#   num_predict - upper bound on OUTPUT tokens so a long answer can't run away.
+#                 2048 sits safely above the largest observed good answer
+#                 (~4800 chars / ~1.3k tokens); 1024 would clip it.
+#   temperature - override the model Modelfile default (1.0, too high for
+#                 grounded RAG); 0.3 matches the Groq answer LLM.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "12288"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
+
+# Ollama request timeouts (seconds) — passed to the ollama.AsyncClient
+# constructor (forwarded to the underlying httpx client) so a hung generation
+# fails cleanly instead of holding a worker forever. Sized against the observed
+# concurrency worst case: under 6 concurrent /chat requests Ollama serializes on
+# the single MIG slice and the 6th answer call completed at ~148s. The chain is
+# ordered to fail inside-out: Ollama (180s) < Next route (240s) < nginx (300s).
+#   OLLAMA_REQUEST_TIMEOUT - ceiling for the ANSWER chat call. 180s = the ~148s
+#       observed worst case + ~22% margin, so a legitimately queued request (or
+#       the ~44.7s slow query landing last in the queue) still completes, while a
+#       genuinely stuck generation is released instead of hanging indefinitely.
+#   OLLAMA_REWRITE_TIMEOUT - ceiling for the tiny query-REWRITE chat call, which
+#       should finish in seconds. A short 30s cap keeps the worst-case combined
+#       path (rewrite 30s + answer 180s = 210s) comfortably under the 240s route
+#       limit. On timeout the rewriter falls back to the raw query.
+OLLAMA_REQUEST_TIMEOUT = float(os.getenv("OLLAMA_REQUEST_TIMEOUT", "180"))
+OLLAMA_REWRITE_TIMEOUT = float(os.getenv("OLLAMA_REWRITE_TIMEOUT", "30"))
 
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")

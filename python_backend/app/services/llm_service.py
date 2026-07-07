@@ -5,10 +5,22 @@ import os
 import re
 import sys
 from typing import List, Dict, Optional
+import httpx
+import ollama
 from llama_index.llms.groq import Groq
 from dotenv import load_dotenv
 
-from app.core.config import GROQ_MODEL
+from app.core.config import (
+    GROQ_MODEL,
+    LLM_PROVIDER,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    OLLAMA_NUM_CTX,
+    OLLAMA_NUM_PREDICT,
+    OLLAMA_REQUEST_TIMEOUT,
+    OLLAMA_REWRITE_TIMEOUT,
+    OLLAMA_TEMPERATURE,
+)
 
 # Load environment variables
 load_dotenv()
@@ -29,24 +41,44 @@ def safe_print(message: str) -> None:
         print(message.encode(enc, errors="backslashreplace").decode(enc))
 
 
-def get_llm() -> Groq:
+def get_llm():
     """
-    Initialize and return a Groq LLM instance.
-    
+    Initialize and return the configured answer LLM instance.
+
+    Provider is chosen by LLM_PROVIDER ("groq" default, or "ollama"). Both
+    branches return a llama-index LLM exposing the same .acomplete() interface,
+    so the entire downstream RAG pipeline is provider-agnostic.
+
     Returns:
-        Groq: Configured Groq LLM instance
-        
+        A Groq or Ollama llama-index LLM instance.
+
     Raises:
-        ValueError: If GROQ_API_KEY is not set in environment variables
+        ValueError: If LLM_PROVIDER == "groq" and GROQ_API_KEY is not set.
     """
+    if LLM_PROVIDER == "ollama":
+        # Imported lazily so a Groq-only deployment doesn't need the package.
+        from llama_index.llms.ollama import Ollama
+
+        # thinking=False disables qwen3.5's chain-of-thought. The wrapper sends
+        # this as the ollama API's top-level `think` flag on every request,
+        # which collapses 100s+ responses to <1s. (NOT additional_kwargs -- that
+        # goes into model `options`, not the think flag; and a Modelfile
+        # PARAMETER does not work on this Ollama version.)
+        return Ollama(
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            request_timeout=120.0,
+            thinking=False,
+        )
+
     groq_api_key = os.getenv("GROQ_API_KEY")
-    
+
     if not groq_api_key:
         raise ValueError(
             "GROQ_API_KEY is not set in environment variables. "
             "Please add GROQ_API_KEY to your .env file."
         )
-    
+
     llm = Groq(
         model=GROQ_MODEL,
         api_key=groq_api_key,
@@ -61,6 +93,31 @@ def get_llm() -> Groq:
 def _model_emits_thinking_tags(model_name: str) -> bool:
     """Only qwen3 models wrap their chain-of-thought in <think>...</think>."""
     return "qwen" in (model_name or "").lower()
+
+
+def _active_model_emits_thinking_tags() -> bool:
+    """Whether the currently-configured provider/model emits <think> tags.
+
+    Ollama here serves qwen3.5, which always wraps its chain-of-thought in
+    <think>...</think>, so we always route Ollama output through the stripper.
+    For Groq it depends on the model name (only qwen* emit them)."""
+    if LLM_PROVIDER == "ollama":
+        return True
+    return _model_emits_thinking_tags(GROQ_MODEL)
+
+
+def _ollama_options() -> dict:
+    """Generation options for the raw ollama.AsyncClient.chat calls.
+
+    num_ctx is the critical one: the runtime default (4096) is smaller than a
+    multi-turn RAG prompt (~7.3k tokens), which starves the output budget and
+    truncates answers to a single word. See config.py for the full rationale.
+    """
+    return {
+        "num_ctx": OLLAMA_NUM_CTX,
+        "num_predict": OLLAMA_NUM_PREDICT,
+        "temperature": OLLAMA_TEMPERATURE,
+    }
 
 
 async def generate_answer_with_groq(
@@ -102,6 +159,9 @@ Guidelines:
 - Be concise but thorough
 - Use technical terminology appropriately
 - Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points
+- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
+- If you use a table: put a blank line before it, include a proper header row and separator row (e.g. |---|---|), and put NO math/LaTeX inside cells — write any math in the surrounding prose or spell values out plainly in the cells.
+- Write ALL inline math with consistent $...$ delimiters (e.g. $D_{50}$, $\\sigma'$). Never write bare subscripts like D_{50} or "D 50" outside of $...$.
 - Do NOT add a "Sources" or "References" section at the end of your response. The application automatically appends a formatted, clickable Google Scholar Sources list below your answer.
 
 CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
@@ -136,23 +196,64 @@ CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide dire
 USER QUESTION: {query}
 
 Please provide a detailed answer:"""
-    
+
     # Generate response
     try:
-        response = await llm.acomplete(full_prompt)
-        
-        # Capture raw response
-        raw_answer = response.text
+        if LLM_PROVIDER == "ollama":
+            # Bypass llama-index for Ollama: its wrapper does NOT reliably forward
+            # the think=false flag (constructor thinking=False -> 70s; the /no_think
+            # token -> 120s / 4000 thinking tokens, this model ignores it; a per-call
+            # think=False -> timeout). The raw ollama async client honors think=False:
+            # ~15s, ~310 tokens, no <think> block. Groq stays on llama-index (else).
+            # timeout bounds a hung generation (see OLLAMA_REQUEST_TIMEOUT); on
+            # expiry httpx raises TimeoutException, caught below for a clean message.
+            client = ollama.AsyncClient(
+                host=OLLAMA_BASE_URL, timeout=OLLAMA_REQUEST_TIMEOUT
+            )
+
+            async def _ollama_generate() -> str:
+                resp = await client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": full_prompt}],
+                    think=False,
+                    options=_ollama_options(),
+                )
+                return resp["message"]["content"] or ""
+
+            raw_answer = await _ollama_generate()
+
+            # Safety net: a healthy generation is hundreds-to-thousands of chars.
+            # A sub-20-char raw answer means the model halted almost immediately
+            # (historically caused by num_ctx overflow eating the output budget).
+            # With num_ctx now sized for the worst-case prompt this should not
+            # happen; if it still does, retry once, then surface a clear message
+            # instead of rendering a one-word fragment like "Based".
+            SHORT_ANSWER_THRESHOLD = 20
+            if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
+                print(
+                    f"   [GUARD] Suspiciously short raw answer "
+                    f"({len(raw_answer.strip())} chars): {raw_answer!r} — retrying once"
+                )
+                raw_answer = await _ollama_generate()
+                if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
+                    print(
+                        f"   [GUARD] Still short after retry "
+                        f"({len(raw_answer.strip())} chars): {raw_answer!r} — returning fallback"
+                    )
+                    return "I couldn't generate a complete answer — please try again."
+        else:
+            response = await llm.acomplete(full_prompt)
+            raw_answer = response.text
         
         print(f"   [TEXT] Raw answer length: {len(raw_answer)} chars")
         if len(raw_answer) > 0:
             print(f"   [TEXT] First 300 chars: {raw_answer[:300]}")
         
-        # Strip <think>...</think> only for models that actually emit them
-        # (qwen3). Llama 4 Scout and other non-thinking models never produce
-        # these tags, so the scrub is skipped to avoid eating legitimate <>
-        # content.
-        if _model_emits_thinking_tags(GROQ_MODEL):
+        # Strip <think>...</think> only for providers/models that actually emit
+        # them (qwen3 on Groq, and all Ollama output since it serves qwen3.5).
+        # Llama 4 Scout and other non-thinking Groq models never produce these
+        # tags, so the scrub is skipped to avoid eating legitimate <> content.
+        if _active_model_emits_thinking_tags():
             cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
             cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
         else:
@@ -182,6 +283,15 @@ Please provide a detailed answer:"""
         print(f"   [OK] Final answer length: {len(final_answer)} chars")
         
         return final_answer
+    except httpx.TimeoutException:
+        # Ollama generation exceeded OLLAMA_REQUEST_TIMEOUT (worker released, not
+        # hung). Return a graceful message inline — matching the short-answer
+        # fallback style above — rather than re-raising into a 500.
+        print(
+            f"   [TIMEOUT] Ollama answer generation exceeded "
+            f"{OLLAMA_REQUEST_TIMEOUT}s — returning graceful message"
+        )
+        return "The assistant took too long to respond. Please try again."
     except Exception as e:
         raise Exception(f"Failed to generate answer with Groq: {str(e)}")
 
@@ -314,19 +424,24 @@ async def rewrite_query_with_history(
         return query
 
     groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        # No key — don't block retrieval, just use the raw query.
+    if LLM_PROVIDER == "groq" and not groq_api_key:
+        # No key — don't block retrieval, just use the raw query. (Only the Groq
+        # provider needs a key; Ollama runs locally without one.)
         return query
 
-    # Dedicated low-temperature, short-output instance for deterministic,
-    # cheap rewrites (separate from the answer LLM which runs at temp 0.3).
-    rewriter = Groq(
-        model=GROQ_MODEL,
-        api_key=groq_api_key,
-        temperature=0,
-        max_tokens=120,
-        request_timeout=30.0,
-    )
+    # Dedicated low-temperature, short-output rewriter, separate from the answer
+    # LLM (temp 0.3). Groq uses llama-index; Ollama bypasses it and calls the raw
+    # ollama async client in the try-block below (the wrapper won't forward
+    # think=false), so we only build a llama-index rewriter for the Groq path.
+    rewriter = None
+    if LLM_PROVIDER == "groq":
+        rewriter = Groq(
+            model=GROQ_MODEL,
+            api_key=groq_api_key,
+            temperature=0,
+            max_tokens=120,
+            request_timeout=30.0,
+        )
 
     # Last 4 turns are enough context to resolve a follow-up. On a first-turn
     # (translation-only) call there is no history, so say so explicitly.
@@ -342,8 +457,24 @@ async def rewrite_query_with_history(
     rewrite_prompt = QUERY_REWRITE_PROMPT.format(history_block=history_block, query=query)
 
     try:
-        response = await rewriter.acomplete(rewrite_prompt)
-        rewritten = (response.text or "").strip()
+        if LLM_PROVIDER == "ollama":
+            # Raw ollama client honors think=False; the llama-index wrapper does
+            # not (see generate_answer_with_groq for the full diagnosis). Short
+            # timeout (OLLAMA_REWRITE_TIMEOUT): this is a tiny rewrite call, and a
+            # timeout is caught below to fall back to the raw query.
+            client = ollama.AsyncClient(
+                host=OLLAMA_BASE_URL, timeout=OLLAMA_REWRITE_TIMEOUT
+            )
+            resp = await client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": rewrite_prompt}],
+                think=False,
+                options=_ollama_options(),
+            )
+            rewritten = (resp["message"]["content"] or "").strip()
+        else:
+            response = await rewriter.acomplete(rewrite_prompt)
+            rewritten = (response.text or "").strip()
 
         # Defensive cleanup: drop surrounding quotes/backticks and keep only the
         # first line in case the model adds commentary.

@@ -166,6 +166,26 @@ LOW_CONF_CONTEXT_CHUNKS = int(os.getenv("LOW_CONF_CONTEXT_CHUNKS", "2"))
 # keep reranker cost constant vs the old 15+10 budget.
 COMBINED_SEARCH_LIMIT = int(os.getenv("COMBINED_SEARCH_LIMIT", "25"))
 
+# ---------------------------------------------------------------------------
+# BM25 hybrid search (additive, flag-gated — default OFF)
+# ---------------------------------------------------------------------------
+# When enabled, retrieval runs the existing $vectorSearch AND a new Atlas
+# $search (Lucene BM25) over the chunk `text` field IN PARALLEL, then fuses the
+# two ranked lists with Reciprocal Rank Fusion (RRF) before the fused pool is
+# handed to the EXISTING cross-encoder reranker (unchanged). Default False so
+# current behavior is byte-for-byte unchanged until deliberately flipped.
+HYBRID_SEARCH_ENABLED = os.getenv("HYBRID_SEARCH_ENABLED", "false").lower() == "true"
+
+# RRF constant. rrf_score = sum over each list of 1/(RRF_K + rank). Larger K
+# flattens the contribution of top ranks; 60 is the value from the original
+# RRF paper and the Atlas hybrid-search reference examples.
+RRF_K = int(os.getenv("RRF_K", "60"))
+
+# Candidates pulled from EACH search (vector and BM25) before the RRF merge.
+# The fused, deduped pool is then trimmed to COMBINED_SEARCH_LIMIT for the
+# reranker, keeping reranker cost unchanged.
+HYBRID_POOL = int(os.getenv("HYBRID_POOL", "20"))
+
 # Folder of source PDFs used by the kb_admin CLI for reindex/add operations.
 # Required for reindex when chunks don't carry the original PDF binary.
 KNOWLEDGE_BASE_PDF_PATH = os.getenv("KNOWLEDGE_BASE_PDF_PATH", "")

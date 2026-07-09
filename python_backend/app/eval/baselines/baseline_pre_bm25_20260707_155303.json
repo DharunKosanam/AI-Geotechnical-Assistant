@@ -1,0 +1,616 @@
+{
+  "meta": {
+    "label": "pre_bm25",
+    "timestamp": "20260707_155303",
+    "captured_at": "2026-07-07T15:53:03",
+    "hybrid_search_enabled": false,
+    "reranker_enabled": true,
+    "reranker_model": "Xenova/ms-marco-MiniLM-L-6-v2",
+    "rerank_top_k": 5,
+    "rerank_score_threshold": 0.0,
+    "combined_search_limit": 25,
+    "question_count": 12,
+    "total_chunks_returned": 37
+  },
+  "questions": [
+    {
+      "num": 1,
+      "group": "A",
+      "question": "What is the Terzaghi bearing capacity equation?",
+      "status": "STRONG_TOP5",
+      "low_confidence": false,
+      "num_returned": 5,
+      "top_rerank_score": 6.286660194396973,
+      "min_rerank_score": 4.980739593505859,
+      "top_filenames": [
+        "Principles of geotechnical engineering_2018_Das_Sobhan.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Principles of geotechnical engineering_2018_Das_Sobhan.pdf",
+          "category": "knowledge_base",
+          "page_start": 738,
+          "section_header": "16.3  Terzaghi\u2019s Ultimate Bearing Capacity Equation",
+          "vector_score": 0.8770170211791992,
+          "rerank_score": 6.286660194396973,
+          "low_confidence": false,
+          "text_preview": "relationship\nCopyright 2018 Cengage Learning. All Rights Reserved. May not be copied, scanned, or duplicated, in whole or in part.  WCN 02-200-203\n16.3  Terzaghi\u2019s Ultimate Bearing Capacity Equation\n7"
+        },
+        {
+          "rank": 2,
+          "filename": "Principles of geotechnical engineering_2018_Das_Sobhan.pdf",
+          "category": "knowledge_base",
+          "page_start": 749,
+          "section_header": "16.6  General Bearing Capacity Equation",
+          "vector_score": 0.878951907157898,
+          "rerank_score": 6.118121147155762,
+          "low_confidence": false,
+          "text_preview": "6.29), are given in Table 16.2. \nBut for all practical purposes, Terzaghi\u2019s bearing-capacity factors will yield good \nresults. Differences in bearing-capacity factors are usually minor compared with \n"
+        },
+        {
+          "rank": 3,
+          "filename": "Principles of geotechnical engineering_2018_Das_Sobhan.pdf",
+          "category": "knowledge_base",
+          "page_start": 741,
+          "section_header": "16.4  Effect of Groundwater Table",
+          "vector_score": 0.8572791814804077,
+          "rerank_score": 5.390037536621094,
+          "low_confidence": false,
+          "text_preview": "es of these factors are \ngiven in Table 16.1.\nFor square and circular footings, Terzaghi suggested the following equations for \nultimate soil-bearing capacity:\nSquare footing:\nqu 5 1.3c9Nc\nNc\nN 1 qNq\n"
+        },
+        {
+          "rank": 4,
+          "filename": "Principles of geotechnical engineering_2018_Das_Sobhan.pdf",
+          "category": "knowledge_base",
+          "page_start": 740,
+          "section_header": "2 \u001fBN",
+          "vector_score": 0.86820387840271,
+          "rerank_score": 5.179844379425049,
+          "low_confidence": false,
+          "text_preview": "c\nNc\nN , Nq\nNq\nN , and N\u001f\nN\u001f\nN are, respectively, the contributions of cohesion, sur\n\u001f\n-\ncharge, and unit weight of soil to the ultimate load-bearing capacity. It is extremely \ntedious to evaluate Kc\n"
+        },
+        {
+          "rank": 5,
+          "filename": "Principles of geotechnical engineering_2018_Das_Sobhan.pdf",
+          "category": "knowledge_base",
+          "page_start": 748,
+          "section_header": null,
+          "vector_score": 0.8753657341003418,
+          "rerank_score": 4.980739593505859,
+          "low_confidence": false,
+          "text_preview": "rent investigators vary widely.\n\u001f\nThis difference is because of the variation of the assumption of the wedge shape of soil\nlocated directly below the footing, as explained in the following paragraph.\n"
+        }
+      ]
+    },
+    {
+      "num": 2,
+      "group": "A",
+      "question": "What does CPT stand for and what does it measure?",
+      "status": "LOW_CONFIDENCE",
+      "low_confidence": true,
+      "num_returned": 2,
+      "top_rerank_score": -4.289308547973633,
+      "min_rerank_score": -4.3479156494140625,
+      "top_filenames": [
+        "Erosion rate of chemically stabilised soils incorporating tensile_2008_Muttuvel.pdf",
+        "ASimple Method for Assessing the Peak Friction.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Erosion rate of chemically stabilised soils incorporating tensile_2008_Muttuvel.pdf",
+          "category": "knowledge_base",
+          "page_start": 165,
+          "section_header": "5.3.2 Erosional Behaviour of Chemically Treated and Untreated",
+          "vector_score": 0.8068598508834839,
+          "rerank_score": -4.289308547973633,
+          "low_confidence": true,
+          "text_preview": "ith the \namount of stabiliser,\nc\n\u03c4  can be expressed by: \n)\nCP\n(\nm\nc\nc\n+\n=\n0\n\u03c4\n\u03c4\n \n(5.2) \nwhere, \n0\nc\n\u03c4\n (Pa) is the critical shear stress of untreated soil; m  is the proportionality coefficient as \n"
+        },
+        {
+          "rank": 2,
+          "filename": "ASimple Method for Assessing the Peak Friction.pdf",
+          "category": "knowledge_base",
+          "page_start": 9,
+          "section_header": "GTJ11338J",
+          "vector_score": 0.804450511932373,
+          "rerank_score": -4.3479156494140625,
+          "low_confidence": true,
+          "text_preview": "al\nState Parameters in Sandy Soils\u2014Simple Procedure,\u201d Geotech.\nTest. J., Vol. 24, No. 2, pp. 185\u2013192, https://doi.org/10.1520/\nGTJ11338J\nSchneider, J. A., Giampa, J. R., Bradshaw, A. S., and Newgard,\n"
+        }
+      ]
+    },
+    {
+      "num": 3,
+      "group": "A",
+      "question": "What are Shafii et al.'s D50 thresholds for erodibility?",
+      "status": "LOW_CONFIDENCE",
+      "low_confidence": true,
+      "num_returned": 2,
+      "top_rerank_score": -0.4190804362297058,
+      "min_rerank_score": -1.7935234308242798,
+      "top_filenames": [
+        "grabowski et al. 2011  Erodibility of cohesive sediment The importance of sediment properties.pdf",
+        "Relationship between Soil Erodibility and Soil Properties Journal of_2011_Shafii et al.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "grabowski et al. 2011  Erodibility of cohesive sediment The importance of sediment properties.pdf",
+          "category": "knowledge_base",
+          "page_start": 13,
+          "section_header": "5.3.3. Bio\ufb01lms and EPS",
+          "vector_score": 0.8526365756988525,
+          "rerank_score": -0.4190804362297058,
+          "low_confidence": true,
+          "text_preview": "disturbance\n5.3.3. Bio\ufb01lms and EPS\nF\nN, Me\nRate\n\u2013\n2 o.m.\nChl a\n0\u20132.5 \u03bcg ml\u22121\nSutherland et al., 1998a\nBulk carb.\n0\u201350 \u03bcg ml\u22121\nF\nN, Me\nThreshold\n+\nN1 o.m.\nColl. carb.\nAlso correlated to bed elevation\n("
+        },
+        {
+          "rank": 2,
+          "filename": "Relationship between Soil Erodibility and Soil Properties Journal of_2011_Shafii et al.pdf",
+          "category": "knowledge_base",
+          "page_start": 1,
+          "section_header": null,
+          "vector_score": 0.8449738621711731,
+          "rerank_score": -1.7935234308242798,
+          "low_confidence": true,
+          "text_preview": "and\neroding fluid chemistry on the erodibility of cohesive soils.\nArulanandan and Perry (1983) studied the effect of many param-\neters such as clay type, composition of eroding fluid as well as pore\nf"
+        }
+      ]
+    },
+    {
+      "num": 4,
+      "group": "A",
+      "question": "What is Sporosarcina pasteurii's role in MICP?",
+      "status": "PARTIAL",
+      "low_confidence": false,
+      "num_returned": 4,
+      "top_rerank_score": 2.505974769592285,
+      "min_rerank_score": 0.6517320871353149,
+      "top_filenames": [
+        "bao-et-al-2019-effect-of-microbial-induced-calcite-precipitation-on-surface-erosion-and-scour-of-granular-soils-proof.pdf",
+        "tao-et-al-surficial-soil-stabilization-against-water-induced-erosion-using-polymer-modified-microbially-induced.pdf",
+        "Effect of Fines Content in Silt-Sand Mixtures with Different Saturations on_2022_.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "bao-et-al-2019-effect-of-microbial-induced-calcite-precipitation-on-surface-erosion-and-scour-of-granular-soils-proof.pdf",
+          "category": "knowledge_base",
+          "page_start": 1,
+          "section_header": "CO NH",
+          "vector_score": 0.8452472686767578,
+          "rerank_score": 2.505974769592285,
+          "low_confidence": false,
+          "text_preview": "sustainable method. Several mechanisms have been identified by \nwhich bacteria can induce the precipitation of calcium carbonate \n(CaCO3), including urea hydrolysis. Hydrolysis of urea by the enzyme \n"
+        },
+        {
+          "rank": 2,
+          "filename": "tao-et-al-surficial-soil-stabilization-against-water-induced-erosion-using-polymer-modified-microbially-induced.pdf",
+          "category": "knowledge_base",
+          "page_start": 12,
+          "section_header": null,
+          "vector_score": 0.8585336208343506,
+          "rerank_score": 2.444748640060425,
+          "low_confidence": false,
+          "text_preview": "l rights reserved. \nDiscussion\nEffects of Polymer Modifier on MICP\nRegardless of its demonstrated advantages, such as modified vis-\ncosity and high water retention, a polymer modifier may exert other\n"
+        },
+        {
+          "rank": 3,
+          "filename": "bao-et-al-2019-effect-of-microbial-induced-calcite-precipitation-on-surface-erosion-and-scour-of-granular-soils-proof.pdf",
+          "category": "knowledge_base",
+          "page_start": 1,
+          "section_header": null,
+          "vector_score": 0.8478207588195801,
+          "rerank_score": 2.2781410217285156,
+          "low_confidence": false,
+          "text_preview": "10\nTransportation Research Record: Journal of the Transportation Research Board, \nNo. 2657, 2017, pp. 10\u201318.\nhttp://dx.doi.org/10.3141/2657-02\nErosion is relevant to a variety of infrastructure proble"
+        },
+        {
+          "rank": 4,
+          "filename": "Effect of Fines Content in Silt-Sand Mixtures with Different Saturations on_2022_.pdf",
+          "category": "knowledge_base",
+          "page_start": 2,
+          "section_header": "ARTICLE HISTORY",
+          "vector_score": 0.8481560945510864,
+          "rerank_score": 0.6517320871353149,
+          "low_confidence": false,
+          "text_preview": "e fines\ncontent with a degree of saturation of 20%. Moreover, as the fine content and degree of satur-\nation increased, the compressive strength decreased despite forming a high percentage of calcium\n"
+        }
+      ]
+    },
+    {
+      "num": 5,
+      "group": "A",
+      "question": "What is the Sodium Adsorption Ratio (SAR) in erosion?",
+      "status": "STRONG_TOP5",
+      "low_confidence": false,
+      "num_returned": 5,
+      "top_rerank_score": 6.224981784820557,
+      "min_rerank_score": 3.3338263034820557,
+      "top_filenames": [
+        "Reddi et al. - 2000 - Comparison of Internal and Surface Erosion Using Flow pump test on a sand-kaolinite mixture.pdf",
+        "grabowski et al. 2011  Erodibility of cohesive sediment The importance of sediment properties.pdf",
+        "Arulanandan et al. Application of chemical and electrical parameter to prediction of erodibility.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Reddi et al. - 2000 - Comparison of Internal and Surface Erosion Using Flow pump test on a sand-kaolinite mixture.pdf",
+          "category": "knowledge_base",
+          "page_start": 1,
+          "section_header": "1 Professor and temporary Assistant professor, respectively, Department",
+          "vector_score": 0.9191516637802124,
+          "rerank_score": 6.224981784820557,
+          "low_confidence": false,
+          "text_preview": "tudy the effect\nof sodium adsorption ratio (SAR) on soil erosion.\nThe key limitation of these experimental methods is that they all\nmeasure only the surface erosion of the soils. Internal erosion, on\n"
+        },
+        {
+          "rank": 2,
+          "filename": "grabowski et al. 2011  Erodibility of cohesive sediment The importance of sediment properties.pdf",
+          "category": "knowledge_base",
+          "page_start": 7,
+          "section_header": null,
+          "vector_score": 0.913927435874939,
+          "rerank_score": 5.881889820098877,
+          "low_confidence": false,
+          "text_preview": "ported in the soil science literature, but has only been\ninvestigated on a preliminary level for sediments. A key concern for\nsoil scientists is the sodium adsorption ratio (SAR). SAR is the relative\n"
+        },
+        {
+          "rank": 3,
+          "filename": "grabowski et al. 2011  Erodibility of cohesive sediment The importance of sediment properties.pdf",
+          "category": "knowledge_base",
+          "page_start": 7,
+          "section_header": "0.17 Pa) with a fourfold increase in salinity (0.5\u20132 ppt). Erosion",
+          "vector_score": 0.9250007271766663,
+          "rerank_score": 5.791637420654297,
+          "low_confidence": false,
+          "text_preview": "SAR and\nTable 1\nCharacteristics of the major clay mineralogies and their resistance to erosion in soils and sediments. SAR is sodium adsorption ratio, or the ratio of monovalent (Na) to divalent (Ca\na"
+        },
+        {
+          "rank": 4,
+          "filename": "Arulanandan et al. Application of chemical and electrical parameter to prediction of erodibility.pdf",
+          "category": "knowledge_base",
+          "page_start": 1,
+          "section_header": "SAMPLES FOR TESTING",
+          "vector_score": 0.9182301759719849,
+          "rerank_score": 5.487274169921875,
+          "low_confidence": false,
+          "text_preview": "uantified in terms of \nsodium adsorption ratio (SAR), which is calculated as \nSAR = [Na]%/0.5 [(Ca+) + (Mg*+)] \nwhere (Ca), for example, indicates the concentration of individual ions in milliequiva-\n"
+        },
+        {
+          "rank": 5,
+          "filename": "Arulanandan et al. Application of chemical and electrical parameter to prediction of erodibility.pdf",
+          "category": "knowledge_base",
+          "page_start": 9,
+          "section_header": null,
+          "vector_score": 0.9172958731651306,
+          "rerank_score": 3.3338263034820557,
+          "low_confidence": false,
+          "text_preview": "Existing methods such as the use of plasticity index or activity or both \ncannot, however, evaluate the average compositional and environmental property of \nconsolidated intact or undisturbed soils. \n"
+        }
+      ]
+    },
+    {
+      "num": 6,
+      "group": "A",
+      "question": "What does Mitchell and Soga say about the critical-state line in liquefaction?",
+      "status": "LOW_CONFIDENCE",
+      "low_confidence": true,
+      "num_returned": 2,
+      "top_rerank_score": -0.27606070041656494,
+      "min_rerank_score": -0.7851501107215881,
+      "top_filenames": [
+        "Effect of plastic fine particles on shear strength at the critical state of_2024_Shan et al.pdf",
+        "Critical-State-Of-Soil-Mechanics-Schofield-Wroth.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Effect of plastic fine particles on shear strength at the critical state of_2024_Shan et al.pdf",
+          "category": "knowledge_base",
+          "page_start": 16,
+          "section_header": null,
+          "vector_score": 0.8800034523010254,
+          "rerank_score": -0.27606070041656494,
+          "low_confidence": true,
+          "text_preview": "is referred to \nthe literature (Dong 2024; Torres-Cruz 2019; Zhang 2018). The solid points in Fig. 7 \nare the critical state data points attained by the test, and the hollow points are the critical \ns"
+        },
+        {
+          "rank": 2,
+          "filename": "Critical-State-Of-Soil-Mechanics-Schofield-Wroth.pdf",
+          "category": "knowledge_base",
+          "page_start": 116,
+          "section_header": null,
+          "vector_score": 0.8698779344558716,
+          "rerank_score": -0.7851501107215881,
+          "low_confidence": true,
+          "text_preview": "ests currently \navailable. Certain criticisms5,6 of the simple critical state concept have drawn attention to \nthe way in which specimens \u2018fail\u2019 before they reach the critical state: we will discuss \n"
+        }
+      ]
+    },
+    {
+      "num": 7,
+      "group": "B",
+      "question": "Why does saturated sand lose strength during an earthquake?",
+      "status": "PARTIAL",
+      "low_confidence": false,
+      "num_returned": 2,
+      "top_rerank_score": 1.3185722827911377,
+      "min_rerank_score": 1.1749625205993652,
+      "top_filenames": [
+        "Fundamentals of Soil Behavior_Mitchell_Soga.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Fundamentals of Soil Behavior_Mitchell_Soga.pdf",
+          "category": "knowledge_base",
+          "page_start": 204,
+          "section_header": null,
+          "vector_score": 0.8898328542709351,
+          "rerank_score": 1.3185722827911377,
+          "low_confidence": false,
+          "text_preview": "practical importance is that the continu-\ning generation of metastable fabrics following distur-\nbance explains why some sand deposits have been\nobserved to reliquefy at the same locations in succes-\n"
+        },
+        {
+          "rank": 2,
+          "filename": "Fundamentals of Soil Behavior_Mitchell_Soga.pdf",
+          "category": "knowledge_base",
+          "page_start": 399,
+          "section_header": null,
+          "vector_score": 0.8977324962615967,
+          "rerank_score": 1.1749625205993652,
+          "low_confidence": false,
+          "text_preview": "Repeated or cyclic loading of soils can be caused by\na number of natural phenomena or human activities,\nincluding earthquakes, wind, waves, vehicular traf\ufb01c,\nand\nreciprocating\nmachinery.\nCyclic\nloads\n"
+        }
+      ]
+    },
+    {
+      "num": 8,
+      "group": "B",
+      "question": "How does bio-cementation improve soil?",
+      "status": "STRONG_TOP5",
+      "low_confidence": false,
+      "num_returned": 5,
+      "top_rerank_score": 7.106799125671387,
+      "min_rerank_score": 5.232976913452148,
+      "top_filenames": [
+        "Application of EICP for Soil Improvement for Finer-Grained Soils_2018_Ross.pdf",
+        "Effect of Fines Content in Silt-Sand Mixtures with Different Saturations on_2022_.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Application of EICP for Soil Improvement for Finer-Grained Soils_2018_Ross.pdf",
+          "category": "knowledge_base",
+          "page_start": 15,
+          "section_header": null,
+          "vector_score": 0.8941583037376404,
+          "rerank_score": 7.106799125671387,
+          "low_confidence": false,
+          "text_preview": "ented within society (Cohen, 2015).  \nThis has led to many individuals, household and companies taking measures to reduce \ntheir net impact on the environment.  Bio-cementation is a method of ground \n"
+        },
+        {
+          "rank": 2,
+          "filename": "Application of EICP for Soil Improvement for Finer-Grained Soils_2018_Ross.pdf",
+          "category": "knowledge_base",
+          "page_start": 1,
+          "section_header": "ARIZONA STATE UNIVERSITY",
+          "vector_score": 0.9182265400886536,
+          "rerank_score": 6.266780853271484,
+          "low_confidence": false,
+          "text_preview": "Application of EICP  \nfor Soil Improvement for Finer-Grained Soils \nby \nJohnathan M. Ross \n \n \n \n \n \nA Thesis Presented in Partial Fulfillment \nof the Requirements for the Degree \nMaster of Science \n "
+        },
+        {
+          "rank": 3,
+          "filename": "Effect of Fines Content in Silt-Sand Mixtures with Different Saturations on_2022_.pdf",
+          "category": "knowledge_base",
+          "page_start": 2,
+          "section_header": "GEOMICROBIOLOGY JOURNAL",
+          "vector_score": 0.9052566289901733,
+          "rerank_score": 6.23133659362793,
+          "low_confidence": false,
+          "text_preview": "ain reactions of calcium\ncarbonate\nprecipitation\ncan\noccur\nbetween\nsoil\ngrains.\nTherefore, the effectiveness of this method is diminished in\nvery fine-grained soils and coarse-grained sands with more\n"
+        },
+        {
+          "rank": 4,
+          "filename": "Application of EICP for Soil Improvement for Finer-Grained Soils_2018_Ross.pdf",
+          "category": "knowledge_base",
+          "page_start": 21,
+          "section_header": null,
+          "vector_score": 0.8951632380485535,
+          "rerank_score": 5.326816558837891,
+          "low_confidence": false,
+          "text_preview": "6).  While the use of \nPortland cement is an effective method of treatment, the application of Portland cement \nto improve a soil is disruptive to the surrounding community due to the requirement of \n"
+        },
+        {
+          "rank": 5,
+          "filename": "Application of EICP for Soil Improvement for Finer-Grained Soils_2018_Ross.pdf",
+          "category": "knowledge_base",
+          "page_start": 24,
+          "section_header": null,
+          "vector_score": 0.8879069685935974,
+          "rerank_score": 5.232976913452148,
+          "low_confidence": false,
+          "text_preview": "ts and polymers tend to not \nbe very effective in arid climates.  These traditional methods are only effective in the \n14 \n \nshort term and are costly.  A study performed by Nasser Hamdan and Edward \n"
+        }
+      ]
+    },
+    {
+      "num": 9,
+      "group": "B",
+      "question": "What makes some soils more resistant to being washed away than others?",
+      "status": "PARTIAL",
+      "low_confidence": false,
+      "num_returned": 1,
+      "top_rerank_score": 0.21101513504981995,
+      "min_rerank_score": 0.21101513504981995,
+      "top_filenames": [
+        "Erosion in geomechanics applied to dams and levees_2013_Bonelli.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Erosion in geomechanics applied to dams and levees_2013_Bonelli.pdf",
+          "category": "knowledge_base",
+          "page_start": 22,
+          "section_header": "1.1.3. Concentrated leak erosion",
+          "vector_score": 0.8670978546142578,
+          "rerank_score": 0.21101513504981995,
+          "low_confidence": false,
+          "text_preview": "m Fell and Fry [FEL 07]\n2) Plastic soils, such as clays, clayey sands and clayey\nsandy gravels are generally more resistant to erosion than\ncohesionless soils. These soils are subject to concentrated\n"
+        }
+      ]
+    },
+    {
+      "num": 10,
+      "group": "B",
+      "question": "Why is treating fine-grained soil harder than sandy soil?",
+      "status": "PARTIAL",
+      "low_confidence": false,
+      "num_returned": 2,
+      "top_rerank_score": 2.0915040969848633,
+      "min_rerank_score": 1.0280849933624268,
+      "top_filenames": [
+        "Application of EICP for Soil Improvement for Finer-Grained Soils_2018_Ross.pdf",
+        "Enzyme induced calcium carbonate precipitation and its engineering application_2021_Ahenkorah et al.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Application of EICP for Soil Improvement for Finer-Grained Soils_2018_Ross.pdf",
+          "category": "knowledge_base",
+          "page_start": 2,
+          "section_header": "ACKNOWLEDGEMENTS",
+          "vector_score": 0.879721999168396,
+          "rerank_score": 2.0915040969848633,
+          "low_confidence": false,
+          "text_preview": "soil. \n \nThis thesis investigates the application of EICP in a soil collected from the Arizona State \nUniversity Polytechnic campus.  The surficial soil in the region is known to be a clayey sand.  \nB"
+        },
+        {
+          "rank": 2,
+          "filename": "Enzyme induced calcium carbonate precipitation and its engineering application_2021_Ahenkorah et al.pdf",
+          "category": "knowledge_base",
+          "page_start": 11,
+          "section_header": null,
+          "vector_score": 0.8781826496124268,
+          "rerank_score": 1.0280849933624268,
+          "low_confidence": false,
+          "text_preview": "sity of the EICP solution which will affect the flow through \npermeable soils [22]. Well-graded soil generally has a wide range of \nparticle sizes and shapes and can form stronger and more efficient \n"
+        }
+      ]
+    },
+    {
+      "num": 11,
+      "group": "B",
+      "question": "What happens to pore water pressure when soil is loaded quickly?",
+      "status": "STRONG_TOP5",
+      "low_confidence": false,
+      "num_returned": 5,
+      "top_rerank_score": 2.6575677394866943,
+      "min_rerank_score": 0.7743949890136719,
+      "top_filenames": [
+        "Fundamentals of Soil Behavior_Mitchell_Soga.pdf",
+        "Preliminary Study of Pore Water Chemistry Effect on the Physical and Mechanical_2015_Zhang et al.pdf",
+        "Components of pore water pressure and their engineering significance_1962_.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Fundamentals of Soil Behavior_Mitchell_Soga.pdf",
+          "category": "knowledge_base",
+          "page_start": 211,
+          "section_header": "MONTHS",
+          "vector_score": 0.8998286128044128,
+          "rerank_score": 2.6575677394866943,
+          "low_confidence": false,
+          "text_preview": "Pressure Parameter,\n[Eq. (8.3)]\nHigh pore\nA\u0192\npressures are developed when sensitive soils are\nsheared. For some quick clay, pore pressures as high\nas two times the peak deviator stress have been mea-\n"
+        },
+        {
+          "rank": 2,
+          "filename": "Preliminary Study of Pore Water Chemistry Effect on the Physical and Mechanical_2015_Zhang et al.pdf",
+          "category": "knowledge_base",
+          "page_start": 2,
+          "section_header": "2.2 Apparatus and Test method",
+          "vector_score": 0.9046661853790283,
+          "rerank_score": 2.1659350395202637,
+          "low_confidence": false,
+          "text_preview": "3 \n21 \n32 \n \n2.2 Apparatus and Test method \n \nTo study the pore water chemical effect on the soil behaviour, a special \noedometer apparatu allowing pore water to be replaced by percolation with salt \n"
+        },
+        {
+          "rank": 3,
+          "filename": "Components of pore water pressure and their engineering significance_1962_.pdf",
+          "category": "knowledge_base",
+          "page_start": 1,
+          "section_header": "COMPONENTS",
+          "vector_score": 0.9163401126861572,
+          "rerank_score": 1.9078030586242676,
+          "low_confidence": false,
+          "text_preview": "COMPONENTS \nOF \nPORE \nWATER \nPRESSURE \nAND \nTHEIR \nENGINEERING \nSIGNIFICANCE \nby \nJ. K. MITCHELL 1 \nUniversity of California, Berkeley \nABSTRACT \nPore fluid pressures that develop within soil masses a"
+        },
+        {
+          "rank": 4,
+          "filename": "Components of pore water pressure and their engineering significance_1962_.pdf",
+          "category": "knowledge_base",
+          "page_start": 3,
+          "section_header": "ACKNOWLEDGMENTS",
+          "vector_score": 0.9168399572372437,
+          "rerank_score": 1.483863115310669,
+          "low_confidence": false,
+          "text_preview": "may be expected to behave in a manner \ndifferent from free water. It would seem logical, therefore, that pore water \npressures should reflect the influence of these force fields as well as stresses \ni"
+        },
+        {
+          "rank": 5,
+          "filename": "Fundamentals of Soil Behavior_Mitchell_Soga.pdf",
+          "category": "knowledge_base",
+          "page_start": 335,
+          "section_header": "VOLUME CHANGE BEHAVIOR",
+          "vector_score": 0.898284375667572,
+          "rerank_score": 0.7743949890136719,
+          "low_confidence": false,
+          "text_preview": "tacts. As a consequence, there is\npartial collapse of the soil structure and decrease in\nvoid ratio until a suf\ufb01cient number of additional bonds\nare formed to enable the soil to carry the stresses at\n"
+        }
+      ]
+    },
+    {
+      "num": 12,
+      "group": "B",
+      "question": "How do engineers strengthen weak ground before building on it?",
+      "status": "LOW_CONFIDENCE",
+      "low_confidence": true,
+      "num_returned": 2,
+      "top_rerank_score": -2.6998913288116455,
+      "min_rerank_score": -3.985724449157715,
+      "top_filenames": [
+        "Applications of enzyme induced carbonate precipitation (EICP) for soil_2015_Hamdan.pdf",
+        "Critical-State-Of-Soil-Mechanics-Schofield-Wroth.pdf"
+      ],
+      "chunks": [
+        {
+          "rank": 1,
+          "filename": "Applications of enzyme induced carbonate precipitation (EICP) for soil_2015_Hamdan.pdf",
+          "category": "knowledge_base",
+          "page_start": 17,
+          "section_header": null,
+          "vector_score": 0.8406200408935547,
+          "rerank_score": -2.6998913288116455,
+          "low_confidence": true,
+          "text_preview": "sly bypassed due to poor ground conditions.  As a \nconsequence of movement into these areas, engineers face new challenges in \nestablishing suitable ground and developing environmentally sustainable \n"
+        },
+        {
+          "rank": 2,
+          "filename": "Critical-State-Of-Soil-Mechanics-Schofield-Wroth.pdf",
+          "category": "knowledge_base",
+          "page_start": 70,
+          "section_header": null,
+          "vector_score": 0.846992015838623,
+          "rerank_score": -3.985724449157715,
+          "low_confidence": true,
+          "text_preview": "ortance later in chapter 8. \nThe engineer can control consolidation in various ways. The soil body can be \npierced with sand-drains that reduce the half-settlement time. The half-settlement time may \n"
+        }
+      ]
+    }
+  ]
+}

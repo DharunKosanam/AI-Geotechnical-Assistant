@@ -20,6 +20,7 @@ RETRIEVAL:
     user-first ordering.
 """
 import re
+import asyncio
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import quote
 import gc
@@ -41,6 +42,9 @@ from app.core.config import (
     RERANK_SCORE_THRESHOLD,
     LOW_CONF_CONTEXT_CHUNKS,
     COMBINED_SEARCH_LIMIT,
+    HYBRID_SEARCH_ENABLED,
+    RRF_K,
+    HYBRID_POOL,
     OCR_ENABLED,
     OCR_MIN_TEXT_LEN,
     PDF_IMAGE_OCR_MIN_DIM,
@@ -606,6 +610,132 @@ async def _search_combined(
     return results[:limit]
 
 
+def _fulltext_scope_filter(user_id: Optional[str]) -> Dict[str, Any]:
+    """
+    Atlas $search ``compound`` filter clause mirroring _combined_search_filter,
+    but expressed natively for $search so the scope is applied INSIDE the BM25
+    query (not as a post-$match). KB chunks are global; user_upload chunks are
+    included only when scoped to ``user_id``. When ``user_id`` is None only the
+    knowledge_base branch is present (eval-harness / KB-only path).
+
+    ``category`` and ``userId`` must be indexed as ``token`` in text_index for
+    the ``equals`` operator to match them.
+    """
+    scope_should: List[Dict[str, Any]] = [
+        {"equals": {"path": "category", "value": "knowledge_base"}}
+    ]
+    if user_id:
+        scope_should.append({
+            "compound": {
+                "must": [
+                    {"equals": {"path": "category", "value": "user_upload"}},
+                    {"equals": {"path": "userId", "value": user_id}},
+                ]
+            }
+        })
+    return {"compound": {"should": scope_should, "minimumShouldMatch": 1}}
+
+
+async def _search_fulltext(
+    query: str,
+    limit: int,
+    user_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Atlas full-text (Lucene BM25) search over the chunk ``text`` field, scoped
+    to KB + the current user's uploads via a native $search compound filter.
+
+    Returns the SAME dict shape as _search_combined (id, text, filename,
+    category, metadata, chunkingVersion, pageStart, sectionHeader, score) so the
+    two result lists are interchangeable for RRF fusion. Here ``score`` carries
+    this search's native relevance ($meta searchScore / BM25); _rrf_merge is
+    responsible for resetting the vector ``score`` to 0.0 for BM25-only docs.
+    """
+    pipeline = [
+        {
+            "$search": {
+                "index": "text_index",
+                "compound": {
+                    "must": [{"text": {"query": query, "path": "text"}}],
+                    "filter": [_fulltext_scope_filter(user_id)],
+                },
+            }
+        },
+        {"$limit": limit},
+        {
+            "$project": {
+                "_id": 1,
+                "text": 1,
+                "filename": 1,
+                "category": 1,
+                "metadata": 1,
+                "chunkingVersion": 1,
+                "pageStart": 1,
+                "sectionHeader": 1,
+                "score": {"$meta": "searchScore"},
+            }
+        },
+    ]
+
+    results: List[Dict[str, Any]] = []
+    async for doc in files_collection.aggregate(pipeline):
+        results.append({
+            "id": str(doc.get("_id")),
+            "text": doc.get("text", ""),
+            "filename": doc.get("filename", "unknown"),
+            "category": doc.get("category", "unknown"),
+            "metadata": doc.get("metadata", {}),
+            "chunkingVersion": doc.get("chunkingVersion"),
+            "pageStart": doc.get("pageStart"),
+            "sectionHeader": doc.get("sectionHeader"),
+            "score": doc.get("score", 0.0),
+        })
+
+    return results[:limit]
+
+
+def _rrf_merge(
+    vec_results: List[Dict[str, Any]],
+    bm25_results: List[Dict[str, Any]],
+    limit: int,
+    k: int = RRF_K,
+) -> List[Dict[str, Any]]:
+    """
+    Reciprocal Rank Fusion of the vector and BM25 result lists.
+
+    For each list a doc appears in, it contributes 1/(k + rank) to its fused
+    score (rank is 1-based in list order). Docs are deduped by chunk id; the
+    fused list is sorted by rrf_score descending and trimmed to ``limit``.
+
+    The vector list is folded in FIRST so a doc that appears in both keeps its
+    real vector ``score`` (vectorSearchScore). A doc found ONLY by BM25 has its
+    ``score`` forced to 0.0 — it has no vector similarity, and downstream the
+    legacy reranker-OFF fallback floors on that field (score >= 0.5). This keeps
+    that floor a pure vector-similarity gate rather than leaking a BM25 score
+    into it (edge noted in Phase 1).
+    """
+    fused: Dict[str, Dict[str, Any]] = {}
+
+    for rank, doc in enumerate(vec_results, start=1):
+        d = dict(doc)
+        d["rrf_score"] = 1.0 / (k + rank)
+        fused[doc["id"]] = d
+
+    for rank, doc in enumerate(bm25_results, start=1):
+        doc_id = doc["id"]
+        contribution = 1.0 / (k + rank)
+        if doc_id in fused:
+            fused[doc_id]["rrf_score"] += contribution
+        else:
+            d = dict(doc)
+            d["rrf_score"] = contribution
+            d["score"] = 0.0  # BM25-only: no vector score; keep the legacy floor honest
+            fused[doc_id] = d
+
+    merged = sorted(fused.values(), key=lambda c: c["rrf_score"], reverse=True)
+    return merged[:limit]
+
+
 def _apply_rerank_threshold(
     ranked: List[Dict[str, Any]],
     threshold: float = RERANK_SCORE_THRESHOLD,
@@ -680,7 +810,18 @@ async def query_vector_store(
     model = get_embedding_model()
     query_vector = list(model.embed([query]))[0].tolist()
 
-    combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT, user_id)
+    if HYBRID_SEARCH_ENABLED:
+        # Run $vectorSearch and $search (BM25) in parallel, fuse via RRF, then
+        # hand the fused pool to the SAME reranker path below (unchanged).
+        print(f"[SEARCH] Hybrid mode: vector + BM25 (pool {HYBRID_POOL} each, RRF k={RRF_K})")
+        vec, bm25 = await asyncio.gather(
+            _search_combined(query_vector, HYBRID_POOL, user_id),
+            _search_fulltext(query, HYBRID_POOL, user_id),
+        )
+        combined = _rrf_merge(vec, bm25, COMBINED_SEARCH_LIMIT, RRF_K)
+        print(f"   Vector {len(vec)} + BM25 {len(bm25)} -> fused {len(combined)}")
+    else:
+        combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT, user_id)
 
     # Category split is informational only — useful for debugging "why is this
     # upload still showing up." It does not affect ranking.

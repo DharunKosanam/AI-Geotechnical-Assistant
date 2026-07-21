@@ -9,6 +9,7 @@ from app.core.config import CORS_ORIGINS
 from app.core.database import close_mongo_connection, ensure_indexes
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import chat, threads, files, auth, health
+from app.workspace.routes import router as workspace_router
 
 # Initialize FastAPI
 app = FastAPI(
@@ -43,6 +44,9 @@ app.include_router(threads.router)
 app.include_router(files.router)
 app.include_router(auth.router)
 app.include_router(health.router)
+# Engineering Workspace (GeoPilot). Additive and self-gating via
+# WORKSPACE_ENABLED -- including the router does not affect chat/RAG.
+app.include_router(workspace_router)
 
 
 @app.get("/")

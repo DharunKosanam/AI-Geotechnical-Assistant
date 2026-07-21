@@ -69,6 +69,21 @@ OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
 OLLAMA_REQUEST_TIMEOUT = float(os.getenv("OLLAMA_REQUEST_TIMEOUT", "180"))
 OLLAMA_REWRITE_TIMEOUT = float(os.getenv("OLLAMA_REWRITE_TIMEOUT", "30"))
 
+# ---------------------------------------------------------------------------
+# Engineering Workspace (Phase 2) feature flag
+# ---------------------------------------------------------------------------
+# Master switch for the Engineering Workspace back end (CPT lane + AI
+# Interpretation). Default OFF so the live chatbot deployment is completely
+# unaffected until the workspace is deliberately turned on. Read at call time
+# (via the config module) so it can be toggled in tests without re-import.
+# Accepts 1/true/yes/on (case-insensitive).
+WORKSPACE_ENABLED = os.getenv("WORKSPACE_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:

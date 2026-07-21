@@ -21,6 +21,11 @@ files_collection = db["files"]
 messages_collection = db["messages"]  # For persistent chat history
 users_collection = db["users"]  # JWT email/password auth
 
+# GeoPilot workspace History (Phase 3). Separate collections from the Chat tab
+# (conversations/messages) so the two features never share state.
+workspace_runs_collection = db["workspace_runs"]  # persisted calculator runs
+workspace_threads_collection = db["workspace_threads"]  # persisted chat threads
+
 
 async def ensure_indexes():
     """Create required indexes. Idempotent -- safe to call on every startup.

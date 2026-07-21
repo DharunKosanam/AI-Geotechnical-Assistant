@@ -23,6 +23,10 @@ const nextConfig = {
         { source: '/api/upload/:path*', destination: `${PYTHON_API_URL}/api/upload/:path*` },
         { source: '/api/upload',        destination: `${PYTHON_API_URL}/api/upload` },
         { source: '/api/files',         destination: `${PYTHON_API_URL}/api/files` },
+        // GeoPilot workspace. afterFiles so the app/api/workspace/cpt/interpret
+        // Route Handler (long-timeout upload) wins; everything else (e.g.
+        // GET /api/workspace/status) proxies straight to FastAPI.
+        { source: '/api/workspace/:path*', destination: `${PYTHON_API_URL}/api/workspace/:path*` },
       ],
       fallback: [],
     };

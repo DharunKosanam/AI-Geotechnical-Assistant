@@ -24,9 +24,16 @@ from app.services.llm_service import (
 )
 
 
-def _install_fake_groq(monkeypatch, return_text="", raise_exc=None):
-    """Replace llm_service.Groq with a fake that records use and returns
-    `return_text` (or raises). Returns a state dict to assert against."""
+def _install_fake_llm(monkeypatch, return_text="", raise_exc=None):
+    """Make the rewriter's LLM call deterministic under EITHER provider.
+
+    rewrite_query_with_history uses the raw ``ollama.AsyncClient`` when
+    LLM_PROVIDER == "ollama" and llama-index ``Groq`` otherwise. The live deploy
+    runs Ollama, so mocking only Groq left these tests hitting real Ollama
+    (non-deterministic). We patch BOTH paths to return ``return_text`` (or raise)
+    and share one instantiation counter, so the assertions hold regardless of the
+    configured provider and no network call is ever made.
+    """
     state = {"instantiated": 0, "prompt": None}
 
     class _FakeGroq:
@@ -39,8 +46,23 @@ def _install_fake_groq(monkeypatch, return_text="", raise_exc=None):
                 raise raise_exc
             return SimpleNamespace(text=return_text)
 
+    class _FakeOllamaClient:
+        def __init__(self, *args, **kwargs):
+            state["instantiated"] += 1
+
+        async def chat(self, *args, **kwargs):
+            state["prompt"] = kwargs.get("messages")
+            if raise_exc is not None:
+                raise raise_exc
+            return {"message": {"content": return_text}}
+
     monkeypatch.setattr(llm_service, "Groq", _FakeGroq)
+    monkeypatch.setattr(llm_service.ollama, "AsyncClient", _FakeOllamaClient)
     return state
+
+
+# Back-compat alias: existing call sites used _install_fake_groq.
+_install_fake_groq = _install_fake_llm
 
 
 # ---------------------------------------------------------------------------

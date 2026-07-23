@@ -141,6 +141,7 @@ async def process_file_ingestion(
     category: str = "user_upload",
     parent_id: Optional[ObjectId] = None,
     user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ):
     """
     Background task to process file ingestion.
@@ -148,11 +149,14 @@ async def process_file_ingestion(
     If parent_id is provided, the parent file-metadata doc's status is
     updated to "processed" on success or "failed" on error, so the UI
     can stop showing "Processing..." once chunks land in Mongo.
+
+    ``thread_id`` (with category "thread_upload") scopes the upload to a single
+    conversation thread so it is retrievable only in THREAD_DOC mode.
     """
     import gc
     try:
         print(f"[LOADING] Background processing started for: {filename} (category: {category})")
-        result = await ingest_document(filename, file_content, category, user_id=user_id)
+        result = await ingest_document(filename, file_content, category, user_id=user_id, thread_id=thread_id)
         print(f"[OK] Background processing completed: {result}")
         if parent_id is not None:
             await files_collection.update_one(
@@ -188,6 +192,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     category: str = Form("user_upload"),
+    threadId: Optional[str] = Form(None),
     current_user: User = Depends(rate_limit_identify),
 ):
     """
@@ -195,13 +200,27 @@ async def upload_document(
 
     Always uses background processing so the request returns immediately —
     large Excel/PPT files can take a while to chunk + embed.
+
+    When ``threadId`` is provided the upload is scoped to that conversation
+    thread: it is stored as category "thread_upload" and tagged with the
+    threadId, so it is retrievable only in THREAD_DOC mode for that thread and
+    never mixed into the shared knowledge base or the user's general uploads.
+    Omitting threadId preserves the existing user_upload behavior exactly.
     """
     try:
         # Read first so we can size-check; extension is the source of truth for type.
         file_content = await file.read()
         _validate_upload(file.filename, len(file_content))
 
-        print(f" Received file: {file.filename} ({len(file_content)} bytes, category: {category})")
+        # Thread-scoped uploads become their own category so they never leak into
+        # the shared KB / user_upload search. A blank threadId is treated as absent.
+        thread_id = threadId or None
+        effective_category = "thread_upload" if thread_id else category
+
+        print(
+            f" Received file: {file.filename} ({len(file_content)} bytes, "
+            f"category: {effective_category}, thread: {thread_id})"
+        )
 
         # Insert a parent file-metadata doc up front. This is what the listing
         # endpoint surfaces to the UI — without it the frontend would never
@@ -213,7 +232,7 @@ async def upload_document(
             "docType": "file",
             "filename": file.filename,
             "userId": current_user.id,
-            "category": category,
+            "category": effective_category,
             "bytes": len(file_content),
             "purpose": "assistants",
             "status": "processing",
@@ -224,17 +243,21 @@ async def upload_document(
                 "fileType": file_type,
             },
         }
+        if thread_id:
+            parent_doc["threadId"] = thread_id
+            parent_doc["metadata"]["threadId"] = thread_id
         insert_result = await files_collection.insert_one(parent_doc)
         parent_id = insert_result.inserted_id
 
-        # Schedule background ingestion with category
+        # Schedule background ingestion with category (+ thread scope if any)
         background_tasks.add_task(
             process_file_ingestion,
             file.filename,
             file_content,
-            category,
+            effective_category,
             parent_id,
             current_user.id,
+            thread_id,
         )
 
         return {

@@ -84,6 +84,21 @@ WORKSPACE_ENABLED = os.getenv("WORKSPACE_ENABLED", "false").strip().lower() in (
     "on",
 )
 
+# ---------------------------------------------------------------------------
+# Chat intent router (Phase: general-assistant) feature flag
+# ---------------------------------------------------------------------------
+# Master switch for the Chat-tab LLM intent router (KB_QUERY / GENERAL / MIXED /
+# THREAD_DOC). Default OFF so the live chat path is byte-identical to the
+# pre-router, always-retrieve behavior until deliberately enabled. Read at call
+# time (via the config module, e.g. config.ROUTER_ENABLED) so it can be toggled
+# in tests without re-import. Accepts 1/true/yes/on (case-insensitive).
+ROUTER_ENABLED = os.getenv("ROUTER_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
@@ -168,6 +183,21 @@ RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "5"))
 # below this are dropped from the displayed sources — they are retrieval noise.
 # Tune here without touching the pipeline code.
 RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.0"))
+
+# SEPARATE, permissive threshold for THREAD-SCOPED retrieval (THREAD_DOC mode).
+# The KB threshold above (0.0) is calibrated to filter noise out of a 16,811-chunk
+# corpus, where relevant chunks score +3 to +6. Thread-scoped retrieval has a
+# candidate set of exactly ONE user-uploaded document, so aggressive filtering
+# serves no purpose -- and actively harms: the ms-marco cross-encoder scores
+# generic/meta questions ("what did it find?", "summarize this document") against
+# a short single-chunk doc near its floor (~-11), indistinguishable from an
+# off-topic query, so the KB threshold wrongly drops on-target chunks and the
+# THREAD_DOC answer falls through to the "not found in your document" fallback
+# even though the answer is present. This much lower default keeps the thread's
+# own chunk for on-target questions while still letting the most clearly
+# off-topic questions (which score at the very floor) fall through. Used ONLY by
+# query_thread_documents; the KB path is unchanged. Tune via env.
+THREAD_RERANK_SCORE_THRESHOLD = float(os.getenv("THREAD_RERANK_SCORE_THRESHOLD", "-11.0"))
 
 # When every reranked chunk falls below RERANK_SCORE_THRESHOLD we still hand the
 # LLM this many top chunks as low-confidence context (so it can attempt an

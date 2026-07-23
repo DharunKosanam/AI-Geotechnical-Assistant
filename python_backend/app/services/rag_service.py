@@ -40,6 +40,7 @@ from app.core.config import (
     RERANKER_MODEL,
     RERANK_TOP_K,
     RERANK_SCORE_THRESHOLD,
+    THREAD_RERANK_SCORE_THRESHOLD,
     LOW_CONF_CONTEXT_CHUNKS,
     COMBINED_SEARCH_LIMIT,
     HYBRID_SEARCH_ENABLED,
@@ -893,6 +894,156 @@ async def query_with_context(
 
 
 # ---------------------------------------------------------------------------
+# Thread-scoped retrieval (THREAD_DOC mode)
+# ---------------------------------------------------------------------------
+def _thread_scope_filter(user_id: Optional[str], thread_id: str) -> Dict[str, Any]:
+    """Mongo ``find`` filter selecting ONLY one thread's uploaded chunks.
+
+    The isolation boundary lives HERE, at the DB query: it matches
+    ``category == "thread_upload"`` AND this exact ``threadId`` (AND ``userId``
+    when provided), and requires ``chunkIndex`` to exist so the parent file-metadata
+    doc (which has no embedding) is skipped. It therefore can NEVER return
+    knowledge_base chunks, plain user_upload chunks, or another thread's chunks --
+    regardless of how similar their text is. Factored out so it is unit-testable
+    without a DB.
+    """
+    f: Dict[str, Any] = {
+        "category": "thread_upload",
+        "threadId": thread_id,
+        "chunkIndex": {"$exists": True},
+    }
+    if user_id:
+        f["userId"] = user_id
+    return f
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    """Plain cosine similarity. Used for in-Python scoring of the small
+    thread-document set (see query_thread_documents for why not $vectorSearch)."""
+    if not a or not b:
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / ((na ** 0.5) * (nb ** 0.5))
+
+
+async def thread_has_documents(thread_id: Optional[str], user_id: Optional[str]) -> bool:
+    """True when this thread has at least one uploaded (thread_upload) document.
+
+    Used by the router to decide whether THREAD_DOC is even possible for the
+    current thread. Matches the parent file-metadata doc OR any chunk (both carry
+    category/threadId/userId), so it is True as soon as an upload is registered,
+    before background chunking finishes.
+    """
+    if not thread_id:
+        return False
+    query: Dict[str, Any] = {"category": "thread_upload", "threadId": thread_id}
+    if user_id:
+        query["userId"] = user_id
+    doc = await files_collection.find_one(query, {"_id": 1})
+    return doc is not None
+
+
+async def query_thread_documents(
+    query: str,
+    thread_id: str,
+    user_id: Optional[str] = None,
+    top_k: int = RERANK_TOP_K,
+) -> List[Dict[str, Any]]:
+    """Retrieve ONLY the current thread's uploaded document chunks.
+
+    Isolation: candidates come from a plain Mongo ``find`` scoped by
+    _thread_scope_filter, so KB chunks, plain user_upload chunks and other
+    threads' chunks are never even fetched -- the near-identical-text case can't
+    leak because those rows are excluded at the query, not merely ranked lower.
+
+    Ranking: thread-document sets are small, and a global Atlas ``$vectorSearch``
+    would risk post-filtering those few chunks out of its top candidates, so we
+    score them with in-Python cosine here, then hand them to the SAME
+    cross-encoder rerank + threshold path as the KB search (so THREAD_DOC and
+    KB_QUERY share the same low-confidence semantics and confidence fallback).
+    """
+    filter_ = _thread_scope_filter(user_id, thread_id)
+    projection = {
+        "text": 1,
+        "filename": 1,
+        "category": 1,
+        "metadata": 1,
+        "chunkingVersion": 1,
+        "pageStart": 1,
+        "sectionHeader": 1,
+        "threadId": 1,
+        "embedding": 1,
+    }
+
+    docs: List[Dict[str, Any]] = []
+    async for doc in files_collection.find(filter_, projection):
+        docs.append(doc)
+
+    if not docs:
+        print(f"[THREAD] No documents found for thread {thread_id}")
+        return []
+
+    print(f"[THREAD] Scoring {len(docs)} chunk(s) for thread {thread_id}")
+    model = get_embedding_model()
+    qv = list(model.embed([query]))[0]
+    qv = qv.tolist() if hasattr(qv, "tolist") else list(qv)
+
+    candidates: List[Dict[str, Any]] = []
+    for doc in docs:
+        emb = doc.get("embedding") or []
+        emb = emb.tolist() if hasattr(emb, "tolist") else list(emb)
+        candidates.append({
+            "id": str(doc.get("_id")),
+            "text": doc.get("text", ""),
+            "filename": doc.get("filename", "unknown"),
+            "category": doc.get("category", "thread_upload"),
+            "metadata": doc.get("metadata", {}),
+            "chunkingVersion": doc.get("chunkingVersion"),
+            "pageStart": doc.get("pageStart"),
+            "sectionHeader": doc.get("sectionHeader"),
+            "threadId": doc.get("threadId"),
+            "score": _cosine(qv, emb),
+        })
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    candidates = candidates[:COMBINED_SEARCH_LIMIT]
+
+    # Same rerank path as the KB search, but with the PERMISSIVE thread threshold
+    # (THREAD_RERANK_SCORE_THRESHOLD) instead of the KB threshold. The candidate
+    # set is a single user-uploaded document, so we keep the thread's own chunk
+    # for on-target questions rather than dropping it as "noise"; only the most
+    # clearly off-topic questions (scoring at the cross-encoder floor) fall
+    # through. _apply_rerank_threshold still tags low_confidence exactly as for
+    # KB, so chat.py's retrieval-confidence fallback treats THREAD_DOC the same.
+    if RERANKER_ENABLED:
+        try:
+            reranker = get_reranker()
+            scores = list(reranker.rerank(query, [c["text"] for c in candidates]))
+            for c, s in zip(candidates, scores):
+                c["rerank_score"] = float(s)
+            candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
+            kept, _no_high_conf = _apply_rerank_threshold(
+                candidates, threshold=THREAD_RERANK_SCORE_THRESHOLD
+            )
+            return kept
+        except Exception as rerank_err:
+            print(f"[WARNING] Thread rerank failed ({rerank_err}); falling back to vector order")
+
+    # Legacy fallback (reranker off/failed): single relevance floor, mirroring
+    # query_vector_store's STEP 3b.
+    MIN_SCORE = 0.5
+    return [c for c in candidates if c.get("score", 0) >= MIN_SCORE]
+
+
+# ---------------------------------------------------------------------------
 # Ingestion + deletion
 # ---------------------------------------------------------------------------
 async def delete_document(filename: str) -> Dict[str, Any]:
@@ -931,6 +1082,7 @@ async def ingest_document(
     file_content: bytes,
     category: str = "user_upload",
     user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Multi-format ingest: extract pages, v2 chunk, embed, store.
@@ -945,6 +1097,13 @@ async def ingest_document(
     so that admin tooling -- which locates KB chunks by that id -- keeps working
     unchanged. No HTTP route relies on this fallback; routes always pass an
     explicit user_id.
+
+    ``thread_id`` scopes an upload to a single conversation thread: when set, each
+    chunk additionally carries ``threadId`` (and ``metadata.threadId``) so
+    thread-scoped retrieval (query_thread_documents) can filter to exactly this
+    thread. The caller passes ``category="thread_upload"`` for these so they are a
+    distinct scope -- never mixed into the shared knowledge_base or the per-user
+    ``user_upload`` corpus, and therefore never surfaced by the KB search.
     """
     owner_id = user_id if user_id is not None else USER_ID
     # Lazy import to avoid a circular dependency at module load
@@ -1025,6 +1184,12 @@ async def ingest_document(
             },
             "createdAt": datetime.now(),
         }
+        # Thread-scoped uploads carry their threadId so retrieval can filter to
+        # exactly this conversation thread. Omitted entirely for shared KB and
+        # per-user uploads, so their documents are byte-identical to before.
+        if thread_id is not None:
+            doc["threadId"] = thread_id
+            doc["metadata"]["threadId"] = thread_id
         documents.append(doc)
 
     print(f"      Prepared {len(documents)} documents")

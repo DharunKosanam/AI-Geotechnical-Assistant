@@ -21,6 +21,8 @@ from app.core.config import (
     OLLAMA_REWRITE_TIMEOUT,
     OLLAMA_TEMPERATURE,
 )
+from app.services.intent_router import GENERAL, KB_QUERY
+from app.services.prompt_config import get_system_prompt
 
 # Load environment variables
 load_dotenv()
@@ -120,52 +122,26 @@ def _ollama_options() -> dict:
     }
 
 
-async def generate_answer_with_groq(
-    query: str, 
-    context: str, 
-    history: Optional[List[Dict[str, str]]] = None
+def _build_answer_prompt(
+    query: str,
+    context: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    *,
+    mode: str = KB_QUERY,
+    system_prompt: Optional[str] = None,
 ) -> str:
+    """Assemble the full answer prompt (system + history + context + question).
+
+    Pure and side-effect free so it can be unit-tested without an LLM. The
+    system prompt is ``system_prompt`` when provided (e.g. the THREAD_DOC
+    confidence-fallback prompt), otherwise it is looked up by ``mode`` from
+    prompt_config; the context section is OMITTED entirely for GENERAL (no
+    retrieval), and otherwise keeps the exact assembly used before the router was
+    introduced. For mode=KB_QUERY with no override the returned string is
+    byte-identical to the pre-router prompt.
     """
-    Generate an answer using Groq LLM with RAG context and conversation history.
-    
-    Args:
-        query: The user's question
-        context: The relevant context from vector search (formatted string)
-        history: Optional conversation history as list of {role, content} dicts
-        
-    Returns:
-        The AI-generated answer as a string
-        
-    Raises:
-        Exception: If LLM generation fails
-    """
-    # Initialize LLM
-    llm = get_llm()
-    
-    # Build system prompt
-    system_prompt = """You are an expert AI research assistant specializing in geotechnical engineering and soil mechanics.
+    resolved_prompt = system_prompt if system_prompt is not None else get_system_prompt(mode)
 
-Your task is to answer questions accurately using the provided context from technical documents.
-
-SCOPE RULES:
-- If the user's question is NOT related to geotechnical engineering AND there is no prior conversation context that establishes a geotechnical topic, politely decline. Say: "I'm here to help with questions related to geotechnical engineering and soil mechanics. If you have a specific question about topics like soil properties, erosion mechanisms, or other geotechnical concepts, feel free to ask."
-- However, if the conversation history shows the user is in the middle of discussing a geotechnical topic, treat follow-up questions, clarifications, short responses ('ok', 'go on', 'more detail'), and summarization requests as on-topic — they inherit the topic of the conversation.
-- If the user uploaded a document and asks about it, answer based on that document even if it is not geotechnical.
-
-Guidelines:
-- Use the provided context to answer questions
-- When citing sources inline, use the academic reference titles provided in [Source: ...] tags (e.g. "Bolton (1986)"). NEVER use raw .pdf filenames in your answer.
-- If the context doesn't have enough information, say so and provide general knowledge if helpful
-- Be concise but thorough
-- Use technical terminology appropriately
-- Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points
-- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
-- If you use a table: put a blank line before it, include a proper header row and separator row (e.g. |---|---|), and put NO math/LaTeX inside cells — write any math in the surrounding prose or spell values out plainly in the cells.
-- Write ALL inline math with consistent $...$ delimiters (e.g. $D_{50}$, $\\sigma'$). Never write bare subscripts like D_{50} or "D 50" outside of $...$.
-- Do NOT add a "Sources" or "References" section at the end of your response. The application automatically appends a formatted, clickable Google Scholar Sources list below your answer.
-
-CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
-    
     # Format conversation history if provided. The caller (chat.py) already
     # caps this list (last 20 turns, 6000-token budget), so include all of it
     # rather than re-truncating to the last few messages.
@@ -176,26 +152,67 @@ CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide dire
             role = msg.get('role', 'user').upper()
             content = msg.get('content', '')
             history_text += f"{role}: {content}\n"
-        # Debug: confirm prior turns actually reach the prompt (wire check).
-        print(f"[PROMPT] Including {len(history)} prior turns:{history_text}")
-    else:
-        print("[PROMPT] No CONVERSATION HISTORY in prompt (history empty)")
-    
-    # Format context section
-    context_section = ""
-    if context and context.strip():
+
+    # Format context section. GENERAL answers from the model's own knowledge with
+    # no documents, so there is no context block at all (and no misleading "no
+    # documents found" line). Every other mode keeps the original behavior.
+    if mode == GENERAL:
+        context_section = ""
+    elif context and context.strip():
         context_section = f"\n\nRELEVANT CONTEXT FROM DOCUMENTS:\n{context}\n"
     else:
         context_section = "\n\n[No relevant documents found in the knowledge base]\n"
-    
+
     # Build the complete prompt
-    full_prompt = f"""{system_prompt}
+    return f"""{resolved_prompt}
 {history_text}
 {context_section}
 
 USER QUESTION: {query}
 
 Please provide a detailed answer:"""
+
+
+async def generate_answer_with_groq(
+    query: str,
+    context: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    *,
+    mode: str = KB_QUERY,
+    system_prompt: Optional[str] = None,
+) -> str:
+    """
+    Generate an answer using the configured LLM with an optional RAG context and
+    conversation history.
+
+    Args:
+        query: The user's question
+        context: The relevant context from vector search (formatted string). May
+            be empty (GENERAL mode passes "").
+        history: Optional conversation history as list of {role, content} dicts
+        mode: Router mode selecting the system prompt (prompt_config). Defaults
+            to KB_QUERY, which reproduces the pre-router behavior exactly.
+        system_prompt: Optional explicit system prompt that overrides the
+            mode-keyed lookup (e.g. the THREAD_DOC confidence-fallback prompt).
+            When None, the prompt is chosen by ``mode``.
+
+    Returns:
+        The AI-generated answer as a string
+
+    Raises:
+        Exception: If LLM generation fails
+    """
+    # Initialize LLM
+    llm = get_llm()
+
+    # Debug: confirm prior turns actually reach the prompt (wire check).
+    if history and len(history) > 0:
+        print(f"[PROMPT] Including {len(history)} prior turns (mode={mode})")
+    else:
+        print(f"[PROMPT] No CONVERSATION HISTORY in prompt (history empty, mode={mode})")
+
+    # Build the complete prompt (system prompt selected by mode, or overridden)
+    full_prompt = _build_answer_prompt(query, context, history, mode=mode, system_prompt=system_prompt)
 
     # Generate response
     try:

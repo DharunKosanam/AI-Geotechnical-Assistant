@@ -60,6 +60,9 @@ type AttachedFile = {
   stage?: string; // backend ingest stage while processing (extracting/ocr/...)
   error?: string;
   settled?: boolean; // transient: after the success check, revert chip to the file icon
+  // Thread this file was uploaded into. Chips belong to one conversation, so
+  // switching threads clears them (the document itself stays with its thread).
+  threadId?: string;
 };
 
 type MessageProps = {
@@ -386,6 +389,16 @@ const Chat = ({
   const [messages, setMessages] = useState<MessageProps[]>([]);
   const [inputDisabled, setInputDisabled] = useState(false);
   const [threadId, setThreadId] = useState<string | null>("");
+  // Mirrors threadId for code that mints a thread and then immediately uses it
+  // in the SAME handler (attach -> upload), where the state closure is stale.
+  const threadIdRef = useRef<string | null>("");
+  // In-flight thread creation, so concurrent callers share one thread instead
+  // of racing to create two.
+  const threadCreationRef = useRef<Promise<string> | null>(null);
+  // A thread that exists server-side but has no message yet (e.g. created by an
+  // attach). Keeps the welcome screen up and drives one-time title generation.
+  const [isDraftThread, setIsDraftThread] = useState(false);
+  const awaitingFirstMessageRef = useRef(false);
   const [isGroupConversation, setIsGroupConversation] = useState(false);
   const threadListRef = useRef<any>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
@@ -408,6 +421,12 @@ const Chat = ({
       timers.clear();
     };
   }, []);
+
+  // Keep the ref in sync for the paths that set threadId directly
+  // (thread switch, New Chat). ensureThread sets both up front itself.
+  useEffect(() => {
+    threadIdRef.current = threadId;
+  }, [threadId]);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -712,8 +731,7 @@ const Chat = ({
 
   const sendMessage = async (text: string, targetThreadId: string | null = null) => {
     const actualThreadId = targetThreadId || threadId;
-    const isFirstMessage = isNewThread && messages.length === 0;
-    
+
     try {
       // Get API endpoint based on configuration (Python or Next.js)
       const endpoint = API_ENDPOINTS.sendMessage(actualThreadId);
@@ -798,14 +816,9 @@ const Chat = ({
       appendMessage("assistant", fullResponse);
       setInputDisabled(false);
 
-      // Generate title for first message in new thread
-      if (isFirstMessage) {
-        setIsNewThread(false);
-        generateAndUpdateTitle(text, actualThreadId).catch(error => {
-          console.error("Error generating title:", error);
-        });
-      }
-      
+      // Title generation is owned by handleSubmit (the only caller), which knows
+      // whether this is the thread's first turn. Doing it here too fired the
+      // title LLM twice for a thread started from "New Chat".
     } catch (error) {
       console.error("Error sending message:", error);
       appendMessage("assistant", `\n\n[Error: ${error.message || "Failed to send message"}]`);
@@ -876,6 +889,70 @@ const Chat = ({
     }
   };
 
+  // Threads are created lazily — nothing exists server-side until the user
+  // commits something to the conversation. Both the composer's first Send AND
+  // the attach button need a real thread id (an upload without one is stored as
+  // a plain user_upload and is invisible to thread-scoped retrieval), so the
+  // minting lives here: returns the current thread when there is one, otherwise
+  // creates it (id + sidebar history row) and marks it as awaiting its first
+  // message. threadCreationRef collapses concurrent callers onto one creation.
+  const ensureThread = async (): Promise<string> => {
+    if (threadIdRef.current) return threadIdRef.current;
+    if (threadCreationRef.current) return threadCreationRef.current;
+
+    const creation = (async () => {
+      const res = await fetch(API_ENDPOINTS.createThread(), {
+        credentials: "include",
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to create thread (status ${res.status})`);
+      }
+      const data = await res.json();
+      const newThreadId = data.threadId;
+      if (!newThreadId) {
+        throw new Error("Server did not return a thread id");
+      }
+
+      // Publish the id synchronously so the rest of THIS handler (e.g. the
+      // upload that triggered the creation) sees it without a re-render.
+      threadIdRef.current = newThreadId;
+      setThreadId(newThreadId);
+      setIsNewThread(true);
+      awaitingFirstMessageRef.current = true;
+      // Attach-before-typing must not swap the welcome screen for an empty
+      // message pane; the thread only "starts" once a message is sent.
+      setIsDraftThread(true);
+
+      // Sidebar row. Registering it here (rather than at first message) keeps an
+      // attach-first thread visible and deletable — deleting a thread cascades
+      // to its thread_upload documents, so an abandoned upload is never orphaned.
+      await fetch(API_ENDPOINTS.createThreadHistory(), {
+        credentials: "include",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          threadId: newThreadId,
+          name: getDefaultThreadName(),
+          isGroup: false,
+        }),
+      });
+
+      if (threadListRef.current) {
+        await threadListRef.current.fetchThreads();
+      }
+
+      return newThreadId;
+    })();
+
+    threadCreationRef.current = creation;
+    try {
+      return await creation;
+    } finally {
+      threadCreationRef.current = null;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!userInput.trim() || inputDisabled || isUploading) return;
@@ -884,126 +961,41 @@ const Chat = ({
     setUserInput("");
     setInputDisabled(true);
 
-    // If no thread exists, create one first
-    if (!threadId) {
-      try {
-        // 1. Create new thread
-        const createEndpoint = API_ENDPOINTS.createThread();
-        const res = await fetch(createEndpoint, {
-          credentials: "include",
-          method: "POST",
-        });
-        const data = await res.json();
-        const newThreadId = data.threadId;
-        
-        // 2. Set thread ID
-        setThreadId(newThreadId);
-        setIsNewThread(true);
-        
-        // 3. Save to history with default name
-        const defaultName = getDefaultThreadName();
-        const historyEndpoint = API_ENDPOINTS.createThreadHistory();
-        await fetch(historyEndpoint, {
-          credentials: "include",
-          method: "POST",
-          body: JSON.stringify({ 
-            threadId: newThreadId,
-            name: defaultName,
-            isGroup: false
-          }),
-          headers: {
-            'Content-Type': 'application/json',
-          }
-        });
-        
-        // 4. Refresh thread list
-        if (threadListRef.current) {
-          await threadListRef.current.fetchThreads();
-        }
-        
-        // 5. Now send the message with the new threadId
-        const firstMessageText = messageText;
-        
-        shouldForceScrollRef.current = true;
-        setMessages((prevMessages) => {
-          const newMessages: MessageProps[] = [
-            ...prevMessages,
-            { role: "user" as const, text: messageText }
-          ];
-          lastMessageCountRef.current = newMessages.length;
-          return newMessages;
-        });
-        
-        // Send message immediately with new thread ID
-        await sendMessage(messageText, newThreadId);
-        
-        // 6. Generate title for the new thread
-        try {
-          console.log("Generating title for new thread:", newThreadId);
-          const titleEndpoint = API_ENDPOINTS.generateTitle(newThreadId);
-          const titleResponse = await fetch(titleEndpoint, {
-            credentials: "include",
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              message: firstMessageText,
-            }),
-          });
+    // No-op when the thread already exists — whether the user typed into an
+    // open conversation or an attach already minted the thread.
+    let activeThreadId: string;
+    try {
+      activeThreadId = await ensureThread();
+    } catch (error) {
+      console.error("Failed to create thread:", error);
+      setUserInput(messageText); // give the text back rather than losing it
+      setInputDisabled(false);
+      return;
+    }
 
-          if (titleResponse.ok) {
-            const titleData = await titleResponse.json();
-            const generatedTitle = titleData.title;
-            console.log("Generated title:", generatedTitle);
+    // First turn of this thread, whether it was minted just now or earlier by an
+    // attach. Drives title generation exactly once.
+    const isFirstTurn = awaitingFirstMessageRef.current;
+    awaitingFirstMessageRef.current = false;
+    setIsDraftThread(false);
 
-            // Update thread name in history
-            const updateEndpoint = API_ENDPOINTS.updateThread();
-            await fetch(updateEndpoint, {
-              credentials: "include",
-              method: "PUT",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                threadId: newThreadId,
-                newName: generatedTitle,
-              }),
-            });
+    shouldForceScrollRef.current = true;
+    setMessages((prevMessages) => {
+      const newMessages: MessageProps[] = [
+        ...prevMessages,
+        { role: "user" as const, text: messageText },
+      ];
+      lastMessageCountRef.current = newMessages.length;
+      return newMessages;
+    });
 
-            // Refresh thread list to show updated title
-            if (threadListRef.current) {
-              await threadListRef.current.fetchThreads();
-            }
-            
-            console.log("✅ Thread title updated successfully");
-          } else {
-            console.error("Failed to generate title, status:", titleResponse.status);
-          }
-        } catch (titleError) {
-          console.error("Error generating title:", titleError);
-          // Don't fail the whole operation if title generation fails
-        }
-        
-        setIsNewThread(false); // Mark thread as no longer new
-        
-      } catch (error) {
-        console.error('Failed to create thread:', error);
-        setInputDisabled(false);
-        return;
-      }
-    } else {
-      shouldForceScrollRef.current = true;
-      setMessages((prevMessages) => {
-        const newMessages: MessageProps[] = [
-          ...prevMessages,
-          { role: "user" as const, text: messageText },
-        ];
-        lastMessageCountRef.current = newMessages.length;
-        return newMessages;
-      });
+    await sendMessage(messageText, activeThreadId);
 
-      sendMessage(messageText);
+    if (isFirstTurn) {
+      // Best-effort: generateAndUpdateTitle swallows its own errors and
+      // refreshes the sidebar itself.
+      await generateAndUpdateTitle(messageText, activeThreadId);
+      setIsNewThread(false);
     }
   };
 
@@ -1326,11 +1318,16 @@ const Chat = ({
   }, [threadId, isNewThread, inputDisabled]); // Added inputDisabled dependency
   const createNewThread = () => {
     // Simply reset to welcome state
-    // Thread will be created when user sends first message
+    // Thread will be created when the user sends the first message OR attaches
+    // the first file, whichever comes first.
     setThreadId(null);
-    setMessages([]); 
+    threadIdRef.current = null;
+    setMessages([]);
     setIsGroupConversation(false);
     setIsNewThread(true);
+    setIsDraftThread(false);
+    awaitingFirstMessageRef.current = false;
+    clearAttachedFiles();
     setUserInput("");
     lastMessageCountRef.current = 0;
   };
@@ -1342,9 +1339,15 @@ const Chat = ({
       pollingIntervalRef.current = null;
     }
     
+    // Attachments are per-conversation; never carry chips across a switch.
+    clearAttachedFiles();
+    setIsDraftThread(false);
+    awaitingFirstMessageRef.current = false;
+
     if (selectedThreadId === null) {
       // Show welcome screen - clear the current thread
       setThreadId("");
+      threadIdRef.current = "";
       setMessages([]);
       setIsGroupConversation(false);
       setIsNewThread(false);
@@ -1365,7 +1368,8 @@ const Chat = ({
       
       // 2. Set thread ID
       setThreadId(selectedThreadId);
-      
+      threadIdRef.current = selectedThreadId;
+
       // 3. Load messages directly (passing selectedThreadId to avoid stale state)
       loadThread(selectedThreadId, true);
     }
@@ -1404,7 +1408,7 @@ const Chat = ({
   // Poll GET /api/upload/status until the backend reports the file is fully
   // ingested (embeddings written) or errored. Each file polls independently so
   // removing its chip via X cancels just that cycle.
-  const startPolling = (id: string, filename: string) => {
+  const startPolling = (id: string, filename: string, forThreadId: string) => {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
 
     const poll = async () => {
@@ -1416,7 +1420,12 @@ const Chat = ({
       }
 
       try {
-        const resp = await fetch(API_ENDPOINTS.uploadStatus(filename), { credentials: "include" });
+        // Scoped to the thread: the same filename can be attached to more than
+        // one conversation, and an unscoped lookup would report the other
+        // upload's status.
+        const resp = await fetch(API_ENDPOINTS.uploadStatus(filename, forThreadId), {
+          credentials: "include",
+        });
         if (!resp.ok) return; // transient server hiccup — keep polling until timeout
         const data = await resp.json();
 
@@ -1443,12 +1452,18 @@ const Chat = ({
     pollTimersRef.current.set(id, timer);
   };
 
-  // Uploads one file and reflects the outcome on its chip.
-  // The /api/upload call itself is unchanged — only the chip status is new.
-  const uploadAttachedFile = async (id: string, file: File) => {
+  // Uploads one file INTO a thread and reflects the outcome on its chip.
+  //
+  // threadId is what makes the file a thread document: with it the backend
+  // stores the upload as category "thread_upload" tagged with this thread, which
+  // is what thread_has_documents() looks for and what lets the router pick
+  // THREAD_DOC. Without it the file lands as a generic user_upload and the
+  // assistant can never see it as "the file you just attached", so we never
+  // upload without one.
+  const uploadAttachedFile = async (id: string, file: File, forThreadId: string) => {
     const data = new FormData();
     data.append("file", file); // "file" (singular) for /upload endpoint
-    data.append("category", "user_upload"); // tag as user upload (not knowledge base)
+    data.append("threadId", forThreadId);
 
     try {
       const resp = await fetch(API_ENDPOINTS.uploadFile(), {
@@ -1482,7 +1497,7 @@ const Chat = ({
       // background task, so the chip stays "uploading" and we poll the status
       // endpoint until embeddings actually land.
       updateAttachedFile(id, { stage: result.stage || "processing" });
-      startPolling(id, file.name);
+      startPolling(id, file.name, forThreadId);
     } catch (error: any) {
       console.error(`Error uploading ${file.name}:`, error);
       updateAttachedFile(id, {
@@ -1493,9 +1508,10 @@ const Chat = ({
   };
 
   // Triggered by the hidden file <input> behind the "+" button.
-  // Pre-flight validation is unchanged; valid files render immediately as
-  // "uploading" chips, then each upload resolves its own chip independently.
-  const handleFileAttach = (event: React.ChangeEvent<HTMLInputElement>) => {
+  // Valid files render immediately as "uploading" chips; the thread is created
+  // first (attaching may be the user's very first action in a new chat, before
+  // any message exists), then each upload resolves its own chip independently.
+  const handleFileAttach = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = event.target.files;
     if (!selectedFiles || selectedFiles.length === 0) return;
 
@@ -1537,8 +1553,27 @@ const Chat = ({
       })),
     ]);
 
+    // A file is always uploaded INTO a thread, so mint one if this attach came
+    // before the first message. Cheap and idempotent when a thread is open.
+    let forThreadId: string;
+    try {
+      forThreadId = await ensureThread();
+    } catch (error) {
+      console.error("Failed to create a thread for the attachment:", error);
+      entries.forEach(({ id }) =>
+        updateAttachedFile(id, {
+          status: "error",
+          error: "Couldn't start a conversation for this file. Please try again.",
+        })
+      );
+      return;
+    }
+
     // Fire uploads concurrently; each resolves its own chip by id.
-    entries.forEach(({ id, file }) => uploadAttachedFile(id, file));
+    entries.forEach(({ id, file }) => {
+      updateAttachedFile(id, { threadId: forThreadId });
+      uploadAttachedFile(id, file, forThreadId);
+    });
   };
 
   // Removes an attachment chip from the input (UI only). Cancels its status
@@ -1546,6 +1581,15 @@ const Chat = ({
   const removeAttachedFile = (id: string) => {
     stopPolling(id);
     setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  };
+
+  // Drops every chip and its poll. Chips belong to one conversation, so leaving
+  // thread A's attachments visible in thread B would misrepresent what the
+  // assistant can actually see (the documents stay with their own thread).
+  const clearAttachedFiles = () => {
+    pollTimersRef.current.forEach((t) => clearInterval(t));
+    pollTimersRef.current.clear();
+    setAttachedFiles([]);
   };
 
   const deduplicatedMessages = useMemo(() => {
@@ -1599,7 +1643,9 @@ const Chat = ({
       </div>
     <div className={styles.chatContainer}>
       <div className={styles.messages} ref={messagesContainerRef}>
-        {!threadId ? (
+        {/* isDraftThread: a thread minted by an attach but with no message yet —
+            the conversation hasn't started, so keep the welcome screen. */}
+        {!threadId || isDraftThread ? (
           <WelcomeMessage
             onPromptSelect={handleStarterSelect}
             onAttachClick={() => fileInputRef.current?.click()}
@@ -1693,6 +1739,11 @@ const Chat = ({
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+          {isUploading && (
+            <div className={styles.attachmentNotice}>
+              Reading your file — you can ask about it as soon as it&apos;s ready.
             </div>
           )}
           <div className={styles.inputRow}>

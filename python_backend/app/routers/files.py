@@ -282,6 +282,7 @@ async def upload_document(
 @router.get("/upload/status")
 async def upload_status(
     filename: str,
+    threadId: Optional[str] = None,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -296,17 +297,24 @@ async def upload_status(
     the ingest pipeline.
 
     Scoped to the authenticated user so one user cannot poll another user's
-    upload status.
+    upload status. ``threadId``, when given, narrows it further to that thread's
+    upload: the same filename can be attached to several conversations, and the
+    chip must reflect ITS file's progress, not a namesake in another thread.
     """
     try:
         # Latest parent (file-level) doc for this filename. Chunks are excluded
         # via chunkIndex, matching the listing endpoints.
+        query = {
+            "userId": current_user.id,
+            "filename": filename,
+            "chunkIndex": {"$exists": False},
+        }
+        if threadId:
+            query["threadId"] = threadId
+            query["category"] = "thread_upload"
+
         doc = await files_collection.find_one(
-            {
-                "userId": current_user.id,
-                "filename": filename,
-                "chunkIndex": {"$exists": False},
-            },
+            query,
             {"status": 1, "error": 1},
             sort=[("createdAt", -1)],
         )

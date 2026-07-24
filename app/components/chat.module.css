@@ -181,6 +181,14 @@
   background: #3a1f1f;
 }
 
+/* Shown under the chips while an attachment is still being ingested, so the
+   disabled Send button has a visible reason. */
+.attachmentNotice {
+  padding: 0 10px 8px 10px;
+  font-size: 12px;
+  color: #8e8ea0;
+}
+
 .messages {
   flex-grow: 1;
   min-height: 0;

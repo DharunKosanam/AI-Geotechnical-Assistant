@@ -116,10 +116,12 @@ export const API_ENDPOINTS = {
   },
 
   // File processing status — polled after upload while the backend ingests
-  // (extraction/OCR/chunking/embedding) in a background task.
-  uploadStatus: (filename: string, userId?: string) => {
+  // (extraction/OCR/chunking/embedding) in a background task. threadId scopes
+  // the lookup to the conversation the file was attached to, so the same
+  // filename in another thread can't answer for this one.
+  uploadStatus: (filename: string, threadId?: string) => {
     const params = new URLSearchParams({ filename });
-    if (userId) params.set("user_id", userId);
+    if (threadId) params.set("threadId", threadId);
     const qs = params.toString();
     if (BACKEND_TYPE === 'python') {
       return `${PYTHON_BACKEND_URL}/api/upload/status?${qs}`;

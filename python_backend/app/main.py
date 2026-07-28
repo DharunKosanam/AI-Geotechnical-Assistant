@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from app.core.config import CORS_ORIGINS
 from app.core.database import close_mongo_connection, ensure_indexes
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
-from app.routers import chat, threads, files, auth, health
+from app.routers import chat, threads, files, auth, health, kb
 from app.workspace.routes import router as workspace_router
 
 # Initialize FastAPI
@@ -44,6 +44,9 @@ app.include_router(threads.router)
 app.include_router(files.router)
 app.include_router(auth.router)
 app.include_router(health.router)
+# Student KB upload (Phase 4). Self-gates via KB_UPLOAD_ENABLED -> 404 when off,
+# so registering it is byte-identical to absence for the disabled deployment.
+app.include_router(kb.router)
 # Engineering Workspace (GeoPilot). Additive and self-gating via
 # WORKSPACE_ENABLED -- including the router does not affect chat/RAG.
 app.include_router(workspace_router)

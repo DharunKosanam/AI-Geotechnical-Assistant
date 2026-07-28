@@ -142,6 +142,14 @@ export const API_ENDPOINTS = {
     }
     return `/api/files`;
   },
+
+  // --- Student knowledge-base upload (Phase 4/5). Same-origin; proxied to
+  // FastAPI by next.config rewrites(). ---
+  kbStatus: () => `${PYTHON_BACKEND_URL}/api/kb/status`,
+  kbUpload: () => `${PYTHON_BACKEND_URL}/api/kb/upload`,
+  kbBulkUpload: () => `${PYTHON_BACKEND_URL}/api/kb/bulk-upload`,
+  kbBatchStatus: (batchId: string) => `${PYTHON_BACKEND_URL}/api/kb/batch/${batchId}`,
+  kbMyUploads: () => `${PYTHON_BACKEND_URL}/api/kb/my-uploads`,
 };
 
 /**

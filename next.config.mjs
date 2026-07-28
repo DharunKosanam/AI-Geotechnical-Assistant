@@ -27,6 +27,9 @@ const nextConfig = {
         // Route Handler (long-timeout upload) wins; everything else (e.g.
         // GET /api/workspace/status) proxies straight to FastAPI.
         { source: '/api/workspace/:path*', destination: `${PYTHON_API_URL}/api/workspace/:path*` },
+        // /api/kb/* is handled by the dedicated long-timeout Route Handler
+        // (app/api/kb/[...path]/route.ts), NOT this rewrite — the preflight + bulk
+        // submission exceed the rewrite's short socket timeout.
       ],
       fallback: [],
     };

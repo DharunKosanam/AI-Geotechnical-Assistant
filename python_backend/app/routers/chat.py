@@ -355,6 +355,12 @@ async def chat_with_rag(
                         "url": info["url"],
                         "filename": chunk.get("filename"),
                         "fileType": file_type,
+                        # Phase 7: provenance surfaced with the citation. Present on
+                        # KB chunks (uploads + legacy backfill); None for user_upload.
+                        "canonicalTitle": chunk.get("canonicalTitle"),
+                        "uploader": chunk.get("uploaderName"),
+                        "project": chunk.get("projectTag"),
+                        "version": chunk.get("version"),
                     })
                 print(f"   Sources: {', '.join(s['title'] for s in sources)}")
             else:

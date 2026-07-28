@@ -135,6 +135,10 @@ REDIS_URL = os.getenv(
 RATE_LIMIT_LOGIN = os.getenv("RATE_LIMIT_LOGIN", "5/minute")
 RATE_LIMIT_CHAT = os.getenv("RATE_LIMIT_CHAT", "20/minute")
 RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "10/minute")
+# Per-user HOURLY upload cap (Phase 0.5), stacked on top of the per-minute limit
+# so a single user cannot queue a large backlog over an hour. Applies to
+# /api/upload (thread + user uploads) and the KB upload endpoint.
+RATE_LIMIT_UPLOAD_HOURLY = os.getenv("RATE_LIMIT_UPLOAD_HOURLY", "60/hour")
 
 # Application Constants
 USER_ID = "default-user"  # Hardcoded user ID to match Next.js implementation
@@ -254,6 +258,74 @@ OCR_MIN_TEXT_LEN = int(os.getenv("OCR_MIN_TEXT_LEN", "50"))
 # Embedded PDF images smaller than this (width OR height) are skipped when
 # OCRing figures/diagrams — tiny images are usually icons/decorations.
 PDF_IMAGE_OCR_MIN_DIM = int(os.getenv("PDF_IMAGE_OCR_MIN_DIM", "200"))
+
+# ---------------------------------------------------------------------------
+# Ingestion concurrency (Phase 0 — off the event loop)
+# ---------------------------------------------------------------------------
+# Document ingestion (extract -> chunk -> embed) is CPU-bound. It used to run on
+# the single uvicorn event loop, so a large PDF blocked EVERY concurrent request
+# for the duration (a 220-page file froze the server ~42s and its own upload POST
+# didn't return for ~42s). The compute now runs in a dedicated, bounded thread
+# pool so the loop stays responsive; motor DB writes stay on the loop. The heavy
+# steps release the GIL (fastembed/ONNX, the tesseract subprocess, PyMuPDF), so
+# workers run in parallel with the loop. Keep the pool SMALL: each worker holds a
+# batch of embeddings in RAM and competes for CPU with query-time embedding.
+INGEST_WORKERS = int(os.getenv("INGEST_WORKERS", "2"))
+
+# Independent rollback switch for the offload above (NOT the KB-upload feature
+# flag). Default ON -- the point is to fix a live stall. Set false to restore the
+# exact pre-Phase-0 behaviour (compute inline on the loop) via env, no redeploy.
+# Read at call time so tests can toggle it.
+INGEST_OFFLOAD_ENABLED = os.getenv("INGEST_OFFLOAD_ENABLED", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Max ingests queued or running at once in this process (Phase 0.5 queue-depth
+# cap). Each pending upload holds its file bytes in RAM until processed, so an
+# unbounded backlog under a burst is a memory/CPU exhaustion risk. Uploads beyond
+# this are rejected with 503 (retry shortly). Applies to every upload path.
+INGEST_MAX_QUEUE = int(os.getenv("INGEST_MAX_QUEUE", "10"))
+
+# ---------------------------------------------------------------------------
+# KB upload feature flag + validation thresholds (Phase 3)
+# ---------------------------------------------------------------------------
+# Master switch for the student KB-upload feature (endpoint + UI). Default OFF so
+# the deployment is byte-identical until deliberately enabled. Read at call time.
+KB_UPLOAD_ENABLED = os.getenv("KB_UPLOAD_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Validation thresholds, CALIBRATED 2026-07-24 against the 16,811-chunk KB via
+# scripts/kb_calibrate_validation.py (owner-approved). All env-tunable.
+#   Extraction quality gate — reject probable scans / empty extractions. KB good
+#   docs ran 758..13550 chars/page (one degenerate at 47); off/scan ~0.
+KB_MIN_CHARS_PER_PAGE = int(os.getenv("KB_MIN_CHARS_PER_PAGE", "150"))
+KB_MIN_CONTENT_CHARS = int(os.getenv("KB_MIN_CONTENT_CHARS", "200"))
+#   Hard caps.
+KB_MAX_PAGES = int(os.getenv("KB_MAX_PAGES", "1500"))
+KB_MAX_UPLOAD_BYTES = int(os.getenv("KB_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+#   Duplicate detection — first-chunk cosine >= this WARNS (soft; the student is
+#   shown the match and may proceed). Distinct KB docs topped out at p99.9=0.897;
+#   true near-dups score >=0.997.
+KB_DUP_WARN_COSINE = float(os.getenv("KB_DUP_WARN_COSINE", "0.95"))
+#   Relevance — first-chunk cosine to the KB centroid BELOW this flags an outlier
+#   (flag + confirm, never block). KB docs >= 0.678; off-topic samples <= 0.515.
+KB_RELEVANCE_MIN_COSINE = float(os.getenv("KB_RELEVANCE_MIN_COSINE", "0.62"))
+# Window during which a student may delete their OWN KB upload (Phase 5). After
+# this, removal is admin-only (Phase 6).
+KB_SELF_DELETE_WINDOW_HOURS = int(os.getenv("KB_SELF_DELETE_WINDOW_HOURS", "24"))
+
+# Bulk (multi-file) KB upload. Max files per submitted batch, and the pause
+# between files in the sequential background worker so one student's batch can't
+# monopolise the ingest pool / starve chat + Ollama.
+KB_BULK_MAX_FILES = int(os.getenv("KB_BULK_MAX_FILES", "50"))
+KB_BULK_PACING_SECONDS = float(os.getenv("KB_BULK_PACING_SECONDS", "0.5"))
 
 # CORS Origins. NOTE: no "*" wildcard here. The frontend sends credentials (the
 # httpOnly access_token cookie), and the CORS spec forbids pairing

@@ -21,6 +21,8 @@ RETRIEVAL:
 """
 import re
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import quote
 import gc
@@ -30,6 +32,7 @@ import fitz  # PyMuPDF
 from fastembed import TextEmbedding
 
 from app.core.database import files_collection
+from app.core import config  # module import for call-time flags (INGEST_OFFLOAD_ENABLED)
 from app.core.config import (
     USER_ID,
     CHUNKING_VERSION,
@@ -89,16 +92,22 @@ def get_clean_title(filename: str) -> Dict[str, str]:
 # Lazy-loaded models (embedding + reranker)
 # ---------------------------------------------------------------------------
 _embedding_model = None
+_embedding_model_lock = threading.Lock()
 _reranker_model = None
 
 
 def get_embedding_model():
-    """Get or initialize the embedding model (lazy loading)."""
+    """Get or initialize the embedding model (lazy loading, thread-safe)."""
     global _embedding_model
     if _embedding_model is None:
-        print("[LOADING] Initializing embedding model (BAAI/bge-small-en-v1.5)...")
-        _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        print("[OK] Embedding model loaded successfully")
+        # Ingestion now runs in a worker-thread pool, so several threads (plus the
+        # loop's query path) can reach this on a cold start. Double-checked lock
+        # -> the model loads exactly once.
+        with _embedding_model_lock:
+            if _embedding_model is None:
+                print("[LOADING] Initializing embedding model (BAAI/bge-small-en-v1.5)...")
+                _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                print("[OK] Embedding model loaded successfully")
     return _embedding_model
 
 
@@ -589,6 +598,10 @@ async def _search_combined(
                 "chunkingVersion": 1,
                 "pageStart": 1,
                 "sectionHeader": 1,
+                "canonicalTitle": 1,
+                "uploaderName": 1,
+                "projectTag": 1,
+                "version": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
         },
@@ -605,6 +618,10 @@ async def _search_combined(
             "chunkingVersion": doc.get("chunkingVersion"),   # may be None for old v1 chunks
             "pageStart": doc.get("pageStart"),
             "sectionHeader": doc.get("sectionHeader"),
+            "canonicalTitle": doc.get("canonicalTitle"),
+            "uploaderName": doc.get("uploaderName"),
+            "projectTag": doc.get("projectTag"),
+            "version": doc.get("version"),
             "score": doc.get("score", 0.0),
         })
 
@@ -673,6 +690,10 @@ async def _search_fulltext(
                 "chunkingVersion": 1,
                 "pageStart": 1,
                 "sectionHeader": 1,
+                "canonicalTitle": 1,
+                "uploaderName": 1,
+                "projectTag": 1,
+                "version": 1,
                 "score": {"$meta": "searchScore"},
             }
         },
@@ -689,6 +710,10 @@ async def _search_fulltext(
             "chunkingVersion": doc.get("chunkingVersion"),
             "pageStart": doc.get("pageStart"),
             "sectionHeader": doc.get("sectionHeader"),
+            "canonicalTitle": doc.get("canonicalTitle"),
+            "uploaderName": doc.get("uploaderName"),
+            "projectTag": doc.get("projectTag"),
+            "version": doc.get("version"),
             "score": doc.get("score", 0.0),
         })
 
@@ -1077,55 +1102,91 @@ async def delete_document(filename: str) -> Dict[str, Any]:
         raise ValueError(f"Failed to delete document: {str(e)}")
 
 
-async def ingest_document(
+# ---------------------------------------------------------------------------
+# Ingestion thread pool (Phase 0 — CPU work off the event loop)
+# ---------------------------------------------------------------------------
+_ingest_pool: Optional[ThreadPoolExecutor] = None
+_ingest_pool_lock = threading.Lock()
+
+
+def _get_ingest_pool() -> ThreadPoolExecutor:
+    """Lazily create the dedicated, bounded pool that runs CPU-bound ingestion
+    off the event loop. Kept separate from Starlette's default threadpool so a
+    burst of large uploads can't starve sync route work. Sized by INGEST_WORKERS.
+    """
+    global _ingest_pool
+    if _ingest_pool is None:
+        with _ingest_pool_lock:
+            if _ingest_pool is None:
+                _ingest_pool = ThreadPoolExecutor(
+                    max_workers=max(1, config.INGEST_WORKERS),
+                    thread_name_prefix="ingest",
+                )
+    return _ingest_pool
+
+
+# In-process backlog counter for the queue-depth cap (Phase 0.5). Reserved when
+# an upload is admitted, released when its ingest finishes. One uvicorn worker
+# today, but the lock keeps it correct if the pool ever grows.
+_ingest_inflight = 0
+_ingest_inflight_lock = threading.Lock()
+
+
+def ingest_queue_depth() -> int:
+    """Number of ingests currently queued or running in this process."""
+    return _ingest_inflight
+
+
+def ingest_try_acquire() -> bool:
+    """Reserve one ingest slot. Returns False when the backlog is already at
+    INGEST_MAX_QUEUE, so the caller can reject the upload instead of piling on."""
+    global _ingest_inflight
+    with _ingest_inflight_lock:
+        if _ingest_inflight >= config.INGEST_MAX_QUEUE:
+            return False
+        _ingest_inflight += 1
+        return True
+
+
+def ingest_release() -> None:
+    """Release a slot reserved by ingest_try_acquire (floors at 0)."""
+    global _ingest_inflight
+    with _ingest_inflight_lock:
+        _ingest_inflight = max(0, _ingest_inflight - 1)
+
+
+def _ingest_compute(
     filename: str,
     file_content: bytes,
-    category: str = "user_upload",
-    user_id: Optional[str] = None,
-    thread_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    category: str,
+    owner_id: str,
+    thread_id: Optional[str],
+    file_type: str,
+    pre_extracted_pages: Optional[List[Tuple[int, str, bool]]] = None,
+    provenance: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    """CPU-bound half of ingest: extract -> chunk -> embed -> build doc dicts.
+
+    Pure compute with no event-loop or motor access, so it runs safely in a
+    worker thread. The heavy calls here (PyMuPDF, the tesseract OCR subprocess,
+    fastembed/ONNX embedding) release the GIL, so the event loop stays responsive
+    while this runs. Returns (documents, chunks_created, total_chars); the async
+    Mongo insert stays with the caller on the loop.
+
+    ``pre_extracted_pages`` (KB path) supplies already-extracted (page, text, ocr)
+    triples from the kb_formats registry, skipping step 1. ``provenance`` (KB
+    path) is merged onto every chunk doc so each chunk carries its uploader /
+    project / batch / canonicalTitle / contentHash.
     """
-    Multi-format ingest: extract pages, v2 chunk, embed, store.
-
-    Supported types are defined in file_processing.SUPPORTED_EXTENSIONS.
-    Chunks carry chunkingVersion, pageStart, sectionHeader, fileType, and
-    (for OCR-derived pages) metadata.ocrExtracted = True.
-
-    user_upload chunks are tagged with ``user_id`` (the uploading user's id) so
-    retrieval can scope them per-user. KB ingestion via the kb_admin CLI passes
-    no user_id and falls back to the legacy shared-KB owner id (config.USER_ID),
-    so that admin tooling -- which locates KB chunks by that id -- keeps working
-    unchanged. No HTTP route relies on this fallback; routes always pass an
-    explicit user_id.
-
-    ``thread_id`` scopes an upload to a single conversation thread: when set, each
-    chunk additionally carries ``threadId`` (and ``metadata.threadId``) so
-    thread-scoped retrieval (query_thread_documents) can filter to exactly this
-    thread. The caller passes ``category="thread_upload"`` for these so they are a
-    distinct scope -- never mixed into the shared knowledge_base or the per-user
-    ``user_upload`` corpus, and therefore never surfaced by the KB search.
-    """
-    owner_id = user_id if user_id is not None else USER_ID
-    # Lazy import to avoid a circular dependency at module load
-    from app.services.file_processing import (
-        extract_pages_from_file,
-        get_file_type,
-        is_supported_file,
-        SUPPORTED_EXTENSIONS,
-    )
-
-    file_type = get_file_type(filename)
-    if not is_supported_file(filename):
-        raise ValueError(
-            f"Unsupported file type: {file_type}. "
-            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
-        )
-
-    print(f"[FILE] Ingesting document: {filename} (type: {file_type})")
-
-    # 1. Unified page-aware extraction (returns triples with OCR flag)
-    print(f"  1. Extracting text ({file_type})...")
-    page_triples = extract_pages_from_file(file_content, filename)
+    # 1. Extraction — use the caller's pages (KB) or extract here (live path).
+    if pre_extracted_pages is not None:
+        page_triples = pre_extracted_pages
+        print(f"  1. Using {len(page_triples)} pre-extracted page(s) ({file_type})...")
+    else:
+        # Lazy import to avoid a circular dependency at module load
+        from app.services.file_processing import extract_pages_from_file
+        print(f"  1. Extracting text ({file_type})...")
+        page_triples = extract_pages_from_file(file_content, filename)
     pages = [(p, t) for p, t, _ in page_triples]
     ocr_by_page = {p: ocr for p, _, ocr in page_triples}
     total_chars = sum(len(t) for _, t in pages)
@@ -1190,11 +1251,97 @@ async def ingest_document(
         if thread_id is not None:
             doc["threadId"] = thread_id
             doc["metadata"]["threadId"] = thread_id
+        # KB provenance (uploader/project/batch/canonicalTitle/contentHash/...)
+        # stamped identically on every chunk so any single chunk is traceable.
+        if provenance:
+            doc.update(provenance)
         documents.append(doc)
 
     print(f"      Prepared {len(documents)} documents")
 
-    # 5. Insert
+    chunks_created = len(chunk_records)
+    # Free the large intermediates; the caller only needs `documents`.
+    del pages, chunk_records, texts, embeddings_list, embeddings
+    return documents, chunks_created, total_chars
+
+
+async def ingest_document(
+    filename: str,
+    file_content: bytes,
+    category: str = "user_upload",
+    user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    pre_extracted_pages: Optional[List[Tuple[int, str, bool]]] = None,
+    provenance: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Multi-format ingest: extract pages, v2 chunk, embed, store.
+
+    Supported types are defined in file_processing.SUPPORTED_EXTENSIONS.
+    Chunks carry chunkingVersion, pageStart, sectionHeader, fileType, and
+    (for OCR-derived pages) metadata.ocrExtracted = True.
+
+    user_upload chunks are tagged with ``user_id`` (the uploading user's id) so
+    retrieval can scope them per-user. KB ingestion via the kb_admin CLI passes
+    no user_id and falls back to the legacy shared-KB owner id (config.USER_ID),
+    so that admin tooling -- which locates KB chunks by that id -- keeps working
+    unchanged. No HTTP route relies on this fallback; routes always pass an
+    explicit user_id.
+
+    ``thread_id`` scopes an upload to a single conversation thread: when set, each
+    chunk additionally carries ``threadId`` (and ``metadata.threadId``) so
+    thread-scoped retrieval (query_thread_documents) can filter to exactly this
+    thread. The caller passes ``category="thread_upload"`` for these so they are a
+    distinct scope -- never mixed into the shared knowledge_base or the per-user
+    ``user_upload`` corpus, and therefore never surfaced by the KB search.
+
+    Steps 1-4 (extract -> chunk -> embed -> build docs) are CPU-bound and run in
+    a dedicated worker-thread pool so the single uvicorn event loop stays
+    responsive during a large ingest; the motor insert (step 5) stays on the
+    loop. Set INGEST_OFFLOAD_ENABLED=false to run inline (pre-Phase-0 behaviour).
+    """
+    owner_id = user_id if user_id is not None else USER_ID
+    # Lazy import to avoid a circular dependency at module load
+    from app.services.file_processing import (
+        get_file_type,
+        is_supported_file,
+        SUPPORTED_EXTENSIONS,
+    )
+
+    file_type = get_file_type(filename)
+    # The KB path pre-extracts via the kb_formats registry (which validates the
+    # format itself and supports .txt/.md that file_processing does not), so the
+    # supported-type check only applies when we extract here.
+    if pre_extracted_pages is None and not is_supported_file(filename):
+        raise ValueError(
+            f"Unsupported file type: {file_type}. "
+            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
+        )
+
+    print(f"[FILE] Ingesting document: {filename} (type: {file_type})")
+
+    # CPU-bound steps 1-4 off the loop (or inline when the flag is off).
+    if config.INGEST_OFFLOAD_ENABLED:
+        loop = asyncio.get_running_loop()
+        documents, chunks_created, total_chars = await loop.run_in_executor(
+            _get_ingest_pool(),
+            _ingest_compute,
+            filename,
+            file_content,
+            category,
+            owner_id,
+            thread_id,
+            file_type,
+            pre_extracted_pages,
+            provenance,
+        )
+    else:
+        documents, chunks_created, total_chars = _ingest_compute(
+            filename, file_content, category, owner_id, thread_id, file_type,
+            pre_extracted_pages, provenance,
+        )
+
+    # 5. Insert (motor — on the event loop)
     print("  5. Inserting into MongoDB...")
     result = await files_collection.insert_many(documents)
     inserted_count = len(result.inserted_ids)
@@ -1202,9 +1349,8 @@ async def ingest_document(
 
     print(f"[OK] Document ingestion complete: {filename}")
 
-    chunks_created = len(chunk_records)
-    # Free large objects before returning
-    del pages, chunk_records, texts, embeddings_list, embeddings, documents
+    # Free the built documents before returning
+    del documents
     gc.collect()
 
     return {

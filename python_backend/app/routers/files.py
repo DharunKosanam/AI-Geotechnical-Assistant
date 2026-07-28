@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional, List
 import io
 from bson import ObjectId
-from app.core.config import RATE_LIMIT_UPLOAD
+from app.core.config import RATE_LIMIT_UPLOAD, RATE_LIMIT_UPLOAD_HOURLY
 from app.core.database import files_collection
 from app.core.rate_limit import limiter, rate_limit_identify, user_id_key
 from app.dependencies.auth import get_current_user
@@ -20,7 +20,13 @@ from app.services.file_processing import (
     extract_pages_from_file,
     SUPPORTED_EXTENSIONS,
 )
-from app.services.rag_service import ingest_document, extract_text_from_pdf, get_embedding_model
+from app.services.rag_service import (
+    ingest_document,
+    extract_text_from_pdf,
+    get_embedding_model,
+    ingest_try_acquire,
+    ingest_release,
+)
 from models import User
 
 router = APIRouter(prefix="/api", tags=["files"])
@@ -181,12 +187,15 @@ async def process_file_ingestion(
                 }},
             )
     finally:
+        # Release the queue-depth slot reserved by the upload route (Phase 0.5).
+        ingest_release()
         del file_content
         gc.collect()
 
 
 @router.post("/upload")
 @limiter.limit(RATE_LIMIT_UPLOAD, key_func=user_id_key)
+@limiter.limit(RATE_LIMIT_UPLOAD_HOURLY, key_func=user_id_key)
 async def upload_document(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -207,6 +216,14 @@ async def upload_document(
     never mixed into the shared knowledge base or the user's general uploads.
     Omitting threadId preserves the existing user_upload behavior exactly.
     """
+    # Queue-depth cap (Phase 0.5): reject before buffering the file when the
+    # ingest backlog is already full, so a burst can't exhaust memory/CPU.
+    if not ingest_try_acquire():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The server is busy processing uploads. Please try again shortly.",
+        )
+    handed_off = False  # becomes True once the background task owns the slot
     try:
         # Read first so we can size-check; extension is the source of truth for type.
         file_content = await file.read()
@@ -259,6 +276,9 @@ async def upload_document(
             current_user.id,
             thread_id,
         )
+        # Ownership of the reserved slot passes to the background task, which
+        # releases it in its finally once ingestion completes or fails.
+        handed_off = True
 
         return {
             "success": True,
@@ -268,7 +288,7 @@ async def upload_document(
             "size": len(file_content),
             "status": "processing"
         }
-        
+
     except HTTPException:
         raise
     except Exception as error:
@@ -277,6 +297,11 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred, please try again."
         )
+    finally:
+        # If the slot was never handed to a background task (validation failed,
+        # insert error, or a rejection), release it so the backlog count stays true.
+        if not handed_off:
+            ingest_release()
 
 
 @router.get("/upload/status")

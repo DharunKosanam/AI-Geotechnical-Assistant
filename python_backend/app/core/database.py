@@ -26,6 +26,11 @@ users_collection = db["users"]  # JWT email/password auth
 workspace_runs_collection = db["workspace_runs"]  # persisted calculator runs
 workspace_threads_collection = db["workspace_threads"]  # persisted chat threads
 
+# KB upload audit trail (Phase 6): a SEPARATE collection recording every upload
+# and every deletion (endpoint or CLI), so removals are traceable independent of
+# the KB data itself.
+kb_audit_collection = db["kb_audit"]
+
 
 async def ensure_indexes():
     """Create required indexes. Idempotent -- safe to call on every startup.

@@ -17,17 +17,22 @@ import SidebarAccount from "./sidebar-account";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
 import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users } from "lucide-react";
 
-// --- File attachment config (mirrors python_backend file_processing.SUPPORTED_EXTENSIONS) ---
+// --- File attachment config ---
+// Text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately NOT offered:
+// their text can only be read by OCR, and this deployment has no tesseract
+// binary, so every image attachment failed after the fact. The backend rejects
+// them up front with the same reasoning (files.py::_validate_upload), and both
+// sides key off OCR availability — restore them here if tesseract is installed.
 const SUPPORTED_EXTENSIONS = [
   ".pdf", ".docx",
   ".xlsx", ".xls", ".csv",
-  ".png", ".jpg", ".jpeg", ".tiff", ".tif",
   ".pptx",
 ];
 // accept attribute for the hidden file input (per UI spec)
-const FILE_ACCEPT = ".pdf,.docx,.xlsx,.xls,.csv,.pptx,.png,.jpg,.jpeg,.tiff";
-const SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, TIFF";
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — must match backend
+const FILE_ACCEPT = ".pdf,.docx,.xlsx,.xls,.csv,.pptx";
+const SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX";
+const MAX_UPLOAD_MB = 50;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024; // must match backend
 
 // Status polling: the /api/upload response returns immediately while the
 // backend ingests in the background, so we poll until embeddings actually land.
@@ -45,6 +50,23 @@ const STAGE_LABELS: Record<string, string> = {
 const stageLabel = (stage?: string): string =>
   (stage && STAGE_LABELS[stage]) || "Processing...";
 
+// Last-resort message when an upload fails WITHOUT a usable `detail` from the
+// backend — i.e. something between the browser and FastAPI broke. Each case
+// names what the user can actually do; "Upload failed (500)" told them nothing.
+const httpUploadError = (status: number, filename: string): string => {
+  if (status === 401) return "Your session expired. Please sign in again and retry.";
+  if (status === 413)
+    return `${filename} is too large. The limit is ${MAX_UPLOAD_MB} MB.`;
+  if (status === 429)
+    return "Too many uploads in a short time. Wait a minute and try again.";
+  if (status === 503) return "The server is busy processing uploads. Try again shortly.";
+  if (status === 504)
+    return "The upload timed out on the way to the server. Check your connection and retry.";
+  if (status >= 500)
+    return `The server could not accept ${filename} (error ${status}). Please retry; if it keeps failing, report this file.`;
+  return `Upload was rejected (error ${status}).`;
+};
+
 const getExt = (filename: string): string => {
   const i = filename.lastIndexOf(".");
   return i >= 0 ? filename.slice(i).toLowerCase() : "";
@@ -59,6 +81,10 @@ type AttachedFile = {
   status: "uploading" | "ready" | "error";
   stage?: string; // backend ingest stage while processing (extracting/ocr/...)
   error?: string;
+  // Indexed, but only partially readable (e.g. scanned figure pages were
+  // skipped). Not a failure — shown alongside the success state so nobody
+  // assumes the assistant can see the whole document.
+  warning?: string;
   settled?: boolean; // transient: after the success check, revert chip to the file icon
   // Thread this file was uploaded into. Chips belong to one conversation, so
   // switching threads clears them (the document itself stays with its thread).
@@ -1415,7 +1441,12 @@ const Chat = ({
       // Safety timeout — don't spin forever if ingest never resolves.
       if (Date.now() > deadline) {
         stopPolling(id);
-        updateAttachedFile(id, { status: "error", error: "Processing timed out" });
+        updateAttachedFile(id, {
+          status: "error",
+          error: `${filename} is still processing after ${Math.round(
+            POLL_TIMEOUT_MS / 60000,
+          )} minutes. It may be very large — try a smaller file, or reopen this chat shortly to see if it finished.`,
+        });
         return;
       }
 
@@ -1431,7 +1462,11 @@ const Chat = ({
 
         if (data.status === "ready") {
           stopPolling(id);
-          updateAttachedFile(id, { status: "ready", stage: undefined });
+          updateAttachedFile(id, {
+            status: "ready",
+            stage: undefined,
+            warning: data.warning,
+          });
           // Settle the chip back to the calm file icon after the success check.
           setTimeout(() => updateAttachedFile(id, { settled: true }), 1500);
         } else if (data.status === "error") {
@@ -1473,11 +1508,21 @@ const Chat = ({
       });
 
       if (!resp.ok) {
-        const errorData = await resp.json().catch(() => ({ detail: "Unknown error" }));
-        console.error(`Failed to upload ${file.name}:`, errorData);
+        // The body is not guaranteed to be JSON: a proxy or gateway failure
+        // returns plain text ("Internal Server Error"), and blindly doing
+        // resp.json() there is what used to leave the chip reading
+        // "Unknown error" with nothing to act on. Read it as text first.
+        const raw = await resp.text().catch(() => "");
+        let detail = "";
+        try {
+          detail = (JSON.parse(raw) as { detail?: string }).detail ?? "";
+        } catch {
+          /* not JSON — fall through to the status-based message */
+        }
+        console.error(`Failed to upload ${file.name}: ${resp.status}`, raw.slice(0, 500));
         updateAttachedFile(id, {
           status: "error",
-          error: errorData.detail || `Upload failed (status ${resp.status})`,
+          error: detail || httpUploadError(resp.status, file.name),
         });
         return;
       }
@@ -1499,10 +1544,13 @@ const Chat = ({
       updateAttachedFile(id, { stage: result.stage || "processing" });
       startPolling(id, file.name, forThreadId);
     } catch (error: any) {
+      // fetch only rejects when the request never completed — the connection
+      // dropped, or the browser blocked it. Say that, rather than surfacing a
+      // raw "Failed to fetch" / "NetworkError" to the user.
       console.error(`Error uploading ${file.name}:`, error);
       updateAttachedFile(id, {
         status: "error",
-        error: error?.message || "Upload failed. Please try again.",
+        error: `Couldn't reach the server to upload ${file.name}. Check your connection (and VPN) and try again.`,
       });
     }
   };
@@ -1698,8 +1746,12 @@ const Chat = ({
                   key={file.id}
                   className={`${styles.chip} ${
                     file.status === "error" ? styles.chipError : ""
+                  } ${
+                    (file.status === "error" && file.error) || file.warning
+                      ? styles.chipWithMessage
+                      : ""
                   }`}
-                  title={file.status === "error" ? file.error : undefined}
+                  title={file.status === "error" ? file.error : file.warning}
                 >
                   {file.status === "uploading" && (
                     <Loader2
@@ -1727,6 +1779,15 @@ const Chat = ({
                       <span className={styles.chipStage}>
                         {stageLabel(file.stage)}
                       </span>
+                    )}
+                    {/* Say what went wrong IN the chip. A tooltip alone left a
+                        failed upload looking like a red filename with no reason. */}
+                    {file.status === "error" && file.error && (
+                      <span className={styles.chipErrorText}>{file.error}</span>
+                    )}
+                    {/* Indexed, but part of the document was unreadable. */}
+                    {file.status === "ready" && file.warning && (
+                      <span className={styles.chipWarningText}>{file.warning}</span>
                     )}
                   </span>
                   <button

@@ -16,6 +16,7 @@ from typing import Dict, List
 import fitz  # PyMuPDF
 
 from app.core.database import files_collection
+from app.services.file_processing import UnreadableDocumentError
 from app.services.rag_service import get_embedding_model, extract_pages_from_pdf_with_ocr
 
 KB = {"category": "knowledge_base"}
@@ -72,7 +73,12 @@ async def extraction_quality() -> None:
     page.draw_rect(fitz.Rect(80, 80, 500, 700), fill=(0.6, 0.6, 0.6))
     scan_bytes = doc.tobytes()
     doc.close()
-    triples = extract_pages_from_pdf_with_ocr(scan_bytes)
+    # A fully unreadable PDF now raises (so the chat upload can explain it);
+    # for calibration that is simply the zero-chars case.
+    try:
+        triples = extract_pages_from_pdf_with_ocr(scan_bytes, filename="synthetic-scan.pdf")
+    except UnreadableDocumentError:
+        triples = []
     chars = sum(len(t) for _, t, _ in triples)
     pages = len(triples) or 1
     print(f"synthetic image-only PDF: chars/page = {chars / pages:.1f}  (pages={len(triples)})")

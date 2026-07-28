@@ -13,8 +13,11 @@ format whose library isn't installed raises a clear RuntimeError instead of
 failing at import time.
 """
 import io
+import os
+import shutil
+from functools import lru_cache
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from PIL import Image
 import img2pdf
@@ -32,12 +35,12 @@ from app.core.config import (
 # ---------------------------------------------------------------------------
 try:
     import pytesseract  # type: ignore
-    _TESSERACT_AVAILABLE = True
+    _PYTESSERACT_IMPORTED = True
     if TESSERACT_PATH:
         pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 except Exception:
     pytesseract = None  # type: ignore
-    _TESSERACT_AVAILABLE = False
+    _PYTESSERACT_IMPORTED = False
 
 try:
     from docx import Document as _DocxDocument  # type: ignore
@@ -78,6 +81,26 @@ SUPPORTED_EXTENSIONS = {
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".tif"}
 
+# The formats that carry their own text and so never depend on OCR. Used in
+# user-facing messages when we have to turn an image or a scan away.
+TEXT_FORMATS_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX"
+
+
+class UnreadableDocumentError(Exception):
+    """A file we could open and parse, but from which no text can be read, for
+    a reason we can state plainly to the user (a scanned PDF with no text layer,
+    an image on a server without OCR, ...).
+
+    Distinct from a generic failure so the upload chip shows what is actually
+    wrong and what to do about it, instead of "no extractable text" or, worse,
+    "Upload failed (500)". Its message is USER-FACING -- keep it short, name the
+    file, and say what to do next.
+    """
+
+
+def is_image_file(filename: str) -> bool:
+    return get_file_type(filename) in _IMAGE_EXTS
+
 
 def get_file_type(filename: str) -> str:
     """Return the lowercase extension including dot (e.g. '.pdf')."""
@@ -88,8 +111,38 @@ def is_supported_file(filename: str) -> bool:
     return get_file_type(filename) in SUPPORTED_EXTENSIONS
 
 
+@lru_cache(maxsize=1)
+def _tesseract_binary_present() -> bool:
+    """True only when the tesseract EXECUTABLE can actually be run.
+
+    The pytesseract package importing says nothing about the binary: pytesseract
+    is a thin wrapper that shells out to `tesseract`, and importing it succeeds
+    on a machine that has never had OCR installed. Trusting the import meant
+    every sparse PDF page and every embedded image entered the OCR path and
+    raised TesseractNotFoundError inside a swallow-and-return-"" handler -- pure
+    wasted work (measured: ~28 s of ingest CPU on a 120-page scan) that ended in
+    a generic "no extractable text" failure instead of a clear one.
+
+    Probed once per process: the answer only changes when tesseract is installed
+    or removed, which needs a backend restart anyway.
+    """
+    if not _PYTESSERACT_IMPORTED:
+        return False
+    cmd = TESSERACT_PATH or getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
+    if shutil.which(cmd) is None and not os.path.isfile(cmd):
+        return False
+    try:
+        # Definitive: actually invoke it. Catches an unusable/broken install
+        # that a which() hit alone would happily report as present.
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception as e:
+        print(f"[OCR] tesseract binary found at {cmd!r} but not usable: {e}")
+        return False
+
+
 def tesseract_available() -> bool:
-    return _TESSERACT_AVAILABLE and OCR_ENABLED
+    return _tesseract_binary_present() and OCR_ENABLED
 
 
 # ---------------------------------------------------------------------------
@@ -199,26 +252,33 @@ def extract_pages_from_xls(content: bytes) -> List[Tuple[int, str, bool]]:
     return pages
 
 
-def extract_pages_from_image(content: bytes) -> List[Tuple[int, str, bool]]:
-    """OCR a standalone image file. Marked as OCR-extracted."""
-    if not _TESSERACT_AVAILABLE:
-        print(
-            "[WARNING] Tesseract OCR not installed — skipping image. "
-            "Install from: https://github.com/tesseract-ocr/tesseract"
+def extract_pages_from_image(content: bytes, filename: str = "This image") -> List[Tuple[int, str, bool]]:
+    """OCR a standalone image file. Marked as OCR-extracted.
+
+    Reading an image means OCR — there is no other route to its text — so when
+    OCR is unavailable this raises rather than returning empty. Returning []
+    used to bubble up as the generic "appears to be empty or contains no
+    extractable text", which is misleading: the file is fine, the server just
+    cannot read images.
+    """
+    if not tesseract_available():
+        reason = (
+            "OCR is not available on this server"
+            if not _tesseract_binary_present()
+            else "OCR is disabled on this server"
         )
-        return []
-    if not OCR_ENABLED:
-        print("[INFO] OCR_ENABLED=false — skipping image")
-        return []
+        raise UnreadableDocumentError(
+            f"{filename} is an image, and {reason}, so no text can be read from it. "
+            f"Please upload a text document instead ({TEXT_FORMATS_LABEL})."
+        )
 
     text = ocr_image_bytes(content)
     stripped = text.strip()
     if len(stripped) < OCR_MIN_TEXT_LEN:
-        print(
-            f"[WARNING] Image OCR produced only {len(stripped)} chars "
-            f"(< {OCR_MIN_TEXT_LEN}) — likely no readable text, skipping."
+        raise UnreadableDocumentError(
+            f"No readable text was found in {filename}. If it is a photo or "
+            f"diagram, upload the source document instead."
         )
-        return []
     # Prefix a section header that v2 chunker will detect (uppercase line)
     tagged = f"## OCR_EXTRACTED\n{stripped}"
     return [(1, tagged, True)]
@@ -257,18 +317,27 @@ def extract_pages_from_pptx(content: bytes) -> List[Tuple[int, str, bool]]:
 # ---------------------------------------------------------------------------
 # Unified entry point
 # ---------------------------------------------------------------------------
-def extract_pages_from_file(file_content: bytes, filename: str) -> List[Tuple[int, str, bool]]:
+def extract_pages_from_file(
+    file_content: bytes,
+    filename: str,
+    stats: Optional[dict] = None,
+) -> List[Tuple[int, str, bool]]:
     """
     Dispatch to the right extractor based on extension.
 
     PDF is handled by rag_service (it owns PyMuPDF + the OCR fallback logic)
     and is imported lazily here to avoid a circular import.
+
+    ``stats``, when a caller passes a dict, is filled in with what the extractor
+    learned about coverage (currently ``total_pages`` / ``unreadable_pages`` for
+    PDFs) so the caller can tell the user that part of the document was skipped.
+    Optional so existing callers are unaffected.
     """
     ext = get_file_type(filename)
 
     if ext == ".pdf":
         from app.services.rag_service import extract_pages_from_pdf_with_ocr
-        return extract_pages_from_pdf_with_ocr(file_content)
+        return extract_pages_from_pdf_with_ocr(file_content, filename=filename, stats=stats)
     if ext == ".docx":
         return extract_pages_from_docx(file_content)
     if ext == ".xlsx":
@@ -278,7 +347,7 @@ def extract_pages_from_file(file_content: bytes, filename: str) -> List[Tuple[in
     if ext == ".csv":
         return extract_pages_from_csv(file_content)
     if ext in _IMAGE_EXTS:
-        return extract_pages_from_image(file_content)
+        return extract_pages_from_image(file_content, filename)
     if ext == ".pptx":
         return extract_pages_from_pptx(file_content)
 

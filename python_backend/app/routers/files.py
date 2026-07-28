@@ -15,10 +15,13 @@ from app.services.file_processing import (
     convert_image_to_pdf,
     needs_image_conversion,
     determine_media_type,
+    is_image_file,
     is_supported_file,
     get_file_type,
     extract_pages_from_file,
+    tesseract_available,
     SUPPORTED_EXTENSIONS,
+    TEXT_FORMATS_LABEL,
 )
 from app.services.rag_service import (
     ingest_document,
@@ -35,7 +38,13 @@ router = APIRouter(prefix="/api", tags=["files"])
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 # Friendly format list reused in error messages so the UI can echo it back.
-SUPPORTED_LIST_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, TIFF"
+# Images are only genuinely accepted when OCR can actually run, so the list is
+# built from that capability rather than hardcoded — otherwise a rejection
+# message would advertise PNG/JPG on a server that cannot read either.
+def _supported_list_label() -> str:
+    if tesseract_available():
+        return f"{TEXT_FORMATS_LABEL}, PNG, JPG, JPEG, TIFF"
+    return TEXT_FORMATS_LABEL
 
 
 def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
@@ -51,7 +60,7 @@ def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
     if not is_supported_file(filename):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type. Supported: {SUPPORTED_LIST_LABEL}",
+            detail=f"Unsupported file type. Supported: {_supported_list_label()}",
         )
     if size_bytes <= 0:
         raise HTTPException(
@@ -62,6 +71,21 @@ def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"File too large ({size_bytes / 1024 / 1024:.1f} MB). Max: 50 MB.",
+        )
+
+
+def _reject_unreadable_image(filename: Optional[str]) -> None:
+    """An image's text can only be reached by OCR. Where OCR is unavailable,
+    say so NOW rather than accepting the file, spending a background task on it
+    and failing a few seconds later with a vaguer message."""
+    if filename and is_image_file(filename) and not tesseract_available():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{filename} is an image, and this server cannot read text from "
+                f"images (OCR is not available). Please upload a text document "
+                f"instead ({TEXT_FORMATS_LABEL})."
+            ),
         )
 
 
@@ -141,6 +165,39 @@ async def generate_embeddings(text: str) -> List[float]:
     return embeddings[0].tolist()
 
 
+def _user_facing_ingest_error(filename: str, error: Exception) -> str:
+    """Turn an unexpected ingest exception into something the uploader can act on.
+
+    The chip shows this string verbatim, so it must never be a raw library
+    message ("Failed to open stream", "cannot find loader for this WMF file").
+    We keep a short, specific line per known failure shape and fall back to a
+    generic one; the real exception is always in the server log.
+    """
+    text = str(error).lower()
+    ext = get_file_type(filename)
+
+    if "no text chunks" in text or "no extractable text" in text or "empty" in text:
+        return f"No readable text could be extracted from {filename}."
+    if ext == ".pdf" and ("open stream" in text or "cannot open" in text or "format error" in text):
+        return (
+            f"{filename} could not be opened as a PDF — the file may be damaged "
+            f"or incomplete. Try re-saving or re-downloading it."
+        )
+    if "password" in text or "encrypted" in text:
+        return f"{filename} is password-protected. Please upload an unlocked copy."
+    if "is not installed" in text:
+        # A missing optional extractor library is a server problem, not the
+        # user's file — don't tell them to fix their document.
+        return (
+            f"{filename} could not be processed: this file type is not fully "
+            f"supported on the server yet. Please try a PDF or DOCX."
+        )
+    return (
+        f"{filename} could not be processed. It may be damaged or in an "
+        f"unsupported variant of its format."
+    )
+
+
 async def process_file_ingestion(
     filename: str,
     file_content: bytes,
@@ -160,16 +217,34 @@ async def process_file_ingestion(
     conversation thread so it is retrievable only in THREAD_DOC mode.
     """
     import gc
+    from app.services.file_processing import UnreadableDocumentError
     try:
         print(f"[LOADING] Background processing started for: {filename} (category: {category})")
         result = await ingest_document(filename, file_content, category, user_id=user_id, thread_id=thread_id)
         print(f"[OK] Background processing completed: {result}")
         if parent_id is not None:
+            update = {
+                "status": "processed",
+                "chunkCount": result.get("chunks_created", 0),
+                "processedAt": datetime.now(),
+            }
+            # Indexed, but only partially readable (e.g. scanned figure pages).
+            # The chip shows this next to the success tick so nobody assumes the
+            # assistant can see the whole document.
+            if result.get("warning"):
+                update["warning"] = result["warning"]
+            await files_collection.update_one({"_id": parent_id}, {"$set": update})
+    except UnreadableDocumentError as e:
+        # Expected, explainable outcome (a scan, an image with no OCR) — not a
+        # crash. Its message is written for the user, so pass it through as-is
+        # and skip the traceback.
+        print(f"[INFO] Cannot read {filename}: {e}")
+        if parent_id is not None:
             await files_collection.update_one(
                 {"_id": parent_id},
                 {"$set": {
-                    "status": "processed",
-                    "chunkCount": result.get("chunks_created", 0),
+                    "status": "failed",
+                    "error": str(e),
                     "processedAt": datetime.now(),
                 }},
             )
@@ -182,7 +257,9 @@ async def process_file_ingestion(
                 {"_id": parent_id},
                 {"$set": {
                     "status": "failed",
-                    "error": str(e),
+                    # Internal exception text is not for the user — see
+                    # _user_facing_ingest_error.
+                    "error": _user_facing_ingest_error(filename, e),
                     "processedAt": datetime.now(),
                 }},
             )
@@ -228,6 +305,7 @@ async def upload_document(
         # Read first so we can size-check; extension is the source of truth for type.
         file_content = await file.read()
         _validate_upload(file.filename, len(file_content))
+        _reject_unreadable_image(file.filename)
 
         # Thread-scoped uploads become their own category so they never leak into
         # the shared KB / user_upload search. A blank threadId is treated as absent.
@@ -340,7 +418,7 @@ async def upload_status(
 
         doc = await files_collection.find_one(
             query,
-            {"status": 1, "error": 1},
+            {"status": 1, "error": 1, "warning": 1},
             sort=[("createdAt", -1)],
         )
 
@@ -351,7 +429,12 @@ async def upload_status(
         raw_status = doc.get("status", "processing")
 
         if raw_status == "processed":
-            return {"filename": filename, "status": "ready", "stage": "done"}
+            payload = {"filename": filename, "status": "ready", "stage": "done"}
+            # Indexed, but part of the document was unreadable — surfaced next to
+            # the success state, not as a failure.
+            if doc.get("warning"):
+                payload["warning"] = doc["warning"]
+            return payload
 
         if raw_status == "failed":
             return {

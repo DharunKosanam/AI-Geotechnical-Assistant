@@ -113,9 +113,17 @@ def _validate_spreadsheet(result: HandlerResult) -> Tuple[bool, str]:
 def _extract_pdf(content: bytes, filename: str) -> HandlerResult:
     # Reuse the canonical PyMuPDF + OCR-fallback extractor (lazy import avoids a
     # heavy module load and any import cycle).
+    from app.services.file_processing import UnreadableDocumentError
     from app.services.rag_service import extract_pages_from_pdf_with_ocr
 
-    triples: List[Page] = extract_pages_from_pdf_with_ocr(content)
+    try:
+        triples: List[Page] = extract_pages_from_pdf_with_ocr(content, filename=filename)
+    except UnreadableDocumentError:
+        # The shared extractor now RAISES for a PDF with no readable text so the
+        # chat upload chip can explain it. The KB pipeline classifies that same
+        # condition itself, from an empty page list, as skip_reason="scanned" --
+        # keep feeding it exactly that so KB behaviour is unchanged.
+        triples = []
     ocr_pages = sum(1 for _, _, ocr in triples if ocr)
     return HandlerResult(
         pages=triples,

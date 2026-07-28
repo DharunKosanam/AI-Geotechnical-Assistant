@@ -20,8 +20,6 @@ const nextConfig = {
       afterFiles: [
         { source: '/auth/:path*',       destination: `${PYTHON_API_URL}/auth/:path*` },
         { source: '/chat/:path*',       destination: `${PYTHON_API_URL}/chat/:path*` },
-        { source: '/api/upload/:path*', destination: `${PYTHON_API_URL}/api/upload/:path*` },
-        { source: '/api/upload',        destination: `${PYTHON_API_URL}/api/upload` },
         { source: '/api/files',         destination: `${PYTHON_API_URL}/api/files` },
         // GeoPilot workspace. afterFiles so the app/api/workspace/cpt/interpret
         // Route Handler (long-timeout upload) wins; everything else (e.g.
@@ -30,6 +28,11 @@ const nextConfig = {
         // /api/kb/* is handled by the dedicated long-timeout Route Handler
         // (app/api/kb/[...path]/route.ts), NOT this rewrite — the preflight + bulk
         // submission exceed the rewrite's short socket timeout.
+        // /api/upload and /api/upload/* are likewise handled by a Route Handler
+        // (app/api/upload/[[...path]]/route.ts). A rewrite truncates the proxied
+        // body at experimental.proxyClientMaxBodySize (10 MB default) and times
+        // out at 30 s, so every chat attachment over 10 MB — and any upload that
+        // stalled — died as a browser 500 without ever reaching FastAPI.
       ],
       fallback: [],
     };

@@ -181,6 +181,28 @@
   background: #3a1f1f;
 }
 
+/* An errored or partially-indexed chip has something to SAY, so it gets room
+   to say it: the reason used to live only in a title tooltip, which meant a
+   failed upload looked like a red filename and nothing else. */
+.chipWithMessage {
+  max-width: 340px;
+  align-items: flex-start;
+}
+
+.chipErrorText {
+  font-size: 11px;
+  color: #f8a5a5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.chipWarningText {
+  font-size: 11px;
+  color: #e3b341;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* Shown under the chips while an attachment is still being ingested, so the
    disabled Send button has a visible reason. */
 .attachmentNotice {

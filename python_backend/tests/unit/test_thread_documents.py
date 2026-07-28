@@ -181,7 +181,13 @@ async def test_thread_has_documents_scoping(monkeypatch):
 def _stub_ingest_deps(monkeypatch, fake_files):
     import app.services.file_processing as fp
 
-    monkeypatch.setattr(fp, "extract_pages_from_file", lambda content, fn: [(1, "hello world " * 30, False)])
+    # `stats` is the optional coverage channel the real extractor fills in
+    # (total/unreadable pages) so ingest can warn about a partially-read file.
+    monkeypatch.setattr(
+        fp,
+        "extract_pages_from_file",
+        lambda content, fn, stats=None: [(1, "hello world " * 30, False)],
+    )
     monkeypatch.setattr(fp, "get_file_type", lambda fn: "pdf")
     monkeypatch.setattr(fp, "is_supported_file", lambda fn: True)
     monkeypatch.setattr(fp, "SUPPORTED_EXTENSIONS", {".pdf"})

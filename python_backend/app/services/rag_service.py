@@ -249,24 +249,84 @@ def _ocr_embedded_images(doc, page, min_dim: int) -> str:
     return "\n".join(pieces)
 
 
-def extract_pages_from_pdf_with_ocr(file_content: bytes) -> List[Tuple[int, str, bool]]:
+def _pdf_page_count(file_content: bytes) -> int:
+    """Page count only — fitz parses the xref lazily, so this is cheap."""
+    doc = None
+    try:
+        doc = fitz.open(stream=file_content, filetype="pdf")
+        return len(doc)
+    except Exception:
+        return 0
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
+def _no_text_layer_error(filename: str, total_pages: int) -> "Exception":
+    """The user-facing explanation for a PDF whose pages carry no text."""
+    from app.services.file_processing import UnreadableDocumentError, tesseract_available
+
+    if tesseract_available():
+        return UnreadableDocumentError(
+            f"{filename} has no readable text layer and OCR could not read its "
+            f"{total_pages} page(s). Please upload a text-based PDF."
+        )
+    return UnreadableDocumentError(
+        f"{filename} looks like a scanned PDF: all {total_pages} page(s) are images "
+        f"with no readable text layer, and this server cannot run OCR. Please upload "
+        f"a text-based PDF, or re-export it as a searchable PDF first."
+    )
+
+
+def extract_pages_from_pdf_with_ocr(
+    file_content: bytes,
+    filename: str = "This PDF",
+    stats: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[int, str, bool]]:
     """
     Page-aware PDF extraction with OCR fallback.
 
     For each page:
       1. PyMuPDF text layer (fast path).
-      2. If that yields < OCR_MIN_TEXT_LEN chars AND OCR is enabled, render
-         the page and OCR it.
+      2. If that yields < OCR_MIN_TEXT_LEN chars AND OCR is actually usable,
+         render the page and OCR it.
       3. Independently, OCR any large embedded images and append.
 
     Returns (page_number, text, ocr_extracted). ``ocr_extracted`` is True
     when any OCR contributed to the page text.
+
+    A PDF with pages but no readable text on ANY of them raises
+    UnreadableDocumentError, which names the real problem (a scan) instead of
+    letting it surface downstream as a generic "no extractable text".
+    ``stats`` (optional) receives total/unreadable page counts so the caller can
+    warn when only PART of the document could be read.
     """
+    from app.services.file_processing import tesseract_available
+
     pages_pairs = extract_pages_from_pdf(file_content)  # uses existing retry logic
     text_by_page = {p: t for p, t in pages_pairs}
 
-    if not OCR_ENABLED:
-        return [(p, t, False) for p, t in pages_pairs]
+    # Steps 2-3 shell out to the tesseract binary. When it is missing or OCR is
+    # off, every one of those calls raises and is swallowed -- so skip them
+    # outright rather than re-opening the document and rendering each page at 2x
+    # zoom for nothing (measured: ~28 s of ingest CPU on a 120-page scan).
+    if not tesseract_available():
+        total_pages = _pdf_page_count(file_content)
+        readable = [(p, t, False) for p, t in pages_pairs if t and t.strip()]
+        if stats is not None:
+            stats["total_pages"] = total_pages
+            stats["unreadable_pages"] = max(0, total_pages - len(readable))
+        if total_pages and not readable:
+            raise _no_text_layer_error(filename, total_pages)
+        if total_pages > len(readable):
+            print(
+                f"      [INFO] {total_pages - len(readable)}/{total_pages} page(s) have no "
+                f"text layer and OCR is unavailable — they are NOT indexed."
+            )
+        return readable
 
     # Re-open once to drive OCR over all pages (we need fitz Page objects)
     triples: List[Tuple[int, str, bool]] = []
@@ -312,6 +372,13 @@ def extract_pages_from_pdf_with_ocr(file_content: bytes) -> List[Tuple[int, str,
                 pass
 
     triples.sort(key=lambda t: t[0])
+    if stats is not None:
+        stats["total_pages"] = total_pages
+        stats["unreadable_pages"] = max(0, total_pages - len(triples))
+    if total_pages and not triples:
+        # Text layer empty AND OCR read nothing — say so, don't fall through to
+        # the generic "no extractable text".
+        raise _no_text_layer_error(filename, total_pages)
     return triples
 
 
@@ -1164,14 +1231,16 @@ def _ingest_compute(
     file_type: str,
     pre_extracted_pages: Optional[List[Tuple[int, str, bool]]] = None,
     provenance: Optional[Dict[str, Any]] = None,
-) -> Tuple[List[Dict[str, Any]], int, int]:
+) -> Tuple[List[Dict[str, Any]], int, int, Optional[str]]:
     """CPU-bound half of ingest: extract -> chunk -> embed -> build doc dicts.
 
     Pure compute with no event-loop or motor access, so it runs safely in a
     worker thread. The heavy calls here (PyMuPDF, the tesseract OCR subprocess,
     fastembed/ONNX embedding) release the GIL, so the event loop stays responsive
-    while this runs. Returns (documents, chunks_created, total_chars); the async
-    Mongo insert stays with the caller on the loop.
+    while this runs. Returns (documents, chunks_created, total_chars, warning) --
+    ``warning`` is a user-facing note when the document was only PARTIALLY
+    readable (e.g. a report whose figure pages are scans); the async Mongo insert
+    stays with the caller on the loop.
 
     ``pre_extracted_pages`` (KB path) supplies already-extracted (page, text, ocr)
     triples from the kb_formats registry, skipping step 1. ``provenance`` (KB
@@ -1179,6 +1248,7 @@ def _ingest_compute(
     project / batch / canonicalTitle / contentHash.
     """
     # 1. Extraction — use the caller's pages (KB) or extract here (live path).
+    extract_stats: Dict[str, Any] = {}
     if pre_extracted_pages is not None:
         page_triples = pre_extracted_pages
         print(f"  1. Using {len(page_triples)} pre-extracted page(s) ({file_type})...")
@@ -1186,7 +1256,7 @@ def _ingest_compute(
         # Lazy import to avoid a circular dependency at module load
         from app.services.file_processing import extract_pages_from_file
         print(f"  1. Extracting text ({file_type})...")
-        page_triples = extract_pages_from_file(file_content, filename)
+        page_triples = extract_pages_from_file(file_content, filename, stats=extract_stats)
     pages = [(p, t) for p, t, _ in page_triples]
     ocr_by_page = {p: ocr for p, _, ocr in page_triples}
     total_chars = sum(len(t) for _, t in pages)
@@ -1260,9 +1330,23 @@ def _ingest_compute(
     print(f"      Prepared {len(documents)} documents")
 
     chunks_created = len(chunk_records)
+
+    # Partially-readable document: some pages carried no text (scanned figure
+    # pages are the common case) and are therefore invisible to the assistant.
+    # Surfacing this stops a user trusting an answer drawn from half a report.
+    warning: Optional[str] = None
+    skipped = extract_stats.get("unreadable_pages") or 0
+    total_p = extract_stats.get("total_pages") or 0
+    if skipped and total_p:
+        warning = (
+            f"{skipped} of {total_p} pages had no readable text (scanned or "
+            f"image-only) and were not indexed."
+        )
+        print(f"      [WARNING] {warning}")
+
     # Free the large intermediates; the caller only needs `documents`.
     del pages, chunk_records, texts, embeddings_list, embeddings
-    return documents, chunks_created, total_chars
+    return documents, chunks_created, total_chars, warning
 
 
 async def ingest_document(
@@ -1323,7 +1407,7 @@ async def ingest_document(
     # CPU-bound steps 1-4 off the loop (or inline when the flag is off).
     if config.INGEST_OFFLOAD_ENABLED:
         loop = asyncio.get_running_loop()
-        documents, chunks_created, total_chars = await loop.run_in_executor(
+        documents, chunks_created, total_chars, warning = await loop.run_in_executor(
             _get_ingest_pool(),
             _ingest_compute,
             filename,
@@ -1336,7 +1420,7 @@ async def ingest_document(
             provenance,
         )
     else:
-        documents, chunks_created, total_chars = _ingest_compute(
+        documents, chunks_created, total_chars, warning = _ingest_compute(
             filename, file_content, category, owner_id, thread_id, file_type,
             pre_extracted_pages, provenance,
         )
@@ -1360,4 +1444,6 @@ async def ingest_document(
         "documents_inserted": inserted_count,
         "chunking_version": CHUNKING_VERSION,
         "status": "success",
+        # None unless part of the document could not be read (see _ingest_compute).
+        "warning": warning,
     }

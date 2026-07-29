@@ -218,6 +218,26 @@ RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.0"))
 # query_thread_documents; the KB path is unchanged. Tune via env.
 THREAD_RERANK_SCORE_THRESHOLD = float(os.getenv("THREAD_RERANK_SCORE_THRESHOLD", "-11.0"))
 
+# Per-document representation quotas for THREAD_DOC retrieval (Phase 3).
+# Incident thread_7162ec5f...: with two documents attached, the older 40-chunk
+# paper took 19 of the 25 cosine candidate slots and ALL 5 post-rerank context
+# slots; the newer 56-chunk paper's best chunk sat at global rerank rank 7,
+# 0.07 below the cutoff, so the answer cited the wrong file. These quotas
+# guarantee every document in the thread is CONSIDERED at both stages -- the
+# candidate cap and the context cap -- while the rerank threshold above still
+# decides INCLUSION (a document whose best chunk fails -11.0 contributes
+# nothing). Used ONLY by query_thread_documents; KB retrieval is unchanged.
+#
+# THREAD_DOC_MIN_CANDIDATES_PER_DOC: each document's top-N cosine chunks are
+# reserved in the COMBINED_SEARCH_LIMIT candidate set before the remaining
+# slots fill by global score order, so the reranker always SEES every document.
+THREAD_DOC_MIN_CANDIDATES_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CANDIDATES_PER_DOC", "5"))
+# THREAD_DOC_MIN_CHUNKS_PER_DOC: each document with at least one chunk clearing
+# the threshold holds this many slots in the final RERANK_TOP_K context; the
+# rest fill by global rerank order. When a thread holds more documents than
+# context slots, slots fill one per document in best-score order instead.
+THREAD_DOC_MIN_CHUNKS_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CHUNKS_PER_DOC", "1"))
+
 # When every reranked chunk falls below RERANK_SCORE_THRESHOLD we still hand the
 # LLM this many top chunks as low-confidence context (so it can attempt an
 # answer); these are NOT shown as sources.

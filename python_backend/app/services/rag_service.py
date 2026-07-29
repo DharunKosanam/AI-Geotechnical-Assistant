@@ -44,6 +44,8 @@ from app.core.config import (
     RERANK_TOP_K,
     RERANK_SCORE_THRESHOLD,
     THREAD_RERANK_SCORE_THRESHOLD,
+    THREAD_DOC_MIN_CANDIDATES_PER_DOC,
+    THREAD_DOC_MIN_CHUNKS_PER_DOC,
     LOW_CONF_CONTEXT_CHUNKS,
     COMBINED_SEARCH_LIMIT,
     HYBRID_SEARCH_ENABLED,
@@ -1043,6 +1045,151 @@ async def thread_has_documents(thread_id: Optional[str], user_id: Optional[str])
     return doc is not None
 
 
+def _log_thread_doc_mix(stage: str, chunks: List[Dict[str, Any]], score_key: str) -> None:
+    """One ASCII line describing which documents make up ``chunks``: filename,
+    chunks contributed, best score. This is the line to read when a THREAD_DOC
+    retrieval question comes up. (The codebase logs via print; there is no
+    leveled logger to attach a debug level to.)"""
+    by_doc: Dict[str, Dict[str, Any]] = {}
+    for c in chunks:
+        entry = by_doc.setdefault(c.get("filename", "unknown"), {"n": 0, "best": None})
+        entry["n"] += 1
+        s = c.get(score_key)
+        if s is not None and (entry["best"] is None or s > entry["best"]):
+            entry["best"] = s
+    parts = "; ".join(
+        f"'{fn}' n={v['n']} best={v['best']:+.3f}" if v["best"] is not None
+        else f"'{fn}' n={v['n']}"
+        for fn, v in by_doc.items()
+    )
+    print(f"[THREAD] {stage} per-doc composition: {parts}")
+
+
+def _apply_per_doc_candidate_quota(
+    candidates: List[Dict[str, Any]],
+    limit: int,
+    per_doc: int,
+) -> List[Dict[str, Any]]:
+    """Stage-B quota: cap ``candidates`` (sorted by cosine ``score`` desc) to
+    ``limit`` while reserving each document's top ``per_doc`` chunks first, so
+    one large document cannot push another out of the set the reranker sees.
+
+    Reservation is round-robin by per-document rank (every document's #1 chunk,
+    then every #2, ...) in best-document order, so if the reservations alone
+    exceed ``limit`` every document still gets its strongest chunks in. The
+    remaining slots fill by global score order -- identical to the old plain cap.
+    A single-document thread short-circuits to exactly the old ``[:limit]``.
+    """
+    if per_doc <= 0 or len(candidates) <= limit:
+        return candidates[:limit]
+    by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    for c in candidates:
+        by_doc.setdefault(c["filename"], []).append(c)
+    if len(by_doc) <= 1:
+        return candidates[:limit]
+
+    doc_order = sorted(by_doc, key=lambda f: by_doc[f][0]["score"], reverse=True)
+    selected: List[Dict[str, Any]] = []
+    seen: set = set()
+    for rank in range(per_doc):
+        for fn in doc_order:
+            if len(selected) >= limit:
+                break
+            chunks = by_doc[fn]
+            if rank < len(chunks) and chunks[rank]["id"] not in seen:
+                selected.append(chunks[rank])
+                seen.add(chunks[rank]["id"])
+        if len(selected) >= limit:
+            break
+    for c in candidates:
+        if len(selected) >= limit:
+            break
+        if c["id"] not in seen:
+            selected.append(c)
+            seen.add(c["id"])
+
+    selected.sort(key=lambda c: c["score"], reverse=True)
+    return selected
+
+
+def _apply_per_doc_context_quota(
+    ranked: List[Dict[str, Any]],
+    top_k: int,
+    per_doc: int,
+    threshold: float,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Stage-C quota: choose the final ``top_k`` context chunks from ``ranked``
+    (sorted by ``rerank_score`` desc) with per-document representation.
+
+    The threshold is applied FIRST: a document whose best chunk fails it
+    contributes nothing -- the quota guarantees consideration, not inclusion.
+    Among passing chunks, each document holds ``per_doc`` slots (its own best
+    chunks) and the rest fill by global rerank order. When more documents pass
+    than there are slots, slots fill one per document in best-score order and
+    the excluded documents are logged by name.
+
+    Mirrors _apply_rerank_threshold's contract: returns (chunks, no_high_conf),
+    tags low_confidence, and delegates to it verbatim for the single-document
+    and nothing-passes cases so those behave exactly as before.
+    """
+    passing = [c for c in ranked if c.get("rerank_score", 0.0) >= threshold]
+    by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    for c in passing:
+        by_doc.setdefault(c["filename"], []).append(c)
+    if len(by_doc) <= 1:
+        # Zero passing docs -> identical low-confidence fallback; one passing
+        # doc -> identical plain top_k + threshold. No behavior change.
+        return _apply_rerank_threshold(ranked, threshold=threshold, top_k=top_k)
+
+    doc_order = sorted(by_doc, key=lambda f: by_doc[f][0]["rerank_score"], reverse=True)
+    selected: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    if len(doc_order) > top_k:
+        # More documents than context slots: one chunk per document, filling in
+        # best-document order, rather than silently dropping the quota.
+        for fn in doc_order[:top_k]:
+            best = by_doc[fn][0]
+            selected.append(best)
+            seen.add(best["id"])
+        excluded = doc_order[top_k:]
+        print(
+            f"[THREAD] doc quota: {len(excluded)} document(s) excluded from the "
+            f"{top_k}-slot context (one slot per document, best score first): "
+            + ", ".join(f"'{fn}' best={by_doc[fn][0]['rerank_score']:+.2f}" for fn in excluded)
+        )
+    else:
+        # Reserve each document's top per_doc passing chunks (round-robin by
+        # per-document rank so reservations degrade fairly if they exceed
+        # top_k), then fill the remainder by global rerank order.
+        for rank in range(per_doc):
+            for fn in doc_order:
+                if len(selected) >= top_k:
+                    break
+                chunks = by_doc[fn]
+                if rank < len(chunks) and chunks[rank]["id"] not in seen:
+                    selected.append(chunks[rank])
+                    seen.add(chunks[rank]["id"])
+            if len(selected) >= top_k:
+                break
+        for c in passing:
+            if len(selected) >= top_k:
+                break
+            if c["id"] not in seen:
+                selected.append(c)
+                seen.add(c["id"])
+
+    selected.sort(key=lambda c: c.get("rerank_score", 0.0), reverse=True)
+    for c in selected:
+        c["low_confidence"] = False
+    print(
+        f"[RERANK] Threshold {threshold} applied with per-doc quota: kept "
+        f"{len(selected)} across {len(set(c['filename'] for c in selected))} document(s) "
+        f"(lowest kept: {selected[-1]['rerank_score']:+.2f})"
+    )
+    return selected, False
+
+
 async def query_thread_documents(
     query: str,
     thread_id: str,
@@ -1106,7 +1253,16 @@ async def query_thread_documents(
         })
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    candidates = candidates[:COMBINED_SEARCH_LIMIT]
+    # Stage-B cap. With the router on, reserve each document's top cosine
+    # chunks first (per-doc quota) so one large document cannot monopolise the
+    # candidate set the reranker sees; flag off keeps the old plain cap.
+    if config.ROUTER_ENABLED:
+        candidates = _apply_per_doc_candidate_quota(
+            candidates, COMBINED_SEARCH_LIMIT, THREAD_DOC_MIN_CANDIDATES_PER_DOC
+        )
+        _log_thread_doc_mix("candidate set", candidates, "score")
+    else:
+        candidates = candidates[:COMBINED_SEARCH_LIMIT]
 
     # Same rerank path as the KB search, but with the PERMISSIVE thread threshold
     # (THREAD_RERANK_SCORE_THRESHOLD) instead of the KB threshold. The candidate
@@ -1122,9 +1278,21 @@ async def query_thread_documents(
             for c, s in zip(candidates, scores):
                 c["rerank_score"] = float(s)
             candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
-            kept, _no_high_conf = _apply_rerank_threshold(
-                candidates, threshold=THREAD_RERANK_SCORE_THRESHOLD
-            )
+            # Stage-C cap. With the router on, every document whose best chunk
+            # clears the threshold holds a context slot (per-doc quota); flag
+            # off keeps the old plain top_k + threshold, byte-identical.
+            if config.ROUTER_ENABLED:
+                kept, _no_high_conf = _apply_per_doc_context_quota(
+                    candidates,
+                    top_k=top_k,
+                    per_doc=THREAD_DOC_MIN_CHUNKS_PER_DOC,
+                    threshold=THREAD_RERANK_SCORE_THRESHOLD,
+                )
+                _log_thread_doc_mix("final context", kept, "rerank_score")
+            else:
+                kept, _no_high_conf = _apply_rerank_threshold(
+                    candidates, threshold=THREAD_RERANK_SCORE_THRESHOLD
+                )
             return kept
         except Exception as rerank_err:
             print(f"[WARNING] Thread rerank failed ({rerank_err}); falling back to vector order")

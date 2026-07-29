@@ -19,6 +19,7 @@ RETRIEVAL:
   * When disabled, falls back to the original 5/3 limits + score-floor +
     user-first ordering.
 """
+import hashlib
 import re
 import asyncio
 import threading
@@ -1043,6 +1044,50 @@ async def thread_has_documents(thread_id: Optional[str], user_id: Optional[str])
         query["userId"] = user_id
     doc = await files_collection.find_one(query, {"_id": 1})
     return doc is not None
+
+
+async def thread_document_inventory(
+    thread_id: Optional[str],
+    user_id: Optional[str],
+) -> Tuple[bool, str]:
+    """One query answering BOTH router gating and the THREAD_DOC cache key:
+    (thread_has_attachments, document-set fingerprint).
+
+    The fingerprint is sha256 over the sorted (filename, chunkCount) pairs of
+    the thread's PARENT file docs, truncated to 12 hex chars. It changes when a
+    document is added, removed, or re-ingested to a different chunk count --
+    which is exactly when a cached THREAD_DOC answer (whose Phase 4 scope note
+    names the document set) goes stale. A bare count would miss an
+    add-plus-delete; a bare timestamp would miss a re-ingest.
+
+    Latency: this REPLACES the thread_has_documents find_one at the router call
+    site rather than adding a second round trip -- Atlas RTT from this host is
+    ~70ms, so any net-new query would blow the read-path budget. Parent-doc
+    existence is the same signal thread_has_documents documents ("True as soon
+    as an upload is registered, before background chunking finishes"): the
+    upload route inserts the parent before scheduling ingestion, and every
+    delete path removes parents and chunks together.
+
+    Returns (False, "") for a missing thread_id or an empty document set.
+    """
+    if not thread_id:
+        return False, ""
+    query: Dict[str, Any] = {
+        "category": "thread_upload",
+        "threadId": thread_id,
+        "chunkIndex": {"$exists": False},
+    }
+    if user_id:
+        query["userId"] = user_id
+    pairs: List[Tuple[str, int]] = []
+    async for d in files_collection.find(query, {"filename": 1, "chunkCount": 1}):
+        pairs.append((d.get("filename") or "", int(d.get("chunkCount") or 0)))
+    if not pairs:
+        return False, ""
+    pairs.sort()
+    blob = "|".join(f"{fn}:{n}" for fn, n in pairs)
+    fingerprint = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+    return True, fingerprint
 
 
 def _log_thread_doc_mix(stage: str, chunks: List[Dict[str, Any]], score_key: str) -> None:

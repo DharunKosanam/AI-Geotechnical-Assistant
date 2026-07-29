@@ -38,8 +38,14 @@ async def ensure_indexes():
     users.email gets a UNIQUE index so duplicate signups are rejected at the
     DB level (a second insert with the same email raises DuplicateKeyError).
     create_index is a no-op if the index already exists.
+
+    files.threadId (sparse: only thread_upload docs carry a threadId) turns the
+    per-turn thread lookups -- the document-inventory/fingerprint read on the
+    THREAD_DOC cache path and the thread-scoped chunk retrieval -- from a
+    25k-doc COLLSCAN into an index seek over one thread's ~100 docs.
     """
     await users_collection.create_index("email", unique=True, name="uniq_email")
+    await files_collection.create_index("threadId", name="threadId_1", sparse=True)
 
 
 async def close_mongo_connection():

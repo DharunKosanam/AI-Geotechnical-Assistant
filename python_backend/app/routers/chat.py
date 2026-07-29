@@ -26,7 +26,7 @@ from app.services.rag_service import (
     query_with_context,
     query_vector_store,
     query_thread_documents,
-    thread_has_documents,
+    thread_document_inventory,
     get_clean_title,
 )
 from app.services.citation_filter import filter_sources_by_citations
@@ -135,6 +135,32 @@ async def _serve_cached_response(
     )
 
 
+def _mode_cache_key(
+    base: str,
+    mode: str,
+    thread_id: Optional[str],
+    doc_fingerprint: str,
+) -> str:
+    """Assemble the mode-scoped cache key (router ON path).
+
+    KB_QUERY / GENERAL / MIXED: ``{base}:{mode}`` -- byte-identical to before.
+    THREAD_DOC additionally carries the thread id AND the document-set
+    fingerprint (Phase 2), so the key changes whenever a document is added,
+    removed, or re-ingested. Nothing needs to remember to bust the cache: any
+    path that mutates the document set changes the fingerprint, and with it the
+    key -- so a cached answer (including its Phase 4 scope note, which names
+    the document set) can only ever be served while the set it was computed
+    for is still the thread's current set. An empty fingerprint (defensive;
+    THREAD_DOC is unreachable for a documentless thread) keeps the old key.
+    """
+    key = f"{base}:{mode}"
+    if mode == THREAD_DOC and thread_id:
+        key = f"{key}:{thread_id}"
+        if doc_fingerprint:
+            key = f"{key}:{doc_fingerprint}"
+    return key
+
+
 def _join_names(names: List[str]) -> str:
     """'a.pdf' / 'a.pdf and b.pdf' / 'a.pdf, b.pdf and c.pdf' (plain ASCII)."""
     if len(names) == 1:
@@ -176,9 +202,11 @@ def _thread_scope_note(scope: Dict) -> str:
             "confidence threshold in any of them."
         )
     if excluded:
+        # Searched AND matched, but no context slot (more passing documents
+        # than slots) -- distinct from searched-and-empty above.
         parts.append(
-            f"Relevant content in {_join_names(excluded)} did not fit in the "
-            f"context for this answer."
+            f"{_join_names(excluded)} matched this question but was not "
+            f"included in the context for this answer."
         )
     return "_" + " ".join(parts) + "_"
 
@@ -306,7 +334,11 @@ async def _run_chat_turn(
             # THREAD_DOC is only possible when this thread actually has uploaded
             # documents; the router is told so it can never pick THREAD_DOC
             # otherwise (and the classifier enforces the same invariant).
-            thread_has_attachments = bool(thread_id) and await thread_has_documents(
+            # thread_document_inventory answers has-attachments AND yields the
+            # document-set fingerprint for the cache key from ONE query -- it
+            # replaces the former thread_has_documents call here rather than
+            # adding a second ~70ms Atlas round trip to the read path (Phase 2).
+            thread_has_attachments, thread_doc_fp = await thread_document_inventory(
                 thread_id, current_user.id
             )
             mode = await classify(
@@ -316,17 +348,14 @@ async def _run_chat_turn(
             )
             print(f"[ROUTER] Classified mode: {mode} (attachments={thread_has_attachments})")
 
-            # Deferred, mode-scoped cache read (router ON). The key now carries
-            # the mode so a KB_QUERY answer can't be served for a GENERAL turn and
-            # vice versa. The write at Step 5 uses this same mode-scoped key.
-            cache_query = f"{cache_query}:{mode}"
-            # THREAD_DOC answers depend on THIS thread's uploaded documents, so
-            # the key must also carry the thread_id. Otherwise two threads (or a
-            # deleted-and-recreated thread, which always gets a fresh id) with the
-            # same query would share a THREAD_DOC answer and serve a stale/foreign
-            # result. The new thread's distinct id makes its key distinct.
-            if mode == THREAD_DOC and thread_id:
-                cache_query = f"{cache_query}:{thread_id}"
+            # Deferred, mode-scoped cache read (router ON). The key carries the
+            # mode so a KB_QUERY answer can't be served for a GENERAL turn; a
+            # THREAD_DOC key additionally carries the thread id (a deleted-and-
+            # recreated thread gets a fresh id) and the document-set fingerprint
+            # (Phase 2: an upload/delete/re-ingest changes the key, so a stale
+            # answer -- and its scope note naming the old document set -- can
+            # never be served). The write at Step 5 uses this same key.
+            cache_query = _mode_cache_key(cache_query, mode, thread_id, thread_doc_fp)
             if redis_client is not None:
                 cached_response = await _serve_cached_response(
                     redis_client, cache_query, thread_id, current_user.id, payload.query

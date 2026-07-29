@@ -133,13 +133,15 @@ async def chat_env(monkeypatch):
             no_high_confidence_sources=False,
         )
     )
-    thread_has_docs_mock = AsyncMock(return_value=False)
+    # (has_attachments, document-set fingerprint) -- Phase 2 replaced the
+    # bare thread_has_documents call with the combined inventory.
+    thread_inventory_mock = AsyncMock(return_value=(False, ""))
     thread_retrieve_mock = AsyncMock(return_value=[dict(_THREAD_CHUNK)])
     monkeypatch.setattr(chat_mod, "classify", classify_mock)
     monkeypatch.setattr(chat_mod, "rewrite_query_with_history", rewrite_mock)
     monkeypatch.setattr(chat_mod, "query_vector_store", retrieve_mock)
     monkeypatch.setattr(chat_mod, "query_thread_documents", thread_retrieve_mock)
-    monkeypatch.setattr(chat_mod, "thread_has_documents", thread_has_docs_mock)
+    monkeypatch.setattr(chat_mod, "thread_document_inventory", thread_inventory_mock)
     monkeypatch.setattr(chat_mod, "generate_answer_with_groq", generate_mock)
     monkeypatch.setattr(chat_mod, "handle_general", general_mock)
     monkeypatch.setattr(chat_mod, "handle_thread_doc_fallback", thread_fallback_mock)
@@ -154,7 +156,7 @@ async def chat_env(monkeypatch):
             generate=generate_mock,
             general=general_mock,
             thread_fallback=thread_fallback_mock,
-            thread_has_docs=thread_has_docs_mock,
+            thread_inventory=thread_inventory_mock,
             thread_retrieve=thread_retrieve_mock,
             redis=fake_redis,
         )
@@ -451,7 +453,7 @@ async def test_mixed_cache_key_scoped_to_mixed(chat_env, monkeypatch):
 async def test_thread_attachments_fed_to_router(chat_env, monkeypatch):
     # The router is told whether the current thread has uploaded documents.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_has_docs.return_value = True
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
     chat_env.classify.return_value = chat_mod.KB_QUERY
     await _post(chat_env.client)
     assert chat_env.classify.await_args.kwargs["thread_has_attachments"] is True
@@ -460,7 +462,7 @@ async def test_thread_attachments_fed_to_router(chat_env, monkeypatch):
 @pytest.mark.asyncio
 async def test_thread_doc_uses_thread_scoped_retrieval_with_citations(chat_env, monkeypatch):
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_has_docs.return_value = True
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     resp = await _post(chat_env.client)
     assert resp.status_code == 200
@@ -476,7 +478,7 @@ async def test_thread_doc_no_high_confidence_uses_thread_aware_fallback(chat_env
     # Thread HAS an upload but no chunk clears the threshold -> the THREAD-AWARE
     # fallback (not plain GENERAL), so the answer acknowledges the document.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_has_docs.return_value = True
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     chat_env.thread_retrieve.return_value = [dict(_LOW_CONF_CHUNK)]
     resp = await _post(chat_env.client)
@@ -494,7 +496,7 @@ async def test_thread_doc_empty_retrieval_uses_thread_aware_fallback(chat_env, m
     # Even when thread retrieval returns nothing at all, THREAD_DOC (which only
     # fires when the thread has an upload) uses the thread-aware fallback.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_has_docs.return_value = True
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     chat_env.thread_retrieve.return_value = []
     resp = await _post(chat_env.client)
@@ -523,7 +525,7 @@ async def test_thread_doc_retrieval_error_surfaces_as_500(chat_env, monkeypatch)
     # Same error-vs-empty distinction as KB: a thread-retrieval OUTAGE surfaces
     # as an error, never a silent uncited answer.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_has_docs.return_value = True
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     chat_env.thread_retrieve.side_effect = RuntimeError("mongo down")
     resp = await _post(chat_env.client)
@@ -536,10 +538,10 @@ async def test_thread_doc_cache_key_includes_thread_id(chat_env, monkeypatch):
     # THREAD_DOC keys MUST carry the thread_id ("t1" from _post) so a
     # deleted-and-recreated thread (new id) can't serve a stale cached answer.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_has_docs.return_value = True
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     await _post(chat_env.client)
-    assert chat_env.redis.set_keys == [f"{_BASE_KEY}:THREAD_DOC:t1"]
+    assert chat_env.redis.set_keys == [f"{_BASE_KEY}:THREAD_DOC:t1:fp-doc-set-1"]
     # and a different thread id yields a different key (no cross-thread reuse)
     assert "t1" in chat_env.redis.set_keys[0]
 
@@ -547,12 +549,12 @@ async def test_thread_doc_cache_key_includes_thread_id(chat_env, monkeypatch):
 @pytest.mark.asyncio
 async def test_thread_doc_cache_key_differs_across_threads(chat_env, monkeypatch):
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_has_docs.return_value = True
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     await chat_env.client.post("/chat", json={"query": _QUERY, "threadId": "old-thread"})
     await chat_env.client.post("/chat", json={"query": _QUERY, "threadId": "new-thread"})
     # Same query, two different threads -> two distinct keys, no stale reuse.
     assert chat_env.redis.set_keys == [
-        f"{_BASE_KEY}:THREAD_DOC:old-thread",
-        f"{_BASE_KEY}:THREAD_DOC:new-thread",
+        f"{_BASE_KEY}:THREAD_DOC:old-thread:fp-doc-set-1",
+        f"{_BASE_KEY}:THREAD_DOC:new-thread:fp-doc-set-1",
     ]

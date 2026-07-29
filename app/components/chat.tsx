@@ -34,6 +34,15 @@ const SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX";
 const MAX_UPLOAD_MB = 50;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024; // must match backend
 
+// Client-side deadline for a chat response. Above the whole server timeout
+// chain (Ollama 180s < /api/chat route 240s < nginx 300s) so it only ever fires
+// when the connection itself died without an error — see sendMessage.
+const CLIENT_RESPONSE_TIMEOUT_MS = 315_000;
+
+// Streaming watchdog: the backend sends a keep-alive comment every 15s, so this
+// much silence means the connection is gone — not that the answer is slow.
+const STREAM_SILENCE_TIMEOUT_MS = 60_000;
+
 // Status polling: the /api/upload response returns immediately while the
 // backend ingests in the background, so we poll until embeddings actually land.
 const POLL_INTERVAL_MS = 1500;
@@ -65,6 +74,35 @@ const httpUploadError = (status: number, filename: string): string => {
   if (status >= 500)
     return `The server could not accept ${filename} (error ${status}). Please retry; if it keeps failing, report this file.`;
   return `Upload was rejected (error ${status}).`;
+};
+
+// Renders the trailing "**Sources:**" markdown block appended to an assistant
+// answer. Shared by the streaming and JSON paths so a message looks identical
+// however it arrived — sources are always appended at the END, because the
+// backend can only finalise the list once the answer is complete (the refusal
+// guard can clear it and citation narrowing trims it to what was actually cited).
+const formatSourcesBlock = (sources: any[]): string => {
+  if (!sources || sources.length === 0) return "";
+  let block = "\n\n**Sources:**\n";
+  sources.forEach((source: any, index: number) => {
+    if (typeof source === "object" && source !== null && source.title && source.url) {
+      block += `${index + 1}. [${source.title}](${source.url})\n`;
+    } else if (typeof source === "string") {
+      try {
+        const parsed = JSON.parse(source);
+        if (parsed.title && parsed.url) {
+          block += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
+        } else {
+          block += `${index + 1}. ${source}\n`;
+        }
+      } catch {
+        block += `${index + 1}. ${source}\n`;
+      }
+    } else {
+      block += `${index + 1}. ${String(source)}\n`;
+    }
+  });
+  return block;
 };
 
 const getExt = (filename: string): string => {
@@ -103,6 +141,64 @@ const UserMessage = ({ text }: { text: string }) => {
       <div className={styles.messageContent}>
         <div className={styles.messageLabel}>You</div>
         <div className={styles.userMessage}>{text}</div>
+      </div>
+    </div>
+  );
+};
+
+// How long to wait before the indicator starts reassuring the user. Under GPU
+// contention an answer can take minutes; silence that long reads as "broken"
+// and users reload, which adds load and makes the next answer slower still.
+const THINKING_SLOW_MS = 15_000;
+const THINKING_VERY_SLOW_MS = 45_000;
+
+/**
+ * Pending-response indicator — the assistant's turn made visible before any of
+ * its text exists. Deliberately mirrors AssistantMessage's row/label/bubble so
+ * it occupies exactly the spot the answer will appear in, and is simply
+ * replaced by it. Once streaming lands this is the "waiting for first token"
+ * state; the streamed text takes over from here.
+ */
+const ThinkingIndicator = ({ startedAt }: { startedAt: number }) => {
+  // Escalating reassurance, driven by two timers rather than a per-second tick
+  // so a long wait costs two re-renders, not 180.
+  const [phase, setPhase] = useState<0 | 1 | 2>(0);
+
+  useEffect(() => {
+    setPhase(0);
+    const elapsed = Date.now() - startedAt;
+    const timers = [
+      setTimeout(() => setPhase(1), Math.max(0, THINKING_SLOW_MS - elapsed)),
+      setTimeout(() => setPhase(2), Math.max(0, THINKING_VERY_SLOW_MS - elapsed)),
+    ];
+    return () => timers.forEach(clearTimeout);
+  }, [startedAt]);
+
+  const hint =
+    phase === 2
+      ? "Still working — complex questions can take a couple of minutes. No need to reload."
+      : phase === 1
+        ? "Searching the knowledge base and drafting an answer..."
+        : "Thinking...";
+
+  return (
+    <div className={styles.messageRow} style={{ justifyContent: "flex-start" }}>
+      <div className={styles.messageContent}>
+        <div className={styles.messageLabel}>AI Assistant</div>
+        {/* role=status + aria-live announces the wait to screen readers, which
+            would otherwise get the same silence as a blank screen. */}
+        <div
+          className={`${styles.assistantMessage} ${styles.thinkingBubble}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span className={styles.thinkingDots} aria-hidden="true">
+            <span className={styles.thinkingDot} />
+            <span className={styles.thinkingDot} />
+            <span className={styles.thinkingDot} />
+          </span>
+          <span className={styles.thinkingHint}>{hint}</span>
+        </div>
       </div>
     </div>
   );
@@ -414,6 +510,15 @@ const Chat = ({
   const [userInput, setUserInput] = useState("");
   const [messages, setMessages] = useState<MessageProps[]>([]);
   const [inputDisabled, setInputDisabled] = useState(false);
+  // Answer pending: set the moment the user sends, cleared when the answer OR
+  // an error arrives. Kept separate from inputDisabled, which is also toggled
+  // by the legacy tool-call flow and by thread switching, so the indicator
+  // tracks exactly one thing: "we are waiting on this turn's response".
+  const [awaitingSince, setAwaitingSince] = useState<number | null>(null);
+  // True from the first byte of an SSE turn until the stream closes. Used to
+  // silence the history poll, which would otherwise overwrite the message being
+  // streamed with the server's not-yet-written version of it.
+  const [isStreaming, setIsStreaming] = useState(false);
   const [threadId, setThreadId] = useState<string | null>("");
   // Mirrors threadId for code that mints a thread and then immediately uses it
   // in the SAME handler (attach -> upload), where the state closure is stale.
@@ -755,8 +860,148 @@ const Chat = ({
     }
   };
 
+  // Streaming turn. Returns false when the backend has streaming switched off
+  // (its /chat/stream 404s) so the caller can fall back to the JSON endpoint —
+  // the frontend therefore needs no flag of its own and follows STREAMING_ENABLED
+  // automatically, with no rebuild to toggle it.
+  //
+  // Once the first token lands, this NEVER falls back: the turn has already run
+  // on the server, so retrying it would generate (and bill, and queue) a second
+  // answer for the same question.
+  const sendMessageStreaming = async (
+    text: string,
+    actualThreadId: string | null,
+  ): Promise<boolean> => {
+    const controller = new AbortController();
+    // Watchdog on SILENCE, not on total duration — the backend heartbeats every
+    // 15s, so a gap this long means the connection is dead, however long the
+    // answer legitimately takes.
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    const resetWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => controller.abort(), STREAM_SILENCE_TIMEOUT_MS);
+    };
+
+    let started = false; // has any token been rendered?
+    try {
+      resetWatchdog();
+      const response = await fetch(API_ENDPOINTS.sendMessageStream(), {
+        credentials: "include",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(getMessageRequestBody(text, actualThreadId)),
+        signal: controller.signal,
+      });
+
+      if (response.status === 404) {
+        // Streaming disabled server-side — the caller uses /api/chat instead.
+        console.log("ℹ️ Streaming disabled on the backend; using /api/chat");
+        return false;
+      }
+      if (!response.ok || !response.body) {
+        const raw = await response.text().catch(() => "");
+        let detail = "";
+        try {
+          detail = (JSON.parse(raw) as { detail?: string }).detail ?? "";
+        } catch {
+          /* not JSON */
+        }
+        appendMessage(
+          "assistant",
+          `\n\n[Error: ${detail || `Failed to send message (Status: ${response.status})`}]`,
+        );
+        setInputDisabled(false);
+        return true; // handled — do NOT re-ask via the JSON path
+      }
+
+      setIsStreaming(true);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let eventName = "";
+
+      const handleEvent = (name: string, dataLine: string) => {
+        let payload: any;
+        try {
+          payload = JSON.parse(dataLine);
+        } catch {
+          return; // malformed frame — ignore rather than break the answer
+        }
+        if (name === "token") {
+          const piece: string = payload.text ?? "";
+          if (!piece) return;
+          if (!started) {
+            started = true;
+            shouldForceScrollRef.current = true;
+            // First token replaces the thinking indicator: creating the
+            // assistant message makes showThinking false on the next render.
+            appendMessage("assistant", piece);
+          } else {
+            appendToLastMessage(piece);
+          }
+        } else if (name === "done") {
+          const block = formatSourcesBlock(payload.sources || []);
+          if (block) {
+            if (started) appendToLastMessage(block);
+            else appendMessage("assistant", block.trimStart());
+          }
+        } else if (name === "error") {
+          const detail = payload.detail || "The assistant failed to answer.";
+          if (started) appendToLastMessage(`\n\n[Error: ${detail}]`);
+          else appendMessage("assistant", `\n\n[Error: ${detail}]`);
+        }
+      };
+
+      // SSE framing: records separated by a blank line; within a record,
+      // "event:" names it and "data:" carries the JSON. Lines starting with
+      // ":" are keep-alive comments and are ignored by design.
+      while (true) {
+        const { done, value } = await reader.read();
+        resetWatchdog();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const record = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          eventName = "";
+          for (const line of record.split("\n")) {
+            if (line.startsWith("event: ")) eventName = line.slice(7).trim();
+            else if (line.startsWith("data: ")) handleEvent(eventName, line.slice(6));
+          }
+        }
+      }
+
+      if (!started) {
+        // Stream ended without a single token — treat as a failed turn rather
+        // than leaving an empty bubble.
+        appendMessage("assistant", "\n\n[Error: The assistant returned an empty response.]");
+      }
+      setInputDisabled(false);
+      return true;
+    } catch (error: any) {
+      const aborted = error?.name === "AbortError";
+      console.error("Streaming error:", error);
+      const detail = aborted
+        ? "The connection went quiet and the answer was cut off. Please try again."
+        : error?.message || "The response stream failed.";
+      if (started) appendToLastMessage(`\n\n[Error: ${detail}]`);
+      else appendMessage("assistant", `\n\n[Error: ${detail}]`);
+      setInputDisabled(false);
+      return true; // a partially-streamed turn must never be re-sent
+    } finally {
+      if (watchdog) clearTimeout(watchdog);
+      setIsStreaming(false);
+    }
+  };
+
   const sendMessage = async (text: string, targetThreadId: string | null = null) => {
     const actualThreadId = targetThreadId || threadId;
+
+    // Prefer the stream; fall back to the JSON endpoint only when the backend
+    // says streaming is off (404), never after tokens have started arriving.
+    if (await sendMessageStreaming(text, actualThreadId)) return;
 
     try {
       // Get API endpoint based on configuration (Python or Next.js)
@@ -767,15 +1012,30 @@ const Chat = ({
       console.log("📦 Request body:", JSON.stringify(requestBody, null, 2));
       console.log("🆔 Thread ID:", actualThreadId);
       
-      const response = await fetch(endpoint, {
-        credentials: "include",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(requestBody),
-      });
-      
+      // Last-resort client deadline. The server chain already fails inside-out
+      // (Ollama 180s -> /api/chat route 240s -> nginx 300s), but a connection
+      // that silently dies mid-flight — VPN drop, laptop sleep — leaves fetch
+      // hanging with no response and no error, and the indicator with nothing
+      // to stop it. Sits ABOVE the whole server chain so it never preempts a
+      // legitimately slow answer.
+      const controller = new AbortController();
+      const clientDeadline = setTimeout(() => controller.abort(), CLIENT_RESPONSE_TIMEOUT_MS);
+
+      let response: Response;
+      try {
+        response = await fetch(endpoint, {
+          credentials: "include",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(clientDeadline);
+      }
+
       console.log("📨 Response status:", response.status);
 
       if (!response.ok) {
@@ -806,48 +1066,30 @@ const Chat = ({
       // Parse JSON response from Python backend
       const data = await response.json();
       console.log("📦 Response data:", data);
-      
+
       // Extract answer and sources
       const answer = data.answer || "";
       const sources = data.sources || [];
-      
+
       // Build the complete response with clickable source links
-      let fullResponse = answer;
-      
-      if (sources && sources.length > 0) {
-        fullResponse += "\n\n**Sources:**\n";
-        sources.forEach((source: any, index: number) => {
-          if (typeof source === "object" && source !== null && source.title && source.url) {
-            fullResponse += `${index + 1}. [${source.title}](${source.url})\n`;
-          } else if (typeof source === "string") {
-            try {
-              const parsed = JSON.parse(source);
-              if (parsed.title && parsed.url) {
-                fullResponse += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-              } else {
-                fullResponse += `${index + 1}. ${source}\n`;
-              }
-            } catch {
-              fullResponse += `${index + 1}. ${source}\n`;
-            }
-          } else {
-            fullResponse += `${index + 1}. ${String(source)}\n`;
-          }
-        });
-      }
-      
+      const fullResponse = answer + formatSourcesBlock(sources);
+
       console.log("✅ Answer extracted:", answer.substring(0, 100) + "...");
       console.log("📚 Sources:", sources);
-      
+
       appendMessage("assistant", fullResponse);
       setInputDisabled(false);
 
       // Title generation is owned by handleSubmit (the only caller), which knows
       // whether this is the thread's first turn. Doing it here too fired the
       // title LLM twice for a thread started from "New Chat".
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error sending message:", error);
-      appendMessage("assistant", `\n\n[Error: ${error.message || "Failed to send message"}]`);
+      const message =
+        error?.name === "AbortError"
+          ? "The connection was lost before the assistant replied. Please check your connection and try again."
+          : error?.message || "Failed to send message";
+      appendMessage("assistant", `\n\n[Error: ${message}]`);
       setInputDisabled(false);
     }
   };
@@ -986,6 +1228,9 @@ const Chat = ({
     const messageText = userInput;
     setUserInput("");
     setInputDisabled(true);
+    // Show the indicator NOW — before thread creation, before the request —
+    // so there is never a frame in which the app looks idle after a send.
+    setAwaitingSince(Date.now());
 
     // No-op when the thread already exists — whether the user typed into an
     // open conversation or an attach already minted the thread.
@@ -996,6 +1241,7 @@ const Chat = ({
       console.error("Failed to create thread:", error);
       setUserInput(messageText); // give the text back rather than losing it
       setInputDisabled(false);
+      setAwaitingSince(null); // never leave the indicator spinning
       return;
     }
 
@@ -1015,7 +1261,14 @@ const Chat = ({
       return newMessages;
     });
 
-    await sendMessage(messageText, activeThreadId);
+    try {
+      await sendMessage(messageText, activeThreadId);
+    } finally {
+      // sendMessage handles its own errors today, but a finally is what
+      // GUARANTEES the indicator stops — success, HTTP error, timeout, or an
+      // exception a future change lets escape. It must never outlive the turn.
+      setAwaitingSince(null);
+    }
 
     if (isFirstTurn) {
       // Best-effort: generateAndUpdateTitle swallows its own errors and
@@ -1323,8 +1576,11 @@ const Chat = ({
     }
     
     // Only start polling when waiting for AI response (inputDisabled = true)
-    // This prevents constant polling when idle
-    if (threadId && !isNewThread && inputDisabled) {
+    // This prevents constant polling when idle.
+    // NOT while streaming: loadThread() replaces the whole message list from
+    // the DB, and the assistant row is not written until the turn completes —
+    // so a poll landing mid-stream would wipe the text as it is being typed.
+    if (threadId && !isNewThread && inputDisabled && !isStreaming) {
       console.log(`🔄 Starting polling while waiting for AI response: ${threadId}`);
       
       // Poll every 2 seconds only while waiting for response
@@ -1341,7 +1597,7 @@ const Chat = ({
         pollingIntervalRef.current = null;
       }
     };
-  }, [threadId, isNewThread, inputDisabled]); // Added inputDisabled dependency
+  }, [threadId, isNewThread, inputDisabled, isStreaming]);
   const createNewThread = () => {
     // Simply reset to welcome state
     // Thread will be created when the user sends the first message OR attaches
@@ -1352,6 +1608,7 @@ const Chat = ({
     setIsGroupConversation(false);
     setIsNewThread(true);
     setIsDraftThread(false);
+    setAwaitingSince(null); // an abandoned turn must not keep a spinner alive
     awaitingFirstMessageRef.current = false;
     clearAttachedFiles();
     setUserInput("");
@@ -1368,6 +1625,9 @@ const Chat = ({
     // Attachments are per-conversation; never carry chips across a switch.
     clearAttachedFiles();
     setIsDraftThread(false);
+    // The indicator belongs to the thread that was waiting, not to the one
+    // being opened — drop it on the switch.
+    setAwaitingSince(null);
     awaitingFirstMessageRef.current = false;
 
     if (selectedThreadId === null) {
@@ -1650,6 +1910,16 @@ const Chat = ({
     return result;
   }, [messages]);
 
+  // Waiting, and the answer is not already on screen. The 2s history poll that
+  // runs during a wait can surface the assistant's reply slightly before the
+  // request resolves; without this the indicator would sit spinning underneath
+  // an answer that had already arrived. Phrased as "last message isn't the
+  // assistant's" rather than "is the user's" so it also covers the moment
+  // before the user's own message has been appended.
+  const showThinking =
+    awaitingSince !== null &&
+    deduplicatedMessages[deduplicatedMessages.length - 1]?.role !== "assistant";
+
   // Starter card click: fill the input, then wait one frame for the
   // controlled value to render before focusing and placing the caret at the end.
   const handleStarterSelect = (text: string) => {
@@ -1703,6 +1973,7 @@ const Chat = ({
             {deduplicatedMessages.map((msg, index) => (
               <Message key={`${msg.role}-${index}`} role={msg.role} text={msg.text} annotations={msg.annotations} />
             ))}
+            {showThinking && <ThinkingIndicator startedAt={awaitingSince!} />}
             <div ref={messagesEndRef} />
           </>
         )}

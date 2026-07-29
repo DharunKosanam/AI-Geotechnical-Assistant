@@ -30,6 +30,11 @@ export const API_ENDPOINTS = {
     }
     return `/api/assistants/threads/${threadId}/messages`;
   },
+
+  // SSE variant of sendMessage. The client tries this first and falls back to
+  // sendMessage() when it 404s, which is exactly what FastAPI returns while
+  // STREAMING_ENABLED is off — so the backend flag alone controls the mode.
+  sendMessageStream: () => `/api/chat/stream`,
   
   // Thread management
   createThread: () => {

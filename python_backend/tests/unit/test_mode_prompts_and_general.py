@@ -137,8 +137,9 @@ def test_general_prompt_assembly_ignores_any_context_passed():
 async def test_handle_general_produces_no_sources(monkeypatch):
     captured = {}
 
-    async def fake_generate(*, query, context, history, mode):
-        captured.update(query=query, context=context, history=history, mode=mode)
+    # `emit` is the optional streaming token callback; handlers always forward it.
+    async def fake_generate(*, query, context, history, mode, emit=None):
+        captured.update(query=query, context=context, history=history, mode=mode, emit=emit)
         return "A helpful general answer about soil."
 
     monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)
@@ -160,7 +161,7 @@ async def test_handle_general_produces_no_sources(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_general_default_history(monkeypatch):
-    async def fake_generate(*, query, context, history, mode):
+    async def fake_generate(*, query, context, history, mode, emit=None):
         return "ans"
 
     monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)
@@ -191,8 +192,8 @@ def test_thread_doc_fallback_prompt_is_not_a_router_mode():
 async def test_handle_thread_doc_fallback_uses_fallback_prompt_and_no_sources(monkeypatch):
     captured = {}
 
-    async def fake_generate(*, query, context, history, mode, system_prompt=None):
-        captured.update(query=query, context=context, history=history, mode=mode, system_prompt=system_prompt)
+    async def fake_generate(*, query, context, history, mode, system_prompt=None, emit=None):
+        captured.update(query=query, context=context, history=history, mode=mode, system_prompt=system_prompt, emit=emit)
         return "I searched your uploaded document but did not find that. In general, ..."
 
     monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)

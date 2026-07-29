@@ -7,7 +7,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from models import ChatRequest, ChatResponse, RAGChatRequest, RAGChatResponse, User
 from app.core import config
@@ -15,7 +15,13 @@ from app.core.config import RATE_LIMIT_CHAT
 from app.core.database import conversations_collection, files_collection, messages_collection
 from app.core.rate_limit import limiter, rate_limit_identify, user_id_key
 from app.dependencies.auth import get_current_user
-from app.services.llm_service import get_llm, generate_answer_with_groq, rewrite_query_with_history, safe_print
+from app.services.llm_service import (
+    TokenEmitter,
+    get_llm,
+    generate_answer_with_groq,
+    rewrite_query_with_history,
+    safe_print,
+)
 from app.services.rag_service import (
     query_with_context,
     query_vector_store,
@@ -129,16 +135,28 @@ async def _serve_cached_response(
     )
 
 
-@router.post("/chat", response_model=RAGChatResponse)
-@limiter.limit(RATE_LIMIT_CHAT, key_func=user_id_key)
-async def chat_with_rag(
-    request: Request,
+async def _run_chat_turn(
     payload: RAGChatRequest,
-    current_user: User = Depends(rate_limit_identify),
-):
-    """
-    Main RAG endpoint with simple JSON response.
-    Returns: { "answer": "...", "sources": [...] }
+    current_user: User,
+    emit: Optional[TokenEmitter] = None,
+) -> RAGChatResponse:
+    """Run one complete chat turn and return the response model.
+
+    This is the ENTIRE body of the former POST /chat handler, moved verbatim so
+    the JSON endpoint and the SSE endpoint execute the same code in the same
+    order — retrieval, routing, generation, the refusal guard, citation
+    narrowing, persistence and the cache write are defined exactly once. POST
+    /chat is now a thin wrapper that awaits this and returns the result.
+
+    ``emit``, when supplied by the SSE endpoint, is handed to the answer-
+    generating call so tokens surface as they are produced. It changes ONLY how
+    the answer text is delivered — never what it is, and never the ordering
+    around it. With ``emit=None``, which is every non-streaming caller including
+    POST /chat, this is byte-for-byte the pre-streaming path.
+
+    Raises the same HTTPException(500) as before on failure, so /chat's error
+    contract is unchanged; the SSE caller catches it and reports it as an event
+    (it cannot change the status code once the stream has started).
     """
     try:
         print(f"[RECEIVED] Received query: {payload.query}")
@@ -276,7 +294,9 @@ async def chat_with_rag(
             # refusal-keyword guard and citation filter below are KB-only and are
             # deliberately skipped here.
             print("[ROUTER] GENERAL mode - skipping retrieval, answering from model knowledge")
-            general_result = await handle_general(payload.query, conversation_history)
+            general_result = await handle_general(
+                payload.query, conversation_history, emit=emit
+            )
             clean_answer = general_result.answer
             sources = general_result.sources
             no_high_confidence_sources = general_result.no_high_confidence_sources
@@ -400,14 +420,16 @@ async def chat_with_rag(
                         "thread-aware fallback (document exists, answer not found in it)"
                     )
                     general_result = await handle_thread_doc_fallback(
-                        payload.query, conversation_history
+                        payload.query, conversation_history, emit=emit
                     )
                 else:
                     print(
                         "[ROUTER] KB retrieval returned no chunk above the reranker "
                         "threshold - falling through to GENERAL (no citations)"
                     )
-                    general_result = await handle_general(payload.query, conversation_history)
+                    general_result = await handle_general(
+                        payload.query, conversation_history, emit=emit
+                    )
                 clean_answer = general_result.answer
                 sources = general_result.sources
                 no_high_confidence_sources = general_result.no_high_confidence_sources
@@ -419,6 +441,7 @@ async def chat_with_rag(
                     context=context,
                     history=conversation_history,
                     mode=mode,
+                    emit=emit,
                 )
 
                 print(f"   [RESULT] Answer from LLM service: {len(answer)} chars")
@@ -515,7 +538,7 @@ async def chat_with_rag(
             sources=sources,
             no_high_confidence_sources=no_high_confidence_sources,
         )
-        
+
     except Exception as error:
         # Full error stays in the server logs; the client gets a generic message
         # so internal details (stack context, driver/DB errors) aren't leaked.
@@ -526,3 +549,189 @@ async def chat_with_rag(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred, please try again."
         )
+
+
+@router.post("/chat", response_model=RAGChatResponse)
+@limiter.limit(RATE_LIMIT_CHAT, key_func=user_id_key)
+async def chat_with_rag(
+    request: Request,
+    payload: RAGChatRequest,
+    current_user: User = Depends(rate_limit_identify),
+):
+    """
+    Main RAG endpoint with simple JSON response.
+    Returns: { "answer": "...", "sources": [...] }
+    """
+    return await _run_chat_turn(payload, current_user)
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming variant (Phase 2, layer 1) — additive, flag-gated
+# ---------------------------------------------------------------------------
+# Wire format. One event per line-pair, payload always JSON (so a newline inside
+# an answer can never be mistaken for an SSE record separator):
+#
+#   event: start   data: {"status":"thinking"}      once, immediately
+#   event: token   data: {"text":"..."}             one or more; concatenate in order
+#   event: done    data: {"sources":[...],"no_high_confidence_sources":false}
+#   event: error   data: {"detail":"..."}           terminal, replaces `done`
+#
+# `sources` can only be emitted at the END: the final list depends on the
+# finished answer (the refusal guard clears it, and citation narrowing trims it
+# to what the model actually cited). That is a property of the existing pipeline,
+# not of streaming, and it is preserved exactly.
+#
+# Tokens are produced deep inside the turn (llm_service), which cannot `yield`
+# into this generator, so they travel over a queue: the turn task puts text on
+# it, this generator takes text off it and frames it as SSE.
+SSE_HEARTBEAT_SECONDS = 15
+
+
+def _sse(event: str, data: Dict) -> str:
+    """Format one SSE event. ensure_ascii=False keeps γ/φ/° intact."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _sse_chat_turn(payload: RAGChatRequest, current_user: User):
+    """Async generator producing the SSE event stream for one chat turn."""
+    # Flush headers and prove liveness before any slow work starts — this is
+    # what turns a blank 3-minute wait into a connection the client can see.
+    yield _sse("start", {"status": "thinking"})
+
+    tokens: "asyncio.Queue[str]" = asyncio.Queue()
+
+    async def emit(text: str) -> None:
+        await tokens.put(text)
+
+    # The turn runs as its own Task so that a client disconnect can CANCEL it.
+    # Awaiting the coroutine directly would not do this: when the client goes
+    # away Starlette cancels the response task, and an un-owned coroutine would
+    # be left running — Ollama would generate an answer for a browser that is no
+    # longer there, holding the GPU that everyone else is queued behind.
+    turn = asyncio.create_task(_run_chat_turn(payload, current_user, emit=emit))
+    streamed = ""
+    getter: Optional[asyncio.Task] = None
+    try:
+        # Pump: forward tokens as they appear, heartbeat when neither a token
+        # nor the turn has produced anything for a while. SSE comments (": ...")
+        # are ignored by clients but keep every proxy in the chain from calling
+        # the connection idle — the 240s/300s read timeouts only measure the gap
+        # BETWEEN reads, so a byte every 15s means a slow answer can no longer
+        # 504 no matter how long it takes.
+        while True:
+            if getter is None:
+                getter = asyncio.create_task(tokens.get())
+            done, _ = await asyncio.wait(
+                {getter, turn},
+                timeout=SSE_HEARTBEAT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if getter in done:
+                text = getter.result()
+                getter = None
+                streamed += text
+                yield _sse("token", {"text": text})
+                continue
+            if turn in done:
+                break
+            yield ": keep-alive\n\n"
+
+        # The turn is finished but tokens it emitted last may still be queued.
+        while not tokens.empty():
+            text = tokens.get_nowait()
+            streamed += text
+            yield _sse("token", {"text": text})
+
+        result = turn.result()
+
+        # Reconcile. The streamed text IS the answer for a normal generation, but
+        # two paths legitimately produce an answer without streaming it: a Redis
+        # cache hit (returns before any LLM call) and the Groq provider. Emit
+        # whatever the client has not already received so the message on screen
+        # always equals result.answer — the same text that was persisted.
+        if result.answer != streamed:
+            if result.answer.startswith(streamed):
+                yield _sse("token", {"text": result.answer[len(streamed):]})
+            else:
+                # Cannot happen for the paths above; if it ever did, the text on
+                # screen is what the user read — log and leave it alone rather
+                # than appending a contradictory second copy.
+                print(
+                    f"[STREAM] Answer/stream mismatch "
+                    f"(streamed {len(streamed)} chars, final {len(result.answer)}) — "
+                    f"keeping the streamed text"
+                )
+
+        yield _sse(
+            "done",
+            {
+                "sources": result.sources,
+                "no_high_confidence_sources": result.no_high_confidence_sources,
+            },
+        )
+    except HTTPException as http_error:
+        # The status line is long gone (we sent 200 with the first event), so a
+        # failure has to arrive as an event. Same message the JSON endpoint
+        # would have put in its body.
+        yield _sse("error", {"detail": http_error.detail})
+    except asyncio.CancelledError:
+        # Client disconnected. Nothing to send; the finally below stops the work.
+        print("[STREAM] Client disconnected — cancelling in-flight chat turn")
+        raise
+    except Exception as error:
+        print(f"[ERROR] Streaming chat turn failed: {error}")
+        import traceback
+        traceback.print_exc()
+        yield _sse("error", {"detail": "An internal error occurred, please try again."})
+    finally:
+        # Runs on EVERY exit path, including the generator being closed when the
+        # browser goes away. Cancelling propagates into the Ollama call, whose
+        # `finally` closes the HTTP connection, which is what makes Ollama drop
+        # the generation instead of finishing it for nobody.
+        if getter is not None and not getter.done():
+            getter.cancel()
+        if not turn.done():
+            turn.cancel()
+            try:
+                await turn
+            except asyncio.CancelledError:
+                pass
+            except Exception as cleanup_error:
+                print(f"[STREAM] Cancelled turn raised on teardown: {cleanup_error}")
+
+
+@router.post("/chat/stream")
+@limiter.limit(RATE_LIMIT_CHAT, key_func=user_id_key)
+async def chat_with_rag_stream(
+    request: Request,
+    payload: RAGChatRequest,
+    current_user: User = Depends(rate_limit_identify),
+):
+    """
+    SSE variant of POST /chat. Same turn, same answer, same sources — delivered
+    as a stream so the browser can render progress instead of waiting on a blank
+    screen, and so the connection never sits silent long enough to be timed out.
+
+    Self-gating: with STREAMING_ENABLED off this 404s, exactly as if the route
+    did not exist, and POST /chat is untouched.
+    """
+    if not config.STREAMING_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not Found",
+        )
+
+    return StreamingResponse(
+        _sse_chat_turn(payload, current_user),
+        media_type="text/event-stream",
+        headers={
+            # nginx buffers proxied responses by default, which would hold the
+            # whole stream back and defeat the entire feature. nginx honours this
+            # header, so no nginx config change is needed.
+            "X-Accel-Buffering": "no",
+            # no-transform additionally tells intermediaries not to re-chunk or
+            # compress the stream.
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+        },
+    )

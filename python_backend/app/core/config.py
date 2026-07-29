@@ -99,6 +99,21 @@ ROUTER_ENABLED = os.getenv("ROUTER_ENABLED", "false").strip().lower() in (
     "on",
 )
 
+# ---------------------------------------------------------------------------
+# Response streaming (Phase 2) feature flag
+# ---------------------------------------------------------------------------
+# Master switch for POST /chat/stream, the SSE variant of the chat turn. Default
+# OFF: with the flag off the endpoint 404s and NOTHING about POST /chat changes —
+# it remains the only chat path, byte-identical to before. Read at call time (via
+# the config module, e.g. config.STREAMING_ENABLED) so it can be toggled in tests
+# without re-import. Accepts 1/true/yes/on (case-insensitive).
+STREAMING_ENABLED = os.getenv("STREAMING_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:

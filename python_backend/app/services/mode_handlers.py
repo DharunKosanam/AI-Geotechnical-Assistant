@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from app.services.intent_router import GENERAL
-from app.services.llm_service import generate_answer_with_groq
+from app.services.llm_service import TokenEmitter, generate_answer_with_groq
 from app.services.prompt_config import THREAD_DOC_FALLBACK_PROMPT
 
 
@@ -37,6 +37,8 @@ class ModeResult:
 async def handle_general(
     query: str,
     history: Optional[List[Dict[str, str]]] = None,
+    *,
+    emit: Optional[TokenEmitter] = None,
 ) -> ModeResult:
     """Answer a GENERAL message from the model's own knowledge.
 
@@ -45,12 +47,16 @@ async def handle_general(
     empty. This is the whole point of the mode -- general questions, concept
     explanations, writing help, and conversation must not carry document
     citations they were never grounded in.
+
+    ``emit`` is passed straight through to the LLM call: GENERAL is a very common
+    mode (and the retrieval-confidence fallback), so it must stream too.
     """
     answer = await generate_answer_with_groq(
         query=query,
         context="",  # no documents in GENERAL mode
         history=history,
         mode=GENERAL,
+        emit=emit,
     )
     return ModeResult(answer=answer, sources=[], no_high_confidence_sources=False)
 
@@ -58,6 +64,8 @@ async def handle_general(
 async def handle_thread_doc_fallback(
     query: str,
     history: Optional[List[Dict[str, str]]] = None,
+    *,
+    emit: Optional[TokenEmitter] = None,
 ) -> ModeResult:
     """THREAD_DOC confidence fallback: the thread HAS an uploaded document but no
     chunk cleared the reranker threshold for this question.
@@ -74,5 +82,6 @@ async def handle_thread_doc_fallback(
         history=history,
         mode=GENERAL,  # -> GENERAL's no-context assembly (no "[No documents]" line)
         system_prompt=THREAD_DOC_FALLBACK_PROMPT,
+        emit=emit,
     )
     return ModeResult(answer=answer, sources=[], no_high_confidence_sources=False)

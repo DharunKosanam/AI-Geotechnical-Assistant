@@ -231,6 +231,12 @@ THREAD_RERANK_SCORE_THRESHOLD = float(os.getenv("THREAD_RERANK_SCORE_THRESHOLD",
 # THREAD_DOC_MIN_CANDIDATES_PER_DOC: each document's top-N cosine chunks are
 # reserved in the COMBINED_SEARCH_LIMIT candidate set before the remaining
 # slots fill by global score order, so the reranker always SEES every document.
+# Known tuning consideration: at the default of 5, FIVE documents saturate the
+# 25-slot COMBINED_SEARCH_LIMIT (5 docs x 5 reserved = 25), at which point
+# global score order no longer contributes any slots and the round-robin
+# reservation alone decides the candidate set; beyond five documents each doc's
+# reserved share shrinks below 5. Revisit this default (or raise
+# COMBINED_SEARCH_LIMIT) if threads routinely hold more than four documents.
 THREAD_DOC_MIN_CANDIDATES_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CANDIDATES_PER_DOC", "5"))
 # THREAD_DOC_MIN_CHUNKS_PER_DOC: each document with at least one chunk clearing
 # the threshold holds this many slots in the final RERANK_TOP_K context; the

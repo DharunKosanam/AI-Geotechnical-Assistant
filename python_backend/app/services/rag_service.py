@@ -1195,8 +1195,28 @@ async def query_thread_documents(
     thread_id: str,
     user_id: Optional[str] = None,
     top_k: int = RERANK_TOP_K,
+    scope_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Retrieve ONLY the current thread's uploaded document chunks.
+
+    ``scope_out``, when a caller passes a dict, is filled with the retrieval
+    scope as STRUCTURED FACT (Phase 4) so the response can state honestly which
+    documents were searched and which ground the answer -- derived from the
+    actual retrieval result, never from the model's own account:
+
+      searched    -- sorted filenames of every document whose chunks were
+                     scored (the whole thread corpus)
+      grounded    -- filenames contributing to the returned context, best
+                     first (empty when only low-confidence fallback context
+                     was returned)
+      no_relevant -- searched documents with NO chunk at or above the rerank
+                     threshold: searched and legitimately empty, by design
+      excluded    -- documents that HAD passing chunks but received no context
+                     slot (more passing documents than slots)
+
+    Filled only on the router-on reranker path (the only path the THREAD_DOC
+    mode uses); other paths leave everything but ``searched`` absent, and
+    consumers treat that as "no scope statement".
 
     Isolation: candidates come from a plain Mongo ``find`` scoped by
     _thread_scope_filter, so KB chunks, plain user_upload chunks and other
@@ -1228,7 +1248,12 @@ async def query_thread_documents(
 
     if not docs:
         print(f"[THREAD] No documents found for thread {thread_id}")
+        if scope_out is not None:
+            scope_out["searched"] = []
         return []
+
+    if scope_out is not None:
+        scope_out["searched"] = sorted({d.get("filename", "unknown") for d in docs})
 
     print(f"[THREAD] Scoring {len(docs)} chunk(s) for thread {thread_id}")
     model = get_embedding_model()
@@ -1289,6 +1314,26 @@ async def query_thread_documents(
                     threshold=THREAD_RERANK_SCORE_THRESHOLD,
                 )
                 _log_thread_doc_mix("final context", kept, "rerank_score")
+                if scope_out is not None:
+                    # Structured retrieval scope (Phase 4) from the SAME data
+                    # the quota ran on. `grounded` preserves kept order (best
+                    # first); low-confidence fallback context grounds nothing.
+                    passing_docs = {
+                        c["filename"] for c in candidates
+                        if c.get("rerank_score", 0.0) >= THREAD_RERANK_SCORE_THRESHOLD
+                    }
+                    grounded: List[str] = []
+                    for c in kept:
+                        if not c.get("low_confidence") and c["filename"] not in grounded:
+                            grounded.append(c["filename"])
+                    scope_out["grounded"] = grounded
+                    scope_out["no_relevant"] = [
+                        fn for fn in scope_out.get("searched", [])
+                        if fn not in passing_docs
+                    ]
+                    scope_out["excluded"] = [
+                        fn for fn in sorted(passing_docs) if fn not in grounded
+                    ]
             else:
                 kept, _no_high_conf = _apply_rerank_threshold(
                     candidates, threshold=THREAD_RERANK_SCORE_THRESHOLD

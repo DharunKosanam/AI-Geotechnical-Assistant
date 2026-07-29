@@ -135,6 +135,54 @@ async def _serve_cached_response(
     )
 
 
+def _join_names(names: List[str]) -> str:
+    """'a.pdf' / 'a.pdf and b.pdf' / 'a.pdf, b.pdf and c.pdf' (plain ASCII)."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _thread_scope_note(scope: Dict) -> str:
+    """Deterministic retrieval-scope statement for a multi-document THREAD_DOC
+    answer (Phase 4). Assembled from query_thread_documents' scope_out --
+    structured fact from the actual retrieval -- and appended to the answer
+    server-side, so the model cannot invent, omit, or contradict which files
+    were searched. Returns "" for single-document threads (no scope preamble,
+    today's behavior) and whenever the scope is not fully known.
+    """
+    searched = scope.get("searched") or []
+    if len(searched) < 2 or "grounded" not in scope:
+        return ""
+    grounded = scope.get("grounded") or []
+    no_relevant = [fn for fn in (scope.get("no_relevant") or []) if fn not in grounded]
+    excluded = [
+        fn for fn in (scope.get("excluded") or [])
+        if fn not in grounded and fn not in no_relevant
+    ]
+
+    parts = [f"Searched {len(searched)} attached documents: {_join_names(searched)}."]
+    if grounded:
+        parts.append(f"This answer is grounded in {_join_names(grounded)}.")
+        if no_relevant:
+            # Searched-and-empty is the CORRECT outcome for a document with
+            # nothing above the rerank threshold -- name it, don't omit it.
+            parts.append(
+                f"No content relevant to this question was found above the "
+                f"confidence threshold in {_join_names(no_relevant)}."
+            )
+    else:
+        parts.append(
+            "No content relevant to this question was found above the "
+            "confidence threshold in any of them."
+        )
+    if excluded:
+        parts.append(
+            f"Relevant content in {_join_names(excluded)} did not fit in the "
+            f"context for this answer."
+        )
+    return "_" + " ".join(parts) + "_"
+
+
 async def _run_chat_turn(
     payload: RAGChatRequest,
     current_user: User,
@@ -325,6 +373,12 @@ async def _run_chat_turn(
             # query. KB chunks and the user's uploads compete in one combined search
             # ranked purely by relevance (no upload prioritization), then reranking
             # returns the top survivors. For a summary request we skip retrieval.
+            # Retrieval scope for THREAD_DOC (Phase 4): filled by
+            # query_thread_documents with which documents were searched /
+            # grounded the context / were searched-but-empty. Stays empty for
+            # every other mode and for skipped retrieval, which disables the
+            # scope statement below.
+            thread_scope: Dict = {}
             if skip_retrieval:
                 chunks = []
                 print("[SEARCH] Retrieval skipped for summary request - relying on conversation history")
@@ -333,7 +387,8 @@ async def _run_chat_turn(
                 # never the shared index or another thread (isolation enforced in
                 # query_thread_documents' DB filter).
                 chunks = await query_thread_documents(
-                    retrieval_query, thread_id, current_user.id
+                    retrieval_query, thread_id, current_user.id,
+                    scope_out=thread_scope,
                 )
                 print(f"[SEARCH] Retrieved {len(chunks)} thread-document chunks")
             else:
@@ -350,6 +405,18 @@ async def _run_chat_turn(
                     f"[Source: {get_clean_title(chunk['filename'])['title']}]\n{chunk['text']}"
                     for chunk in chunks
                 ])
+                # Phase 4: for a multi-document THREAD_DOC turn, hand the model
+                # the retrieval scope as structured fact so it can attribute
+                # correctly and never imply an absent document was read. The
+                # user-facing scope statement is appended deterministically
+                # below regardless of what the model does with this.
+                if mode == THREAD_DOC and len(thread_scope.get("searched", [])) > 1:
+                    scope_lines = (
+                        f"[ATTACHED DOCUMENTS: {', '.join(thread_scope['searched'])}]\n"
+                        f"[CONTEXT DRAWN FROM: "
+                        f"{', '.join(thread_scope.get('grounded') or []) or 'none above the confidence threshold'}]"
+                    )
+                    context = f"{scope_lines}\n\n{context}"
                 # When every retrieved chunk is below the reranker threshold they are
                 # tagged low_confidence (see rag_service._apply_rerank_threshold):
                 # the LLM still gets them as context, but we display NO sources.
@@ -486,6 +553,20 @@ async def _run_chat_turn(
                         get_clean_title(c["filename"])["title"] for c in cited_chunks
                     }
                     sources = [s for s in sources if s["title"] in cited_titles]
+
+            # Phase 4: multi-document THREAD_DOC turns state their retrieval
+            # scope -- which attached documents were searched, which ground the
+            # answer, and which were searched but held nothing above the
+            # threshold. Appended deterministically from the retrieval facts
+            # (never the model's account), BEFORE persistence and the cache
+            # write so the user, the thread history, and the cache all carry
+            # the same text. Single-document threads get no note ("" from the
+            # builder) and read exactly as before; the note covers both the
+            # grounded branch and the THREAD_DOC confidence fallback above.
+            if mode == THREAD_DOC:
+                scope_note = _thread_scope_note(thread_scope)
+                if scope_note:
+                    clean_answer = f"{clean_answer}\n\n{scope_note}"
 
         print(f"    Final answer to return ({len(clean_answer)} chars)")
         

@@ -259,3 +259,118 @@ async def classify(
         raw,
     )
     return mode
+
+
+# --- THREAD_DOC granularity: document-level vs content-level -----------------
+# A THREAD_DOC message is either about the document AS A WHOLE (summarize,
+# what is this, main findings, overview) or about SPECIFIC CONTENT within it.
+# The distinction matters because relevance ranking is meaningless for
+# document-level requests: a "summarize this" query shares no content terms
+# with any chunk, the cross-encoder scores every chunk at its floor, and the
+# turn falls through to the low-confidence fallback (measured on the incident
+# document: all 6 chunks between -11.23 and -11.47 against the -11.0
+# threshold). Document-level requests skip ranking and read a structured
+# sample instead. Classified by the same LLM as the mode router -- keyword
+# lists are what the router replaced.
+DOC_LEVEL = "DOC_LEVEL"
+CONTENT = "CONTENT"
+_VALID_SCOPES = frozenset({DOC_LEVEL, CONTENT})
+
+# Safe fallback: CONTENT reproduces the existing ranked-retrieval behavior, so
+# a classifier failure degrades to today's path rather than mis-sampling.
+DEFAULT_SCOPE = CONTENT
+
+SCOPE_SYSTEM_PROMPT = (
+    "You are an intent classifier for an assistant answering questions about "
+    "a document the user uploaded into this conversation. Read the user's "
+    "LATEST MESSAGE, using the CONVERSATION HISTORY for context, and decide "
+    "whether it is about the document AS A WHOLE or about SPECIFIC CONTENT "
+    'inside it. Return ONLY JSON of the form {"scope": "<SCOPE>"} and '
+    "nothing else.\n\n"
+    "Scopes:\n"
+    "- DOC_LEVEL: the request is about the document as a whole -- summarize "
+    "it, what is this document, what is it about, main findings, key points, "
+    "overview, general impressions, table of contents.\n"
+    "- CONTENT: the request is about specific information, terms, values, "
+    "sections, or claims within the document -- anything answerable by "
+    "finding particular passages.\n\n"
+    "Rules:\n"
+    '1. Output ONLY {"scope": "<SCOPE>"} using DOC_LEVEL or CONTENT. No '
+    "prose, no explanation, no extra keys.\n"
+    "2. A short follow-up (\"go on\", \"and the rest?\") inherits the scope "
+    "of the prior turns in the history.\n"
+    "3. When torn, choose CONTENT."
+)
+
+
+def _parse_scope(raw: str) -> Optional[str]:
+    """Extract a valid scope from the model output, else None. Same defensive
+    parse as _parse_mode."""
+    text = _strip_think_tags(raw or "").strip()
+    text = re.sub(r"^```(?:json)?", "", text).strip()
+    text = re.sub(r"```$", "", text).strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        text = match.group(0)
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    scope = data.get("scope")
+    if not isinstance(scope, str):
+        return None
+    scope = scope.strip().upper()
+    return scope if scope in _VALID_SCOPES else None
+
+
+async def classify_thread_doc_scope(
+    message: str,
+    *,
+    history: Optional[List[Dict[str, str]]] = None,
+    client: Optional[Any] = None,
+) -> str:
+    """Classify a THREAD_DOC message as DOC_LEVEL or CONTENT.
+
+    Called only after the main router chose THREAD_DOC (router-on path), so it
+    adds one small LLM call to thread-document turns only. Never raises: any
+    failure returns DEFAULT_SCOPE (CONTENT), which is the existing ranked
+    behavior.
+    """
+    if client is None:
+        client = _default_client()
+
+    user_prompt = (
+        f"CONVERSATION HISTORY:\n{_history_block(history)}\n\n"
+        f"LATEST MESSAGE: {message.strip()}\n\n"
+        'Respond with ONLY {"scope": "<SCOPE>"}.'
+    )
+
+    try:
+        resp = await client.chat(
+            model=config.OLLAMA_MODEL,
+            messages=[
+                {"role": "system", "content": SCOPE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            think=False,
+            format="json",
+            options={
+                "num_ctx": config.OLLAMA_NUM_CTX,
+                "num_predict": 64,
+                "temperature": 0.0,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - unreachable model -> safe default
+        logger.warning(
+            "doc-scope decision: %r -> %s [LLM call FAILED: %s]",
+            message, DEFAULT_SCOPE, exc,
+        )
+        return DEFAULT_SCOPE
+
+    raw = (resp["message"]["content"] or "") if resp else ""
+    parsed = _parse_scope(raw)
+    scope = parsed if parsed is not None else DEFAULT_SCOPE
+    logger.info("doc-scope decision: %r -> %s [raw=%r]", message, scope, raw)
+    return scope

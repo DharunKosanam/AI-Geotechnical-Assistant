@@ -244,6 +244,26 @@ THREAD_DOC_MIN_CANDIDATES_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CANDIDATES_PER
 # context slots, slots fill one per document in best-score order instead.
 THREAD_DOC_MIN_CHUNKS_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CHUNKS_PER_DOC", "1"))
 
+# Context budget for DOCUMENT-LEVEL thread requests (summarize / what is this
+# about). These bypass relevance ranking -- a summary query shares no content
+# terms with any chunk, so the cross-encoder floors every chunk below -11.0 and
+# the turn used to fall through to the "not found in your document" fallback.
+# Instead a structured sample is read: each document's opening chunks plus an
+# even spread across the remainder, split across documents per the Phase 3
+# quota spirit. 8 chunks x ~1200 chars ~= 2.4k tokens, inside the num_ctx
+# headroom alongside the worst-case prompt.
+THREAD_DOC_SAMPLE_CHUNKS = int(os.getenv("THREAD_DOC_SAMPLE_CHUNKS", "8"))
+
+# Ingestion staleness rule (Phase 1). A thread-upload parent doc stuck in
+# status "processing" longer than this is REPORTED as failed with a timeout
+# reason wherever status is read (upload-status endpoint, document inventory,
+# scope note). Background ingestion does not survive a backend restart, so a
+# crash mid-ingest would otherwise leave the doc "processing" forever with no
+# terminal state. Derived at read time -- nothing writes to the doc. The
+# default comfortably exceeds the largest observed ingest (~28s for a 120-page
+# scan) while catching a dead ingestion within minutes.
+INGEST_PENDING_TIMEOUT_SECONDS = int(os.getenv("INGEST_PENDING_TIMEOUT_SECONDS", "600"))
+
 # When every reranked chunk falls below RERANK_SCORE_THRESHOLD we still hand the
 # LLM this many top chunks as low-confidence context (so it can attempt an
 # answer); these are NOT shown as sources.

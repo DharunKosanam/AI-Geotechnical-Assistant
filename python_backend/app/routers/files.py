@@ -24,6 +24,7 @@ from app.services.file_processing import (
     TEXT_FORMATS_LABEL,
 )
 from app.services.rag_service import (
+    effective_ingest_status,
     ingest_document,
     extract_text_from_pdf,
     get_embedding_model,
@@ -92,6 +93,7 @@ def _reject_unreadable_image(filename: Optional[str]) -> None:
 @router.get("/files")
 async def list_files_simple(
     category: Optional[str] = None,
+    threadId: Optional[str] = None,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -99,8 +101,32 @@ async def list_files_simple(
 
     Args:
         category: Optional filter by category ("user_upload" or "knowledge_base")
+        threadId: List THIS conversation's uploaded documents (parent docs
+            only), each with its lifecycle status (pending/ready/failed) and
+            failure reason. Scoped to the caller's own threads.
     """
     try:
+        # Thread-documents listing (Phase 1): parent docs with lifecycle state.
+        if threadId:
+            docs = []
+            async for doc in files_collection.find(
+                {"userId": current_user.id, "threadId": threadId,
+                 "category": "thread_upload", "chunkIndex": {"$exists": False}},
+                {"filename": 1, "chunkCount": 1, "status": 1, "error": 1,
+                 "warning": 1, "createdAt": 1},
+            ).sort("createdAt", 1):
+                life_status, life_reason = effective_ingest_status(doc)
+                docs.append({
+                    "id": str(doc.get("_id")),
+                    "filename": doc.get("filename", "Unknown"),
+                    "status": life_status,
+                    "error": life_reason,
+                    "warning": doc.get("warning"),
+                    "chunkCount": doc.get("chunkCount", 0),
+                    "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None,
+                })
+            return {"files": docs}
+
         # knowledge_base is shared across all users (never userId-scoped);
         # everything else is the caller's own data.
         if category == "knowledge_base":
@@ -418,7 +444,7 @@ async def upload_status(
 
         doc = await files_collection.find_one(
             query,
-            {"status": 1, "error": 1, "warning": 1},
+            {"status": 1, "error": 1, "warning": 1, "createdAt": 1},
             sort=[("createdAt", -1)],
         )
 
@@ -426,9 +452,14 @@ async def upload_status(
             # Upload row not visible yet (race right after POST) — treat as processing.
             return {"filename": filename, "status": "processing", "stage": "processing"}
 
-        raw_status = doc.get("status", "processing")
+        # Lifecycle derivation (Phase 1) -- shared with the chat path's document
+        # inventory. Applies the staleness rule: a doc "processing" past
+        # INGEST_PENDING_TIMEOUT_SECONDS reports failed with a timeout reason,
+        # so a backend restart mid-ingest can't leave the chip spinning on a
+        # doc that will never finish.
+        life_status, life_reason = effective_ingest_status(doc)
 
-        if raw_status == "processed":
+        if life_status == "ready":
             payload = {"filename": filename, "status": "ready", "stage": "done"}
             # Indexed, but part of the document was unreadable — surfaced next to
             # the success state, not as a failure.
@@ -436,12 +467,12 @@ async def upload_status(
                 payload["warning"] = doc["warning"]
             return payload
 
-        if raw_status == "failed":
+        if life_status == "failed":
             return {
                 "filename": filename,
                 "status": "error",
                 "stage": "error",
-                "error": doc.get("error") or "Ingestion failed",
+                "error": life_reason or "Ingestion failed",
             }
 
         # Still working. The background task doesn't expose fine-grained stages

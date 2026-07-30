@@ -87,6 +87,11 @@ const formatSourcesBlock = (sources: any[]): string => {
   sources.forEach((source: any, index: number) => {
     if (typeof source === "object" && source !== null && source.title && source.url) {
       block += `${index + 1}. [${source.title}](${source.url})\n`;
+    } else if (typeof source === "object" && source !== null && source.title) {
+      // No URL by design: thread/user uploads are the user's own files, so
+      // their citations are plain references — no external link to leak the
+      // title to.
+      block += `${index + 1}. ${source.title}\n`;
     } else if (typeof source === "string") {
       try {
         const parsed = JSON.parse(source);
@@ -662,23 +667,8 @@ const Chat = ({
         let text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
         if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          text += "\n\n**Sources:**\n";
-          sources.forEach((source: any, index: number) => {
-            if (typeof source === "object" && source !== null && source.title && source.url) {
-              text += `${index + 1}. [${source.title}](${source.url})\n`;
-            } else if (typeof source === "string") {
-              try {
-                const parsed = JSON.parse(source);
-                if (parsed.title && parsed.url) {
-                  text += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-                } else {
-                  text += `${index + 1}. ${source}\n`;
-                }
-              } catch {
-                text += `${index + 1}. ${source}\n`;
-              }
-            }
-          });
+          // Shared renderer: handles link-less (private upload) citations too.
+          text += formatSourcesBlock(sources);
         }
         return {
           role: msg.role,
@@ -1147,7 +1137,7 @@ const Chat = ({
         e.preventDefault(); // Prevent newline
         
         // Don't submit if already processing, uploading, or input is empty
-        if (inputDisabled || isUploading || !userInput.trim()) {
+        if (inputDisabled || !userInput.trim()) {
           return;
         }
         
@@ -1223,7 +1213,7 @@ const Chat = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userInput.trim() || inputDisabled || isUploading) return;
+    if (!userInput.trim() || inputDisabled) return;
 
     const messageText = userInput;
     setUserInput("");
@@ -1499,23 +1489,8 @@ const Chat = ({
         let text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
         if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          text += "\n\n**Sources:**\n";
-          sources.forEach((source: any, index: number) => {
-            if (typeof source === "object" && source !== null && source.title && source.url) {
-              text += `${index + 1}. [${source.title}](${source.url})\n`;
-            } else if (typeof source === "string") {
-              try {
-                const parsed = JSON.parse(source);
-                if (parsed.title && parsed.url) {
-                  text += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-                } else {
-                  text += `${index + 1}. ${source}\n`;
-                }
-              } catch {
-                text += `${index + 1}. ${source}\n`;
-              }
-            }
-          });
+          // Shared renderer: handles link-less (private upload) citations too.
+          text += formatSourcesBlock(sources);
         }
         return {
           role: msg.role,
@@ -1523,7 +1498,7 @@ const Chat = ({
           annotations: msg.content?.[0]?.text?.annotations || []
         };
       });
-      
+
       console.log(`[LOAD] Parsed ${newMessages.length} messages for thread: ${targetThreadId}`);
       
       if (isInitialLoad) {
@@ -2075,7 +2050,7 @@ const Chat = ({
           )}
           {isUploading && (
             <div className={styles.attachmentNotice}>
-              Reading your file — you can ask about it as soon as it&apos;s ready.
+              Reading your file — you can keep chatting; until it&apos;s ready, answers will note it hasn&apos;t been searched yet.
             </div>
           )}
           <div className={styles.inputRow}>
@@ -2106,8 +2081,8 @@ const Chat = ({
             <button
               type="submit"
               className={styles.button}
-              disabled={inputDisabled || isUploading}
-              title={isUploading ? "Waiting for files to finish uploading..." : undefined}
+              disabled={inputDisabled}
+              title={isUploading ? "A document is still processing - you can ask now; the answer will say it was not searched yet." : undefined}
             >
               Send
             </button>

@@ -88,6 +88,7 @@ _KB_CHUNK = {
     "filename": "StrengthanddilatancyofsandsBolton1986discussion1987.pdf",
     "text": "Sand dilatancy relates peak friction angle to relative density.",
     "metadata": {"fileType": ".pdf"},
+    "category": "knowledge_base",
     "low_confidence": False,
 }
 _KB_CHUNK2 = {
@@ -100,6 +101,7 @@ _THREAD_CHUNK = {
     "filename": "uploaded_report.pdf",
     "text": "Findings from the report the user uploaded into this thread.",
     "metadata": {"fileType": ".pdf"},
+    "category": "thread_upload",
     "low_confidence": False,
 }
 
@@ -135,12 +137,16 @@ async def chat_env(monkeypatch):
     )
     # (has_attachments, document-set fingerprint) -- Phase 2 replaced the
     # bare thread_has_documents call with the combined inventory.
-    thread_inventory_mock = AsyncMock(return_value=(False, ""))
+    thread_inventory_mock = AsyncMock(return_value=(False, "", []))
     thread_retrieve_mock = AsyncMock(return_value=[dict(_THREAD_CHUNK)])
+    thread_sample_mock = AsyncMock(return_value=[dict(_THREAD_CHUNK)])
+    doc_scope_mock = AsyncMock(return_value="CONTENT")
     monkeypatch.setattr(chat_mod, "classify", classify_mock)
     monkeypatch.setattr(chat_mod, "rewrite_query_with_history", rewrite_mock)
     monkeypatch.setattr(chat_mod, "query_vector_store", retrieve_mock)
     monkeypatch.setattr(chat_mod, "query_thread_documents", thread_retrieve_mock)
+    monkeypatch.setattr(chat_mod, "sample_thread_documents", thread_sample_mock)
+    monkeypatch.setattr(chat_mod, "classify_thread_doc_scope", doc_scope_mock)
     monkeypatch.setattr(chat_mod, "thread_document_inventory", thread_inventory_mock)
     monkeypatch.setattr(chat_mod, "generate_answer_with_groq", generate_mock)
     monkeypatch.setattr(chat_mod, "handle_general", general_mock)
@@ -158,6 +164,8 @@ async def chat_env(monkeypatch):
             thread_fallback=thread_fallback_mock,
             thread_inventory=thread_inventory_mock,
             thread_retrieve=thread_retrieve_mock,
+            thread_sample=thread_sample_mock,
+            doc_scope=doc_scope_mock,
             redis=fake_redis,
         )
 
@@ -453,7 +461,7 @@ async def test_mixed_cache_key_scoped_to_mixed(chat_env, monkeypatch):
 async def test_thread_attachments_fed_to_router(chat_env, monkeypatch):
     # The router is told whether the current thread has uploaded documents.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
     chat_env.classify.return_value = chat_mod.KB_QUERY
     await _post(chat_env.client)
     assert chat_env.classify.await_args.kwargs["thread_has_attachments"] is True
@@ -462,7 +470,7 @@ async def test_thread_attachments_fed_to_router(chat_env, monkeypatch):
 @pytest.mark.asyncio
 async def test_thread_doc_uses_thread_scoped_retrieval_with_citations(chat_env, monkeypatch):
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     resp = await _post(chat_env.client)
     assert resp.status_code == 200
@@ -478,7 +486,7 @@ async def test_thread_doc_no_high_confidence_uses_thread_aware_fallback(chat_env
     # Thread HAS an upload but no chunk clears the threshold -> the THREAD-AWARE
     # fallback (not plain GENERAL), so the answer acknowledges the document.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     chat_env.thread_retrieve.return_value = [dict(_LOW_CONF_CHUNK)]
     resp = await _post(chat_env.client)
@@ -496,7 +504,7 @@ async def test_thread_doc_empty_retrieval_uses_thread_aware_fallback(chat_env, m
     # Even when thread retrieval returns nothing at all, THREAD_DOC (which only
     # fires when the thread has an upload) uses the thread-aware fallback.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     chat_env.thread_retrieve.return_value = []
     resp = await _post(chat_env.client)
@@ -525,7 +533,7 @@ async def test_thread_doc_retrieval_error_surfaces_as_500(chat_env, monkeypatch)
     # Same error-vs-empty distinction as KB: a thread-retrieval OUTAGE surfaces
     # as an error, never a silent uncited answer.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     chat_env.thread_retrieve.side_effect = RuntimeError("mongo down")
     resp = await _post(chat_env.client)
@@ -538,7 +546,7 @@ async def test_thread_doc_cache_key_includes_thread_id(chat_env, monkeypatch):
     # THREAD_DOC keys MUST carry the thread_id ("t1" from _post) so a
     # deleted-and-recreated thread (new id) can't serve a stale cached answer.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     await _post(chat_env.client)
     assert chat_env.redis.set_keys == [f"{_BASE_KEY}:THREAD_DOC:t1:fp-doc-set-1"]
@@ -549,7 +557,7 @@ async def test_thread_doc_cache_key_includes_thread_id(chat_env, monkeypatch):
 @pytest.mark.asyncio
 async def test_thread_doc_cache_key_differs_across_threads(chat_env, monkeypatch):
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
-    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1")
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
     chat_env.classify.return_value = chat_mod.THREAD_DOC
     await chat_env.client.post("/chat", json={"query": _QUERY, "threadId": "old-thread"})
     await chat_env.client.post("/chat", json={"query": _QUERY, "threadId": "new-thread"})
@@ -558,3 +566,198 @@ async def test_thread_doc_cache_key_differs_across_threads(chat_env, monkeypatch
         f"{_BASE_KEY}:THREAD_DOC:old-thread:fp-doc-set-1",
         f"{_BASE_KEY}:THREAD_DOC:new-thread:fp-doc-set-1",
     ]
+
+
+# --- Phase 1: ingestion status in routing ------------------------------------
+@pytest.mark.asyncio
+async def test_pending_only_thread_routes_thread_doc_and_says_processing(chat_env, monkeypatch):
+    """Req 6 + req 4: a parent doc with ZERO chunks written still reports
+    has-attachments True (the Phase 2 piggyback assumption, tested directly),
+    the query routes THREAD_DOC and not GENERAL, and the answer says the
+    document is still being processed -- deterministically, with no LLM call
+    and no "not found in your document" fallback."""
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.thread_inventory.return_value = (
+        True, "fp-pending",
+        [{"filename": "fresh.pdf", "status": "pending", "reason": None}],
+    )
+    chat_env.classify.return_value = chat_mod.THREAD_DOC
+    chat_env.thread_retrieve.return_value = []   # ingestion still running
+
+    resp = await _post(chat_env.client)
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # has-attachments reached the router as True despite zero chunks
+    assert chat_env.classify.await_args.kwargs["thread_has_attachments"] is True
+    chat_env.general.assert_not_awaited()            # not GENERAL
+    # deterministic status answer: no generation, no thread fallback
+    chat_env.generate.assert_not_awaited()
+    chat_env.thread_fallback.assert_not_awaited()
+    assert "still being processed" in body["answer"]
+    assert "fresh.pdf" in body["answer"]
+    assert body["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_failed_only_thread_reports_reason_not_fallback(chat_env, monkeypatch):
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.thread_inventory.return_value = (
+        True, "fp-failed",
+        [{"filename": "broken.pdf", "status": "failed",
+          "reason": "scanned PDF, no text layer"}],
+    )
+    chat_env.classify.return_value = chat_mod.THREAD_DOC
+    chat_env.thread_retrieve.return_value = []
+
+    resp = await _post(chat_env.client)
+    body = resp.json()
+    chat_env.thread_fallback.assert_not_awaited()
+    assert "could not be processed" in body["answer"]
+    assert "scanned PDF, no text layer" in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_ready_doc_answers_normally_while_pending_named_in_note(chat_env, monkeypatch):
+    """Req 4 second half: a ready document in the same thread still answers
+    normally; the pending one is named in the scope note, not blocking."""
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.thread_inventory.return_value = (
+        True, "fp-mixed",
+        [{"filename": "ready.pdf", "status": "ready", "reason": None},
+         {"filename": "cooking.pdf", "status": "pending", "reason": None}],
+    )
+    chat_env.classify.return_value = chat_mod.THREAD_DOC
+
+    async def retrieve_with_scope(query, thread_id, user_id, scope_out=None, **kw):
+        if scope_out is not None:
+            scope_out["searched"] = ["ready.pdf"]
+            scope_out["grounded"] = ["ready.pdf"]
+            scope_out["no_relevant"] = []
+            scope_out["excluded"] = []
+        return [dict(_THREAD_CHUNK)]
+
+    chat_env.thread_retrieve.side_effect = retrieve_with_scope
+    resp = await _post(chat_env.client)
+    body = resp.json()
+
+    chat_env.generate.assert_awaited_once()          # normal generation ran
+    assert "A KB-grounded answer about dilatancy." in body["answer"]
+    assert "Searched 1 of 2 attached documents: ready.pdf." in body["answer"]
+    assert "cooking.pdf is still being processed and was not searched." in body["answer"]
+
+
+# --- Issue A: no external link on private-upload citations -------------------
+@pytest.mark.asyncio
+async def test_thread_upload_citation_has_no_external_link(chat_env, monkeypatch):
+    """A thread-uploaded file is the user's own (possibly private) document.
+    Its citation must be a plain reference: no Google Scholar URL built from
+    the title, nowhere in the response."""
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
+    chat_env.classify.return_value = chat_mod.THREAD_DOC
+    resp = await _post(chat_env.client)
+    body = resp.json()
+    assert len(body["sources"]) == 1
+    src = body["sources"][0]
+    assert src["url"] is None
+    assert "scholar.google" not in str(body)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_citation_keeps_scholar_link(chat_env, monkeypatch):
+    """KB citations are published literature: the Scholar link is the feature,
+    and its rendering must be unchanged."""
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.classify.return_value = chat_mod.KB_QUERY
+    resp = await _post(chat_env.client)
+    body = resp.json()
+    assert len(body["sources"]) == 1
+    src = body["sources"][0]
+    assert src["url"] is not None and "scholar.google.com/scholar?q=" in src["url"]
+
+
+# --- Issue B: document-level requests sample instead of ranking --------------
+@pytest.mark.asyncio
+async def test_doc_level_request_samples_and_grounds_with_citations(chat_env, monkeypatch):
+    """A summarization-style query must return grounded content with citations
+    via the structured sample -- not the low-confidence fallback, and not the
+    rewrite/ranked path at all."""
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
+    chat_env.classify.return_value = chat_mod.THREAD_DOC
+    chat_env.doc_scope.return_value = "DOC_LEVEL"
+
+    async def sample_with_scope(thread_id, user_id, scope_out=None, **kw):
+        if scope_out is not None:
+            scope_out["searched"] = ["uploaded_report.pdf"]
+            scope_out["grounded"] = ["uploaded_report.pdf"]
+            scope_out["no_relevant"] = []
+            scope_out["excluded"] = []
+            scope_out["sampled"] = [
+                {"filename": "uploaded_report.pdf", "sampled": 8, "total": 78}
+            ]
+        return [dict(_THREAD_CHUNK)]
+
+    chat_env.thread_sample.side_effect = sample_with_scope
+    resp = await _post(chat_env.client)
+    body = resp.json()
+
+    chat_env.thread_sample.assert_awaited_once()      # sampled...
+    chat_env.thread_retrieve.assert_not_awaited()     # ...not ranked
+    chat_env.rewrite.assert_not_awaited()             # no rewrite for doc-level
+    chat_env.thread_fallback.assert_not_awaited()     # no low-conf fallback
+    chat_env.generate.assert_awaited_once()           # real grounded generation
+    assert len(body["sources"]) == 1                  # citation present
+    assert "draws on a sample: 8 of 78 sections from uploaded_report.pdf" in body["answer"]
+    assert "Details outside the sample may not be reflected." in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_doc_level_two_documents_sample_covers_both(chat_env, monkeypatch):
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.thread_inventory.return_value = (True, "fp-two", [])
+    chat_env.classify.return_value = chat_mod.THREAD_DOC
+    chat_env.doc_scope.return_value = "DOC_LEVEL"
+
+    async def sample_with_scope(thread_id, user_id, scope_out=None, **kw):
+        if scope_out is not None:
+            scope_out["searched"] = ["a.pdf", "b.pdf"]
+            scope_out["grounded"] = ["a.pdf", "b.pdf"]
+            scope_out["no_relevant"] = []
+            scope_out["excluded"] = []
+            scope_out["sampled"] = [
+                {"filename": "a.pdf", "sampled": 4, "total": 40},
+                {"filename": "b.pdf", "sampled": 4, "total": 56},
+            ]
+        return [dict(_THREAD_CHUNK)]
+
+    chat_env.thread_sample.side_effect = sample_with_scope
+    resp = await _post(chat_env.client)
+    body = resp.json()
+    assert "4 of 40 sections from a.pdf" in body["answer"]
+    assert "4 of 56 sections from b.pdf" in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_content_request_still_uses_ranked_path(chat_env, monkeypatch):
+    """A term-specific query is unaffected: scope CONTENT -> rewrite + ranked
+    retrieval exactly as before, sampler untouched."""
+    monkeypatch.setattr(config, "ROUTER_ENABLED", True)
+    chat_env.thread_inventory.return_value = (True, "fp-doc-set-1", [])
+    chat_env.classify.return_value = chat_mod.THREAD_DOC
+    chat_env.doc_scope.return_value = "CONTENT"
+    resp = await _post(chat_env.client)
+    assert resp.status_code == 200
+    chat_env.thread_retrieve.assert_awaited_once()
+    chat_env.thread_sample.assert_not_awaited()
+    chat_env.rewrite.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_flag_off_never_calls_doc_scope_classifier(chat_env, monkeypatch):
+    monkeypatch.setattr(config, "ROUTER_ENABLED", False)
+    resp = await _post(chat_env.client)
+    assert resp.status_code == 200
+    chat_env.doc_scope.assert_not_awaited()
+    chat_env.thread_sample.assert_not_awaited()

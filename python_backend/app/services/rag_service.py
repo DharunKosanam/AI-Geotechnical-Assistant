@@ -1046,19 +1046,58 @@ async def thread_has_documents(thread_id: Optional[str], user_id: Optional[str])
     return doc is not None
 
 
+def effective_ingest_status(
+    doc: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> Tuple[str, Optional[str]]:
+    """Derive a parent doc's lifecycle state: ("pending"|"ready"|"failed", reason).
+
+    Storage vocabulary is unchanged ("processing"/"processed"/"failed" -- 35
+    live docs and the deployed status endpoint depend on it); this maps it to
+    the lifecycle semantics, and adds the STALENESS rule: a doc "processing"
+    longer than INGEST_PENDING_TIMEOUT_SECONDS is reported failed with a
+    timeout reason. Derived at read time so read paths stay read-only and the
+    verdict self-corrects everywhere at once (status endpoint, inventory,
+    scope note). A parent with no status field predates the lifecycle and is
+    treated as ready.
+    """
+    raw = doc.get("status")
+    if raw == "failed":
+        return "failed", doc.get("error") or "Ingestion failed"
+    if raw == "processing":
+        created = doc.get("createdAt")
+        now = now or datetime.now()
+        if created is not None and (now - created).total_seconds() > config.INGEST_PENDING_TIMEOUT_SECONDS:
+            return "failed", (
+                f"Ingestion timed out (no result after "
+                f"{config.INGEST_PENDING_TIMEOUT_SECONDS} seconds; the server may "
+                f"have restarted mid-processing). Re-upload the file to retry."
+            )
+        return "pending", None
+    # "processed", or a legacy doc from before the status field existed.
+    return "ready", None
+
+
 async def thread_document_inventory(
     thread_id: Optional[str],
     user_id: Optional[str],
-) -> Tuple[bool, str]:
-    """One query answering BOTH router gating and the THREAD_DOC cache key:
-    (thread_has_attachments, document-set fingerprint).
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """One query answering router gating, the THREAD_DOC cache key, AND the
+    document lifecycle: (thread_has_attachments, fingerprint, doc_states).
 
-    The fingerprint is sha256 over the sorted (filename, chunkCount) pairs of
-    the thread's PARENT file docs, truncated to 12 hex chars. It changes when a
-    document is added, removed, or re-ingested to a different chunk count --
-    which is exactly when a cached THREAD_DOC answer (whose Phase 4 scope note
-    names the document set) goes stale. A bare count would miss an
-    add-plus-delete; a bare timestamp would miss a re-ingest.
+    doc_states is one entry per parent doc: {"filename", "status", "reason"}
+    with status derived by effective_ingest_status -- pending / ready / failed.
+
+    The fingerprint is sha256 over the sorted (filename, chunkCount, status)
+    triples of the thread's PARENT file docs, truncated to 12 hex chars. It
+    changes when a document is added, removed, or re-ingested to a different
+    chunk count -- exactly when a cached THREAD_DOC answer (whose Phase 4
+    scope note names the document set) goes stale. A bare count would miss an
+    add-plus-delete; a bare timestamp would miss a re-ingest. Status joined
+    the triple in Phase 1 so a question answered mid-ingestion ("still being
+    processed") cannot be served after the document becomes ready or failed:
+    chunkCount 0 -> N covers completion, and the status leg covers
+    pending -> failed (where the count stays 0).
 
     Latency: this REPLACES the thread_has_documents find_one at the router call
     site rather than adding a second round trip -- Atlas RTT from this host is
@@ -1066,12 +1105,15 @@ async def thread_document_inventory(
     existence is the same signal thread_has_documents documents ("True as soon
     as an upload is registered, before background chunking finishes"): the
     upload route inserts the parent before scheduling ingestion, and every
-    delete path removes parents and chunks together.
+    delete path removes parents and chunks together. A parent with ZERO chunks
+    written (ingestion still running) therefore still reports has-attachments
+    True -- the router can classify THREAD_DOC and the turn can say "still
+    being processed" instead of pretending the thread is empty.
 
-    Returns (False, "") for a missing thread_id or an empty document set.
+    Returns (False, "", []) for a missing thread_id or an empty document set.
     """
     if not thread_id:
-        return False, ""
+        return False, "", []
     query: Dict[str, Any] = {
         "category": "thread_upload",
         "threadId": thread_id,
@@ -1079,15 +1121,122 @@ async def thread_document_inventory(
     }
     if user_id:
         query["userId"] = user_id
-    pairs: List[Tuple[str, int]] = []
-    async for d in files_collection.find(query, {"filename": 1, "chunkCount": 1}):
-        pairs.append((d.get("filename") or "", int(d.get("chunkCount") or 0)))
-    if not pairs:
-        return False, ""
-    pairs.sort()
-    blob = "|".join(f"{fn}:{n}" for fn, n in pairs)
+    now = datetime.now()
+    triples: List[Tuple[str, int, str]] = []
+    doc_states: List[Dict[str, Any]] = []
+    async for d in files_collection.find(
+        query, {"filename": 1, "chunkCount": 1, "status": 1, "error": 1, "createdAt": 1}
+    ):
+        fn = d.get("filename") or ""
+        status, reason = effective_ingest_status(d, now=now)
+        triples.append((fn, int(d.get("chunkCount") or 0), status))
+        doc_states.append({"filename": fn, "status": status, "reason": reason})
+    if not triples:
+        return False, "", []
+    triples.sort()
+    doc_states.sort(key=lambda s: s["filename"])
+    blob = "|".join(f"{fn}:{n}:{st}" for fn, n, st in triples)
     fingerprint = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
-    return True, fingerprint
+    return True, fingerprint, doc_states
+
+
+async def sample_thread_documents(
+    thread_id: str,
+    user_id: Optional[str] = None,
+    budget: Optional[int] = None,
+    scope_out: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Structured sample of a thread's documents for DOCUMENT-LEVEL requests
+    (summarize / what is this about / main findings).
+
+    No relevance ranking and no rerank threshold: those are relevance
+    decisions, and a document-level request is a SCOPING decision -- the user
+    asked about the whole document, so representative coverage beats topical
+    match (a summary query floors every chunk below the threshold; measured
+    -11.23..-11.47 on the incident document).
+
+    Selection per document: the opening chunk(s), then an even spread across
+    the remainder, in reading order. The budget splits across documents
+    (Phase 3 quota spirit: every ready document contributes; a two-document
+    thread samples from both). Pending/failed documents have no chunks and
+    are reported via the Phase 1 states, unchanged.
+
+    ``scope_out`` gains ``sampled``: per-doc {filename, sampled, total} so the
+    Phase 4 note can state what was SAMPLED rather than implying an exhaustive
+    search. ``searched``/``grounded`` are filled with the sampled documents so
+    downstream source building works unchanged. Chunks return with
+    ``low_confidence`` False (they are deliberate context, not weak matches).
+    """
+    if budget is None:
+        budget = config.THREAD_DOC_SAMPLE_CHUNKS
+    filter_ = _thread_scope_filter(user_id, thread_id)
+    projection = {
+        "text": 1, "filename": 1, "category": 1, "metadata": 1,
+        "chunkingVersion": 1, "pageStart": 1, "sectionHeader": 1,
+        "threadId": 1, "chunkIndex": 1,
+    }
+    by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    async for doc in files_collection.find(filter_, projection):
+        by_doc.setdefault(doc.get("filename", "unknown"), []).append(doc)
+
+    if scope_out is not None:
+        scope_out["searched"] = sorted(by_doc)
+    if not by_doc:
+        print(f"[THREAD] No documents found for thread {thread_id}")
+        return []
+
+    for chunks in by_doc.values():
+        chunks.sort(key=lambda d: d.get("chunkIndex") or 0)
+
+    doc_order = sorted(by_doc)  # deterministic; no scores exist to rank by
+    n_docs = len(doc_order)
+    base_share = max(1, budget // n_docs)
+
+    selected: List[Dict[str, Any]] = []
+    sampled_info: List[Dict[str, Any]] = []
+    for i, fn in enumerate(doc_order):
+        chunks = by_doc[fn]
+        # Distribute the remainder to the first documents so the full budget
+        # is used: e.g. budget 8 over 3 docs -> shares 3/3/2.
+        share = base_share + (1 if i < budget - base_share * n_docs else 0)
+        share = min(share, len(chunks))
+        if share >= len(chunks):
+            take = chunks
+        else:
+            # Opening chunk first, then an even spread over the remainder,
+            # always in reading order.
+            idxs = {0}
+            remaining = len(chunks) - 1
+            step = remaining / (share - 1) if share > 1 else remaining
+            for k in range(1, share):
+                idxs.add(min(len(chunks) - 1, round(k * step)))
+            take = [chunks[j] for j in sorted(idxs)]
+        sampled_info.append({"filename": fn, "sampled": len(take), "total": len(chunks)})
+        for d in take:
+            selected.append({
+                "id": str(d.get("_id")),
+                "text": d.get("text", ""),
+                "filename": fn,
+                "category": d.get("category", "thread_upload"),
+                "metadata": d.get("metadata", {}),
+                "chunkingVersion": d.get("chunkingVersion"),
+                "pageStart": d.get("pageStart"),
+                "sectionHeader": d.get("sectionHeader"),
+                "threadId": d.get("threadId"),
+                "low_confidence": False,
+            })
+
+    if scope_out is not None:
+        scope_out["grounded"] = list(doc_order)
+        scope_out["no_relevant"] = []
+        scope_out["excluded"] = []
+        scope_out["sampled"] = sampled_info
+    print(
+        "[THREAD] document-level sample: "
+        + "; ".join(f"'{s['filename']}' {s['sampled']}/{s['total']}" for s in sampled_info)
+        + f" (budget {budget})"
+    )
+    return selected
 
 
 def _log_thread_doc_mix(stage: str, chunks: List[Dict[str, Any]], score_key: str) -> None:

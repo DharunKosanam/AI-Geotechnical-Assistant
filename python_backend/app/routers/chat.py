@@ -26,12 +26,21 @@ from app.services.rag_service import (
     query_with_context,
     query_vector_store,
     query_thread_documents,
+    sample_thread_documents,
     thread_document_inventory,
     get_clean_title,
 )
 from app.services.citation_filter import filter_sources_by_citations
 from app.services.cache_service import get_redis_client
-from app.services.intent_router import classify, KB_QUERY, GENERAL, MIXED, THREAD_DOC
+from app.services.intent_router import (
+    classify,
+    classify_thread_doc_scope,
+    DOC_LEVEL,
+    KB_QUERY,
+    GENERAL,
+    MIXED,
+    THREAD_DOC,
+)
 from app.services.mode_handlers import handle_general, handle_thread_doc_fallback
 
 router = APIRouter(tags=["chat"])
@@ -175,9 +184,15 @@ def _thread_scope_note(scope: Dict) -> str:
     server-side, so the model cannot invent, omit, or contradict which files
     were searched. Returns "" for single-document threads (no scope preamble,
     today's behavior) and whenever the scope is not fully known.
+
+    Phase 1 adds the non-ready states: a PENDING document is attached but not
+    searched (still being processed), a FAILED document is attached but not
+    searchable (with its stored reason) -- both rendered distinctly from
+    searched-and-empty and from matched-but-not-included, so the note neither
+    undercounts attachments nor implies an unsearched document was searched.
     """
     searched = scope.get("searched") or []
-    if len(searched) < 2 or "grounded" not in scope:
+    if "grounded" not in scope:
         return ""
     grounded = scope.get("grounded") or []
     no_relevant = [fn for fn in (scope.get("no_relevant") or []) if fn not in grounded]
@@ -185,8 +200,56 @@ def _thread_scope_note(scope: Dict) -> str:
         fn for fn in (scope.get("excluded") or [])
         if fn not in grounded and fn not in no_relevant
     ]
+    # Non-ready attachments (Phase 1), from the document inventory. A name
+    # that somehow also has searchable chunks counts as searched.
+    pending = [fn for fn in (scope.get("pending") or []) if fn not in searched]
+    failed = [
+        f for f in (scope.get("failed") or [])
+        if f.get("filename") not in searched
+    ]
 
-    parts = [f"Searched {len(searched)} attached documents: {_join_names(searched)}."]
+    total_attached = len(searched) + len(pending) + len(failed)
+
+    # Issue B: DOCUMENT-LEVEL answers are built from a structured SAMPLE, not
+    # a search -- the note must say so, so a summary of a long document never
+    # implies exhaustive coverage. Partial samples are stated per document;
+    # a fully-read single document needs no caveat (coverage IS complete).
+    sampled = scope.get("sampled")
+    if sampled:
+        fully_read = all(s["sampled"] >= s["total"] for s in sampled)
+        if fully_read and total_attached < 2:
+            return ""
+        if fully_read:
+            parts = [
+                f"This document-level answer draws on all sections of "
+                f"{_join_names([s['filename'] for s in sampled])}."
+            ]
+        else:
+            spans = "; ".join(
+                f"{s['sampled']} of {s['total']} sections from {s['filename']}"
+                for s in sampled
+            )
+            parts = [
+                f"This document-level answer draws on a sample: {spans}. "
+                f"Details outside the sample may not be reflected."
+            ]
+        _append_non_ready(parts, pending, failed)
+        return "_" + " ".join(parts) + "_"
+
+    if total_attached < 2 or not searched:
+        # Fewer than two attachments keeps today's no-note behavior; zero
+        # searchable documents is owned by the deterministic all-non-ready
+        # answer in _run_chat_turn, not by the note.
+        return ""
+
+    if total_attached == len(searched):
+        # All attachments searched: byte-identical to the Phase 4 wording.
+        parts = [f"Searched {len(searched)} attached documents: {_join_names(searched)}."]
+    else:
+        parts = [
+            f"Searched {len(searched)} of {total_attached} attached documents: "
+            f"{_join_names(searched)}."
+        ]
     if grounded:
         parts.append(f"This answer is grounded in {_join_names(grounded)}.")
         if no_relevant:
@@ -208,7 +271,25 @@ def _thread_scope_note(scope: Dict) -> str:
             f"{_join_names(excluded)} matched this question but was not "
             f"included in the context for this answer."
         )
+    _append_non_ready(parts, pending, failed)
     return "_" + " ".join(parts) + "_"
+
+
+def _append_non_ready(parts: List[str], pending: List[str], failed: List[Dict]) -> None:
+    """Phase 1 states, shared by the searched and sampled note variants."""
+    if pending:
+        verb = "is" if len(pending) == 1 else "are"
+        was = "was" if len(pending) == 1 else "were"
+        parts.append(
+            f"{_join_names(pending)} {verb} still being processed and "
+            f"{was} not searched."
+        )
+    for f in failed:
+        reason = f.get("reason") or "Ingestion failed"
+        parts.append(
+            f'"{f.get("filename")}" could not be processed and was not '
+            f"searched ({reason})"
+        )
 
 
 async def _run_chat_turn(
@@ -334,12 +415,13 @@ async def _run_chat_turn(
             # THREAD_DOC is only possible when this thread actually has uploaded
             # documents; the router is told so it can never pick THREAD_DOC
             # otherwise (and the classifier enforces the same invariant).
-            # thread_document_inventory answers has-attachments AND yields the
-            # document-set fingerprint for the cache key from ONE query -- it
-            # replaces the former thread_has_documents call here rather than
+            # thread_document_inventory answers has-attachments, the
+            # document-set fingerprint for the cache key, AND each document's
+            # lifecycle state (pending/ready/failed, Phase 1) from ONE query --
+            # it replaces the former thread_has_documents call here rather than
             # adding a second ~70ms Atlas round trip to the read path (Phase 2).
-            thread_has_attachments, thread_doc_fp = await thread_document_inventory(
-                thread_id, current_user.id
+            thread_has_attachments, thread_doc_fp, thread_doc_states = (
+                await thread_document_inventory(thread_id, current_user.id)
             )
             mode = await classify(
                 payload.query,
@@ -364,6 +446,9 @@ async def _run_chat_turn(
                     return cached_response
         else:
             mode = KB_QUERY
+            # Defensive: THREAD_DOC (the only consumer) is unreachable with the
+            # router off, but keep the name bound on every path.
+            thread_doc_states: List[Dict] = []
 
         if mode == GENERAL:
             # GENERAL: no rewrite, no retrieval, no citations. Answer straight
@@ -386,17 +471,38 @@ async def _run_chat_turn(
             # message (no history) returns unchanged with no LLM call, while a
             # non-English first message is still translated. A "NONE" result means a
             # summary request — skip retrieval and answer from history alone.
+            # Issue B: THREAD_DOC granularity. A DOCUMENT-LEVEL request
+            # (summarize / what is this about / main findings) is classified
+            # by the same LLM router pattern as the mode -- keyword lists are
+            # what the router replaced. For DOC_LEVEL there is nothing to
+            # retrieve BY RELEVANCE (the query has no content terms; every
+            # chunk floors below the rerank threshold), so the rewrite and the
+            # ranked search are skipped entirely and a structured sample of
+            # the document(s) is read instead. Router-on only by construction
+            # (mode can only be THREAD_DOC when ROUTER_ENABLED).
+            doc_level = False
+            if mode == THREAD_DOC:
+                doc_level = (
+                    await classify_thread_doc_scope(
+                        payload.query, history=conversation_history
+                    )
+                    == DOC_LEVEL
+                )
+                if doc_level:
+                    print("[ROUTER] THREAD_DOC scope: DOC_LEVEL - sampling, not ranking")
+
             retrieval_query = payload.query
             skip_retrieval = False
-            rewritten = await rewrite_query_with_history(payload.query, conversation_history)
-            if rewritten == "NONE":
-                skip_retrieval = True
-                safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> SKIPPED (no retrieval)')
-            elif rewritten and rewritten != payload.query:
-                retrieval_query = rewritten
-                safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> Rewritten: "{retrieval_query}"')
-            else:
-                safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> unchanged')
+            if not doc_level:
+                rewritten = await rewrite_query_with_history(payload.query, conversation_history)
+                if rewritten == "NONE":
+                    skip_retrieval = True
+                    safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> SKIPPED (no retrieval)')
+                elif rewritten and rewritten != payload.query:
+                    retrieval_query = rewritten
+                    safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> Rewritten: "{retrieval_query}"')
+                else:
+                    safe_print(f'[QUERY_REWRITE] Original: "{payload.query}" -> unchanged')
 
             # Step 2: Query vector store using the (possibly rewritten) standalone
             # query. KB chunks and the user's uploads compete in one combined search
@@ -414,12 +520,31 @@ async def _run_chat_turn(
             elif mode == THREAD_DOC:
                 # Thread-scoped retrieval: ONLY this thread's uploaded documents,
                 # never the shared index or another thread (isolation enforced in
-                # query_thread_documents' DB filter).
-                chunks = await query_thread_documents(
-                    retrieval_query, thread_id, current_user.id,
-                    scope_out=thread_scope,
-                )
-                print(f"[SEARCH] Retrieved {len(chunks)} thread-document chunks")
+                # the shared _thread_scope_filter). DOC_LEVEL requests read a
+                # structured sample (no ranking, no threshold -- a scoping
+                # decision, not a relevance one); CONTENT requests take the
+                # ranked path exactly as before.
+                if doc_level:
+                    chunks = await sample_thread_documents(
+                        thread_id, current_user.id, scope_out=thread_scope,
+                    )
+                    print(f"[SEARCH] Sampled {len(chunks)} thread-document chunks (doc-level)")
+                else:
+                    chunks = await query_thread_documents(
+                        retrieval_query, thread_id, current_user.id,
+                        scope_out=thread_scope,
+                    )
+                    print(f"[SEARCH] Retrieved {len(chunks)} thread-document chunks")
+                # Phase 1: fold the document lifecycle into the scope so the
+                # note can name pending/failed attachments -- documents that
+                # were NOT searched, as opposed to searched-and-empty.
+                thread_scope["pending"] = [
+                    s["filename"] for s in thread_doc_states if s["status"] == "pending"
+                ]
+                thread_scope["failed"] = [
+                    {"filename": s["filename"], "reason": s["reason"]}
+                    for s in thread_doc_states if s["status"] == "failed"
+                ]
             else:
                 chunks = await query_vector_store(retrieval_query, top_k=8, user_id=current_user.id)
                 print(f"[SEARCH] Retrieved {len(chunks)} total chunks")
@@ -468,7 +593,14 @@ async def _run_chat_turn(
                         file_type = ("." + fn.rsplit(".", 1)[-1].lower()) if "." in fn else ""
                     sources.append({
                         "title": info["title"],
-                        "url": info["url"],
+                        # The Google Scholar search link is for PUBLISHED
+                        # literature -- the shared knowledge base. A thread or
+                        # user upload is the user's own (possibly private) file;
+                        # generating a public search URL from its title leaks
+                        # the title to an external service the moment the link
+                        # is rendered or clicked. Non-KB citations are plain
+                        # references with no external URL.
+                        "url": info["url"] if chunk.get("category") == "knowledge_base" else None,
                         "filename": chunk.get("filename"),
                         "fileType": file_type,
                         # Phase 7: provenance surfaced with the citation. Present on
@@ -505,7 +637,50 @@ async def _run_chat_turn(
                 and not retrieval_had_high_confidence
             )
 
-            if fall_through_to_general:
+            # Phase 1: a THREAD_DOC turn whose thread has NO searchable content
+            # yet -- every attachment pending or failed, zero chunks retrieved
+            # -- must say so instead of the "not found in your document"
+            # fallback, which would imply the documents were searched. The
+            # answer is deterministic (no LLM call): honest, instant, and it
+            # cannot hallucinate document contents. Ready documents, when
+            # present, take the normal paths below and the scope note carries
+            # the pending/failed names instead.
+            thread_not_ready = (
+                mode == THREAD_DOC
+                and not skip_retrieval
+                and not chunks
+                and (thread_scope.get("pending") or thread_scope.get("failed"))
+            )
+
+            if thread_not_ready:
+                lines = []
+                pending_names = thread_scope.get("pending") or []
+                if pending_names:
+                    verb = "is" if len(pending_names) == 1 else "are"
+                    lines.append(
+                        f"Your document {_join_names(pending_names)} {verb} still "
+                        f"being processed and cannot be searched yet. Please ask "
+                        f"again in a moment."
+                    )
+                for f in thread_scope.get("failed") or []:
+                    lines.append(
+                        f'Your document "{f.get("filename")}" could not be '
+                        f"processed: {f.get('reason') or 'Ingestion failed'}"
+                    )
+                clean_answer = "\n\n".join(lines)
+                sources = []
+                no_high_confidence_sources = False
+                print(
+                    f"[ROUTER] THREAD_DOC thread not ready - deterministic status answer "
+                    f"(pending={len(pending_names)}, failed={len(thread_scope.get('failed') or [])})"
+                )
+                if emit is not None:
+                    # Streaming transport: the deterministic answer never passes
+                    # through the LLM emitter, so surface it as one token here;
+                    # the reconciliation tail would deliver it anyway, but this
+                    # keeps the text on screen ahead of the `done` event.
+                    await emit(clean_answer)
+            elif fall_through_to_general:
                 if mode == THREAD_DOC:
                     # The thread HAS an uploaded document (THREAD_DOC only fires
                     # when it does), but nothing cleared the reranker threshold.

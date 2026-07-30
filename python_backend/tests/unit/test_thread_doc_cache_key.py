@@ -57,9 +57,11 @@ class _FakeFiles:
         return _AsyncIter([d for d in self.docs if _matches(d, flt)])
 
 
-def _parent(filename, chunk_count):
-    """A thread-upload PARENT doc (no chunkIndex)."""
-    return {
+def _parent(filename, chunk_count, status=None):
+    """A thread-upload PARENT doc (no chunkIndex). status=None mimics a legacy
+    doc (treated as ready); pass "processing"/"processed"/"failed" for the
+    lifecycle tests."""
+    d = {
         "_id": f"p-{filename}",
         "category": "thread_upload",
         "threadId": TID,
@@ -68,6 +70,9 @@ def _parent(filename, chunk_count):
         "chunkCount": chunk_count,
         "docType": "file",
     }
+    if status is not None:
+        d["status"] = status
+    return d
 
 
 def _chunk(filename, i):
@@ -85,7 +90,7 @@ def _chunk(filename, i):
 async def _fp(monkeypatch, parents, extra=()):
     docs = list(parents) + list(extra)
     monkeypatch.setattr(rag_service, "files_collection", _FakeFiles(docs))
-    has, fp = await rag_service.thread_document_inventory(TID, UID)
+    has, fp, _states = await rag_service.thread_document_inventory(TID, UID)
     return has, fp
 
 
@@ -135,8 +140,8 @@ async def test_chunks_do_not_affect_fingerprint_and_empty_set(monkeypatch):
 
     has, fp = await _fp(monkeypatch, [])
     assert has is False and fp == ""
-    has, fp = await rag_service.thread_document_inventory(None, UID)
-    assert has is False and fp == ""
+    has, fp, states = await rag_service.thread_document_inventory(None, UID)
+    assert has is False and fp == "" and states == []
 
 
 # --- key strings: only THREAD_DOC changes ------------------------------------

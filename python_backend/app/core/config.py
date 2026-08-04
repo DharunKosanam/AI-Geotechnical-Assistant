@@ -321,6 +321,47 @@ OCR_MIN_TEXT_LEN = int(os.getenv("OCR_MIN_TEXT_LEN", "50"))
 PDF_IMAGE_OCR_MIN_DIM = int(os.getenv("PDF_IMAGE_OCR_MIN_DIM", "200"))
 
 # ---------------------------------------------------------------------------
+# Vision extraction for scanned PDF pages (feature flag, default OFF)
+# ---------------------------------------------------------------------------
+# Master switch. When ON, pages that the normal PDF extraction identified as
+# having NO readable text layer are rasterized with PyMuPDF and transcribed by
+# the vision-capable Ollama model (one page per call, background ingest path
+# only). The output is model-generated INTERPRETATION, never verbatim document
+# text: every chunk it produces carries visionDerived=True plus the model name,
+# and that provenance surfaces in citations and the THREAD_DOC scope note.
+# Default OFF so ingestion is byte-identical until deliberately enabled. Read
+# at call time (config.VISION_EXTRACTION_ENABLED) so tests can toggle it.
+VISION_EXTRACTION_ENABLED = os.getenv(
+    "VISION_EXTRACTION_ENABLED", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Vision model. Defaults to the active OLLAMA_MODEL (gemma4:12b already reports
+# the vision capability, so no second model and no extra VRAM); override only
+# to point vision at a different already-pulled model.
+VISION_MODEL = os.getenv("VISION_MODEL", "") or OLLAMA_MODEL
+
+# Rasterization DPI for the page image sent to the vision model. Conservative
+# default: image tokens are expensive against OLLAMA_NUM_CTX, and the CLIP
+# projector downsamples anyway, so higher DPI mostly costs encode time.
+VISION_DPI = int(os.getenv("VISION_DPI", "150"))
+
+# Hard cap on vision-transcribed pages PER DOCUMENT. A 200-page scan must not
+# occupy an ingest worker indefinitely (one page = one full vision call); pages
+# beyond the cap stay unindexed and are reported as such in the chip warning.
+VISION_MAX_PAGES_PER_DOC = int(os.getenv("VISION_MAX_PAGES_PER_DOC", "20"))
+
+# Ceiling for a single per-page vision call (seconds). On expiry the PAGE is
+# recorded as failed and ingest moves on -- one slow page never fails the
+# document.
+VISION_TIMEOUT_SECONDS = float(os.getenv("VISION_TIMEOUT_SECONDS", "120"))
+
+# Longest edge (pixels) for a DIRECTLY UPLOADED image sent to the vision model.
+# Larger photos are downscaled to this before the call -- never rejected for
+# size (the 50 MB upload cap is the only size gate). Latency is generation-
+# bound, not resolution-bound, so this mostly caps decode/transfer cost.
+VISION_IMAGE_MAX_DIM = int(os.getenv("VISION_IMAGE_MAX_DIM", "1600"))
+
+# ---------------------------------------------------------------------------
 # Ingestion concurrency (Phase 0 — off the event loop)
 # ---------------------------------------------------------------------------
 # Document ingestion (extract -> chunk -> embed) is CPU-bound. It used to run on

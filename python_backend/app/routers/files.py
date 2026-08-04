@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional, List
 import io
 from bson import ObjectId
+from app.core import config
 from app.core.config import RATE_LIMIT_UPLOAD, RATE_LIMIT_UPLOAD_HOURLY
 from app.core.database import files_collection
 from app.core.rate_limit import limiter, rate_limit_identify, user_id_key
@@ -22,6 +23,7 @@ from app.services.file_processing import (
     tesseract_available,
     SUPPORTED_EXTENSIONS,
     TEXT_FORMATS_LABEL,
+    VISION_IMAGE_EXTS,
 )
 from app.services.rag_service import (
     effective_ingest_status,
@@ -39,13 +41,29 @@ router = APIRouter(prefix="/api", tags=["files"])
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 # Friendly format list reused in error messages so the UI can echo it back.
-# Images are only genuinely accepted when OCR can actually run, so the list is
-# built from that capability rather than hardcoded — otherwise a rejection
-# message would advertise PNG/JPG on a server that cannot read either.
+# Images are only genuinely accepted when something can actually read them --
+# AI vision (flag on) or OCR -- so the list is built from capability rather
+# than hardcoded; otherwise a rejection message would advertise PNG/JPG on a
+# server that cannot read either.
 def _supported_list_label() -> str:
+    if config.VISION_EXTRACTION_ENABLED:
+        label = f"{TEXT_FORMATS_LABEL}, PNG, JPG, JPEG, WEBP"
+        if tesseract_available():
+            label += ", TIFF"
+        return label
     if tesseract_available():
         return f"{TEXT_FORMATS_LABEL}, PNG, JPG, JPEG, TIFF"
     return TEXT_FORMATS_LABEL
+
+
+def _vision_image_upload_ok(filename: str) -> bool:
+    """True when this upload is a JPEG/PNG/WebP that the vision path will
+    read. Gated on the flag at call time: with vision off, .webp stays
+    unsupported and PNG/JPG keep today's OCR-only handling, byte-identical."""
+    return (
+        config.VISION_EXTRACTION_ENABLED
+        and get_file_type(filename) in VISION_IMAGE_EXTS
+    )
 
 
 def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
@@ -58,7 +76,7 @@ def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing filename",
         )
-    if not is_supported_file(filename):
+    if not is_supported_file(filename) and not _vision_image_upload_ok(filename):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported file type. Supported: {_supported_list_label()}",
@@ -76,10 +94,15 @@ def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
 
 
 def _reject_unreadable_image(filename: Optional[str]) -> None:
-    """An image's text can only be reached by OCR. Where OCR is unavailable,
-    say so NOW rather than accepting the file, spending a background task on it
-    and failing a few seconds later with a vaguer message."""
-    if filename and is_image_file(filename) and not tesseract_available():
+    """An image's content can only be reached by AI vision (flag on) or OCR.
+    Where neither is available, say so NOW rather than accepting the file,
+    spending a background task on it and failing a few seconds later with a
+    vaguer message."""
+    if not filename or not is_image_file(filename):
+        return
+    if _vision_image_upload_ok(filename):
+        return  # vision reads JPEG/PNG (and WebP) without OCR
+    if not tesseract_available():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -88,6 +111,29 @@ def _reject_unreadable_image(filename: Optional[str]) -> None:
                 f"instead ({TEXT_FORMATS_LABEL})."
             ),
         )
+
+
+# Extensions the upload UI offers with vision OFF -- exactly today's static
+# frontend list. Deliberately narrower than SUPPORTED_EXTENSIONS (no TIFF/PNG/
+# JPG): the UI has never offered images, even where OCR could read them, and
+# the flag-off UI must stay byte-identical.
+_UI_TEXT_EXTENSIONS = [".pdf", ".docx", ".xlsx", ".xls", ".csv", ".pptx"]
+_UI_TEXT_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX"
+
+
+@router.get("/upload/config")
+async def upload_config(current_user: User = Depends(get_current_user)):
+    """Capability handshake for the upload UI: which file types to offer in
+    the picker. The frontend cannot probe this per-request the way it probes
+    streaming (the accept filter must be right BEFORE a file is chosen), so it
+    fetches this once and falls back to the text-only list on any failure --
+    making flag-off rendering identical to today either way."""
+    extensions = list(_UI_TEXT_EXTENSIONS)
+    label = _UI_TEXT_LABEL
+    if config.VISION_EXTRACTION_ENABLED:
+        extensions += sorted(VISION_IMAGE_EXTS)
+        label += ", PNG, JPG, WEBP"
+    return {"extensions": extensions, "label": label}
 
 
 @router.get("/files")

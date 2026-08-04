@@ -177,6 +177,59 @@ def _join_names(names: List[str]) -> str:
     return ", ".join(names[:-1]) + " and " + names[-1]
 
 
+def _vision_note_sentence(scope: Dict) -> str:
+    """One sentence naming the vision-derived content an answer draws on --
+    which files and which pages -- so AI-vision output is never presented as
+    verbatim document text. "" when the grounding context holds no
+    vision-derived chunks (scope['vision'] from _vision_scope). Same honesty
+    rule as the rest of the Phase 4 note: assembled from retrieval fact,
+    never the model's account. Plain ASCII.
+
+    Two content classes, worded distinctly:
+      * scanned PDF pages -- a transcription, named per file and page;
+      * directly uploaded images (entry['image']) -- an entirely
+        model-generated DESCRIPTION with no verbatim layer at all, so the
+        note says the answer draws on an AI description of an uploaded
+        image, not on document text.
+    """
+    page_entries = []
+    image_names = []
+    for v in scope.get("vision") or []:
+        if v.get("image"):
+            image_names.append(v.get("filename", "unknown"))
+            continue
+        pages = v.get("pages") or []
+        if pages:
+            word = "page" if len(pages) == 1 else "pages"
+            page_entries.append(f"{v['filename']} {word} {', '.join(str(p) for p in pages)}")
+        else:
+            page_entries.append(v.get("filename", "unknown"))
+    clauses = []
+    if page_entries:
+        clauses.append(
+            f"AI vision transcription of scanned pages ({'; '.join(page_entries)})"
+        )
+    if image_names:
+        noun = "image" if len(image_names) == 1 else "images"
+        clauses.append(
+            f"an AI vision description of the uploaded {noun} {_join_names(image_names)}"
+        )
+    if not clauses:
+        return ""
+    # An image has NO document text behind it; a scanned page at least has a
+    # (verbatim, unreadable) original. Pick the stricter ending when only
+    # images contribute.
+    ending = (
+        "not verbatim document text."
+        if page_entries
+        else "not document text."
+    )
+    return (
+        f"Parts of this answer draw on {' and '.join(clauses)} -- "
+        f"model-generated interpretation, {ending}"
+    )
+
+
 def _thread_scope_note(scope: Dict) -> str:
     """Deterministic retrieval-scope statement for a multi-document THREAD_DOC
     answer (Phase 4). Assembled from query_thread_documents' scope_out --
@@ -194,6 +247,11 @@ def _thread_scope_note(scope: Dict) -> str:
     searched = scope.get("searched") or []
     if "grounded" not in scope:
         return ""
+    # Vision provenance is orthogonal to the multi-document gates below: an
+    # answer drawing on AI-vision content must say so even in a single-document
+    # thread, so every "no note" early-exit downgrades to a vision-only note
+    # when the sentence is non-empty.
+    vision_sentence = _vision_note_sentence(scope)
     grounded = scope.get("grounded") or []
     no_relevant = [fn for fn in (scope.get("no_relevant") or []) if fn not in grounded]
     excluded = [
@@ -218,7 +276,7 @@ def _thread_scope_note(scope: Dict) -> str:
     if sampled:
         fully_read = all(s["sampled"] >= s["total"] for s in sampled)
         if fully_read and total_attached < 2:
-            return ""
+            return f"_{vision_sentence}_" if vision_sentence else ""
         if fully_read:
             parts = [
                 f"This document-level answer draws on all sections of "
@@ -233,14 +291,17 @@ def _thread_scope_note(scope: Dict) -> str:
                 f"This document-level answer draws on a sample: {spans}. "
                 f"Details outside the sample may not be reflected."
             ]
+        if vision_sentence:
+            parts.append(vision_sentence)
         _append_non_ready(parts, pending, failed)
         return "_" + " ".join(parts) + "_"
 
     if total_attached < 2 or not searched:
         # Fewer than two attachments keeps today's no-note behavior; zero
         # searchable documents is owned by the deterministic all-non-ready
-        # answer in _run_chat_turn, not by the note.
-        return ""
+        # answer in _run_chat_turn, not by the note. Vision provenance is the
+        # exception: it must surface even for a single attachment.
+        return f"_{vision_sentence}_" if vision_sentence else ""
 
     if total_attached == len(searched):
         # All attachments searched: byte-identical to the Phase 4 wording.
@@ -271,6 +332,8 @@ def _thread_scope_note(scope: Dict) -> str:
             f"{_join_names(excluded)} matched this question but was not "
             f"included in the context for this answer."
         )
+    if vision_sentence:
+        parts.append(vision_sentence)
     _append_non_ready(parts, pending, failed)
     return "_" + " ".join(parts) + "_"
 
@@ -554,11 +617,28 @@ async def _run_chat_turn(
             if chunks and len(chunks) > 0:
                 # Context includes ALL chunks (high- and low-confidence) so the LLM
                 # always has something to work with. Sources, below, exclude the
-                # low-confidence ones.
-                context = "\n\n".join([
-                    f"[Source: {get_clean_title(chunk['filename'])['title']}]\n{chunk['text']}"
-                    for chunk in chunks
-                ])
+                # low-confidence ones. A vision-derived chunk is labeled as such in
+                # its [Source: ...] line so the answering model can never mistake
+                # AI-vision transcription for verbatim document text; chunks
+                # without the flag render exactly as before.
+                def _context_block(chunk: dict) -> str:
+                    title = get_clean_title(chunk['filename'])['title']
+                    if (chunk.get("metadata") or {}).get("visionDerived"):
+                        page = chunk.get("pageStart")
+                        if page is None:
+                            # Direct image upload: no pages, no verbatim layer.
+                            return (
+                                f"[Source: {title} - AI vision description of an "
+                                f"uploaded image; model-generated, not document "
+                                f"text]\n{chunk['text']}"
+                            )
+                        return (
+                            f"[Source: {title} page {page} - AI vision transcription of "
+                            f"a scanned page; model-generated, not verbatim]\n{chunk['text']}"
+                        )
+                    return f"[Source: {title}]\n{chunk['text']}"
+
+                context = "\n\n".join([_context_block(chunk) for chunk in chunks])
                 # Phase 4: for a multi-document THREAD_DOC turn, hand the model
                 # the retrieval scope as structured fact so it can attribute
                 # correctly and never imply an absent document was read. The
@@ -575,6 +655,19 @@ async def _run_chat_turn(
                 # tagged low_confidence (see rag_service._apply_rerank_threshold):
                 # the LLM still gets them as context, but we display NO sources.
                 no_high_confidence_sources = all(c.get("low_confidence") for c in chunks)
+                # Vision provenance per displayed source: pages of this file whose
+                # contributing chunks are AI-vision transcriptions. Aggregated
+                # across chunks because a file can mix verbatim and vision pages.
+                vision_pages_by_title: dict[str, set] = {}
+                for chunk in chunks:
+                    if chunk.get("low_confidence"):
+                        continue
+                    if (chunk.get("metadata") or {}).get("visionDerived"):
+                        vp = vision_pages_by_title.setdefault(
+                            get_clean_title(chunk["filename"])["title"], set()
+                        )
+                        if chunk.get("pageStart") is not None:
+                            vp.add(chunk["pageStart"])
                 seen_titles: set[str] = set()
                 sources: list[dict] = []
                 for chunk in chunks:
@@ -591,7 +684,7 @@ async def _run_chat_turn(
                     if not file_type:
                         fn = chunk.get("filename", "")
                         file_type = ("." + fn.rsplit(".", 1)[-1].lower()) if "." in fn else ""
-                    sources.append({
+                    source_entry = {
                         "title": info["title"],
                         # The Google Scholar search link is for PUBLISHED
                         # literature -- the shared knowledge base. A thread or
@@ -609,7 +702,16 @@ async def _run_chat_turn(
                         "uploader": chunk.get("uploaderName"),
                         "project": chunk.get("projectTag"),
                         "version": chunk.get("version"),
-                    })
+                    }
+                    # Vision provenance on the citation itself. Added ONLY when
+                    # vision content contributes, so sources for ordinary
+                    # documents are byte-identical to before. Membership (not
+                    # truthiness) because a direct image upload has NO page
+                    # numbers -- its entry is present with an empty page set.
+                    if info["title"] in vision_pages_by_title:
+                        source_entry["visionDerived"] = True
+                        source_entry["visionPages"] = sorted(vision_pages_by_title[info["title"]])
+                    sources.append(source_entry)
                 print(f"   Sources: {', '.join(s['title'] for s in sources)}")
             else:
                 context = ""

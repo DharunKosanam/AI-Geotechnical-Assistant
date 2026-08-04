@@ -120,6 +120,17 @@ export const API_ENDPOINTS = {
     return `/api/files/upload`;
   },
 
+  // Upload capability handshake -- which file types the picker should offer.
+  // Backend-computed so the accept list follows server capability (e.g. images
+  // appear only when vision extraction is enabled there). Fetched once on
+  // mount; the client falls back to its static text-only defaults on failure.
+  uploadConfig: () => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/upload/config`;
+    }
+    return `/api/files/upload/config`;
+  },
+
   // File processing status — polled after upload while the backend ingests
   // (extraction/OCR/chunking/embedding) in a background task. threadId scopes
   // the lookup to the conversation the file was attached to, so the same

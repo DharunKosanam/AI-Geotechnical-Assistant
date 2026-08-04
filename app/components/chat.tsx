@@ -18,19 +18,27 @@ import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config
 import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users } from "lucide-react";
 
 // --- File attachment config ---
-// Text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately NOT offered:
-// their text can only be read by OCR, and this deployment has no tesseract
-// binary, so every image attachment failed after the fact. The backend rejects
-// them up front with the same reasoning (files.py::_validate_upload), and both
-// sides key off OCR availability — restore them here if tesseract is installed.
-const SUPPORTED_EXTENSIONS = [
+// DEFAULTS: text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately
+// NOT offered by default: their text can only be read by OCR, and this
+// deployment has no tesseract binary, so every image attachment failed after
+// the fact. The backend rejects them up front with the same reasoning
+// (files.py::_validate_upload).
+//
+// The live list comes from GET /api/upload/config (fetched on mount): when the
+// backend runs with VISION_EXTRACTION_ENABLED, it adds JPEG/PNG/WebP -- those
+// are read by the AI vision model, not OCR. If that fetch fails (or the flag
+// is off) these defaults render, which is exactly today's UI.
+const DEFAULT_SUPPORTED_EXTENSIONS = [
   ".pdf", ".docx",
   ".xlsx", ".xls", ".csv",
   ".pptx",
 ];
-// accept attribute for the hidden file input (per UI spec)
-const FILE_ACCEPT = ".pdf,.docx,.xlsx,.xls,.csv,.pptx";
-const SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX";
+const DEFAULT_SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX";
+type UploadTypes = { extensions: string[]; label: string };
+const DEFAULT_UPLOAD_TYPES: UploadTypes = {
+  extensions: DEFAULT_SUPPORTED_EXTENSIONS,
+  label: DEFAULT_SUPPORTED_LABEL,
+};
 const MAX_UPLOAD_MB = 50;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024; // must match backend
 
@@ -81,17 +89,31 @@ const httpUploadError = (status: number, filename: string): string => {
 // however it arrived — sources are always appended at the END, because the
 // backend can only finalise the list once the answer is complete (the refusal
 // guard can clear it and citation narrowing trims it to what was actually cited).
+// A citation backed (fully or partly) by AI-vision transcription of scanned
+// pages must say so: that text is model-generated interpretation, never
+// verbatim document content. Empty for ordinary sources.
+const visionMarker = (source: any): string => {
+  if (typeof source !== "object" || source === null || !source.visionDerived) return "";
+  const pages: any[] = Array.isArray(source.visionPages) ? source.visionPages : [];
+  if (pages.length === 0) {
+    // No page numbers = a directly uploaded image: the entire cited content
+    // is a model-generated description, with no verbatim layer at all.
+    return " _(AI vision description of this image - model-generated, not document text)_";
+  }
+  return ` _(AI vision transcription of page${pages.length > 1 ? "s" : ""} ${pages.join(", ")} - not verbatim text)_`;
+};
+
 const formatSourcesBlock = (sources: any[]): string => {
   if (!sources || sources.length === 0) return "";
   let block = "\n\n**Sources:**\n";
   sources.forEach((source: any, index: number) => {
     if (typeof source === "object" && source !== null && source.title && source.url) {
-      block += `${index + 1}. [${source.title}](${source.url})\n`;
+      block += `${index + 1}. [${source.title}](${source.url})${visionMarker(source)}\n`;
     } else if (typeof source === "object" && source !== null && source.title) {
       // No URL by design: thread/user uploads are the user's own files, so
       // their citations are plain references — no external link to leak the
       // title to.
-      block += `${index + 1}. ${source.title}\n`;
+      block += `${index + 1}. ${source.title}${visionMarker(source)}\n`;
     } else if (typeof source === "string") {
       try {
         const parsed = JSON.parse(source);
@@ -114,8 +136,8 @@ const getExt = (filename: string): string => {
   const i = filename.lastIndexOf(".");
   return i >= 0 ? filename.slice(i).toLowerCase() : "";
 };
-const isSupportedFile = (filename: string): boolean =>
-  SUPPORTED_EXTENSIONS.includes(getExt(filename));
+const isSupportedFile = (filename: string, extensions: string[]): boolean =>
+  extensions.includes(getExt(filename));
 
 // One attachment chip in the input area, tracking its upload lifecycle.
 type AttachedFile = {
@@ -544,6 +566,27 @@ const Chat = ({
   // --- File attachment UI state (replaces the removed right-hand file panel) ---
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  // Live upload-type list from the backend (adds JPEG/PNG/WebP when vision
+  // extraction is enabled server-side). Defaults -- today's text-only list --
+  // render until the fetch lands, and stay if it fails.
+  const [uploadTypes, setUploadTypes] = useState<UploadTypes>(DEFAULT_UPLOAD_TYPES);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(API_ENDPOINTS.uploadConfig(), { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        if (Array.isArray(data.extensions) && data.extensions.length > 0 && data.label) {
+          setUploadTypes({ extensions: data.extensions, label: data.label });
+        }
+      })
+      .catch(() => {
+        /* keep defaults -- identical to today's UI */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // True while any chip is still uploading/processing — used to block sending.
   const isUploading = attachedFiles.some((f) => f.status === "uploading");
   // Per-file status poll timers so each chip can be cancelled independently (e.g. via X).
@@ -1802,8 +1845,8 @@ const Chat = ({
     const valid: File[] = [];
     for (let i = 0; i < selectedFiles.length; i++) {
       const f = selectedFiles[i];
-      if (!isSupportedFile(f.name)) {
-        alert(`"${f.name}" is not a supported file type.\n\nSupported: ${SUPPORTED_LABEL}`);
+      if (!isSupportedFile(f.name, uploadTypes.extensions)) {
+        alert(`"${f.name}" is not a supported file type.\n\nSupported: ${uploadTypes.label}`);
         continue;
       }
       if (f.size > MAX_UPLOAD_BYTES) {
@@ -1980,7 +2023,7 @@ const Chat = ({
           type="file"
           ref={fileInputRef}
           className="hidden"
-          accept={FILE_ACCEPT}
+          accept={uploadTypes.extensions.join(",")}
           multiple
           onChange={handleFileAttach}
         />
@@ -2058,7 +2101,7 @@ const Chat = ({
               type="button"
               className={styles.plusBtn}
               onClick={() => fileInputRef.current?.click()}
-              title={`Attach files (${SUPPORTED_LABEL})`}
+              title={`Attach files (${uploadTypes.label})`}
               aria-label="Attach files"
             >
               <Plus size={20} />

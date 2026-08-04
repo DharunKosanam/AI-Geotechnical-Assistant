@@ -81,6 +81,13 @@ SUPPORTED_EXTENSIONS = {
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".tif"}
 
+# Image formats the VISION path accepts for direct upload (gated on
+# VISION_EXTRACTION_ENABLED at the call sites -- this set is just the format
+# registry). Deliberately excludes TIFF: it keeps its legacy OCR-only path.
+# .webp is NOT in SUPPORTED_EXTENSIONS: with vision off it stays rejected
+# exactly as today, so flag-off behavior is byte-identical.
+VISION_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+
 # The formats that carry their own text and so never depend on OCR. Used in
 # user-facing messages when we have to turn an image or a scan away.
 TEXT_FORMATS_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX"

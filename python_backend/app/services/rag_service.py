@@ -322,6 +322,10 @@ def extract_pages_from_pdf_with_ocr(
         if stats is not None:
             stats["total_pages"] = total_pages
             stats["unreadable_pages"] = max(0, total_pages - len(readable))
+            readable_nums = {p for p, _, _ in readable}
+            stats["unreadable_page_numbers"] = [
+                p for p in range(1, total_pages + 1) if p not in readable_nums
+            ]
         if total_pages and not readable:
             raise _no_text_layer_error(filename, total_pages)
         if total_pages > len(readable):
@@ -378,6 +382,10 @@ def extract_pages_from_pdf_with_ocr(
     if stats is not None:
         stats["total_pages"] = total_pages
         stats["unreadable_pages"] = max(0, total_pages - len(triples))
+        readable_nums = {p for p, _, _ in triples}
+        stats["unreadable_page_numbers"] = [
+            p for p in range(1, total_pages + 1) if p not in readable_nums
+        ]
     if total_pages and not triples:
         # Text layer empty AND OCR read nothing — say so, don't fall through to
         # the generic "no extractable text".
@@ -1231,12 +1239,45 @@ async def sample_thread_documents(
         scope_out["no_relevant"] = []
         scope_out["excluded"] = []
         scope_out["sampled"] = sampled_info
+        # Vision provenance (additive): a document-level sample can include
+        # AI-vision transcriptions of scanned pages; the note must say so.
+        scope_out["vision"] = _vision_scope(selected)
     print(
         "[THREAD] document-level sample: "
         + "; ".join(f"'{s['filename']}' {s['sampled']}/{s['total']}" for s in sampled_info)
         + f" (budget {budget})"
     )
     return selected
+
+
+def _vision_scope(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Vision-derived provenance among the context chunks that can ground an
+    answer (non-low-confidence): [{filename, pages, image}], filename-sorted,
+    pages ascending. ``image`` is True for a directly uploaded image -- an
+    entirely model-described document with no verbatim layer and no page
+    numbers -- so the scope note can word it as an image description rather
+    than a scanned-page transcription. Empty when the context holds no
+    vision-derived content -- the scope note then says nothing, exactly as
+    today."""
+    from app.services.file_processing import VISION_IMAGE_EXTS
+
+    by_file: Dict[str, Dict[str, Any]] = {}
+    for c in chunks:
+        if c.get("low_confidence"):
+            continue
+        meta = c.get("metadata") or {}
+        if not meta.get("visionDerived"):
+            continue
+        entry = by_file.setdefault(
+            c.get("filename", "unknown"),
+            {"pages": set(), "image": meta.get("fileType") in VISION_IMAGE_EXTS},
+        )
+        if c.get("pageStart") is not None:
+            entry["pages"].add(c["pageStart"])
+    return [
+        {"filename": fn, "pages": sorted(e["pages"]), "image": e["image"]}
+        for fn, e in sorted(by_file.items())
+    ]
 
 
 def _log_thread_doc_mix(stage: str, chunks: List[Dict[str, Any]], score_key: str) -> None:
@@ -1528,6 +1569,9 @@ async def query_thread_documents(
                     scope_out["excluded"] = [
                         fn for fn in sorted(passing_docs) if fn not in grounded
                     ]
+                    # Vision provenance (additive): which grounding chunks are
+                    # AI-vision transcriptions, so the scope note can say so.
+                    scope_out["vision"] = _vision_scope(kept)
             else:
                 kept, _no_high_conf = _apply_rerank_threshold(
                     candidates, threshold=THREAD_RERANK_SCORE_THRESHOLD
@@ -1629,6 +1673,95 @@ def ingest_release() -> None:
         _ingest_inflight = max(0, _ingest_inflight - 1)
 
 
+def _format_page_list(pages: List[int], max_items: int = 12) -> str:
+    """'3, 7, 9' with truncation so a 180-page failure list can't flood the
+    chip warning: '1, 2, ..., 12, ... (168 more)'. Plain ASCII."""
+    shown = ", ".join(str(p) for p in pages[:max_items])
+    if len(pages) > max_items:
+        shown += f", ... ({len(pages) - max_items} more)"
+    return shown
+
+
+def _page_word(pages: List[int]) -> str:
+    return "page" if len(pages) == 1 else "pages"
+
+
+def _ingest_image_via_vision(
+    filename: str,
+    file_content: bytes,
+    category: str,
+    owner_id: str,
+    thread_id: Optional[str],
+    file_type: str,
+    provenance: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int, int, Optional[str]]:
+    """Ingest a directly uploaded image as ONE vision-described chunk.
+
+    An image document has NO verbatim layer: the entire indexed content is
+    the model's description. So there is exactly one chunk (no chunker -- the
+    transcript has no page structure to split on), it carries visionDerived
+    plus the model name, and there is NO pageStart at all -- a standalone
+    image has no page for a citation to point at, so the field is omitted
+    rather than storing a fake page 1. describe_image raises
+    UnreadableDocumentError on refusal/failure, which fails the upload with
+    that user-facing reason and indexes nothing.
+    """
+    from app.services.vision_extraction import describe_image
+
+    print("  1. AI vision description (direct image upload)...")
+    result = describe_image(file_content, filename)
+    text = result["text"]
+
+    print("  2. One vision chunk per image (no page structure to chunk on)")
+    print("  3. Generating embedding...")
+    model = get_embedding_model()
+    vec = list(model.embed([text]))[0]
+    embedding = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+
+    doc: Dict[str, Any] = {
+        "text": text,
+        "filename": filename,
+        "source": filename,
+        "embedding": embedding,
+        "userId": owner_id,
+        "category": category,
+        "chunkIndex": 0,
+        "totalChunks": 1,
+        "chunkingVersion": CHUNKING_VERSION,
+        "sectionHeader": None,
+        "visionDerived": True,
+        "metadata": {
+            "chunkSize": len(text),
+            "chunkIndex": 0,
+            "totalChunks": 1,
+            "originalFilename": filename,
+            "category": category,
+            "chunkingVersion": CHUNKING_VERSION,
+            "sectionHeader": None,
+            "fileType": file_type,
+            "ocrExtracted": False,
+            "visionDerived": True,
+            "visionModel": result["model"],
+        },
+        "createdAt": datetime.now(),
+    }
+    if thread_id is not None:
+        doc["threadId"] = thread_id
+        doc["metadata"]["threadId"] = thread_id
+    if provenance:
+        doc.update(provenance)
+
+    # The chip must state the image was interpreted by vision -- stricter than
+    # the PDF case, because here NOTHING in the index is verbatim.
+    warning = (
+        f"{filename} was read by AI vision ({result['model']}): its indexed "
+        f"content is a model-generated description of the image, not "
+        f"extracted text."
+    )
+    print(f"      [WARNING] {warning}")
+    return [doc], 1, len(text), warning
+
+
 def _ingest_compute(
     filename: str,
     file_content: bytes,
@@ -1654,22 +1787,75 @@ def _ingest_compute(
     path) is merged onto every chunk doc so each chunk carries its uploader /
     project / batch / canonicalTitle / contentHash.
     """
+    # 0. Direct image upload (flag-gated): the whole document is ONE vision
+    # call and one flagged chunk -- no extraction, no chunker. Flag off, or
+    # the KB path: images fall through to the normal dispatch (OCR or reject),
+    # byte-identical to today.
+    if config.VISION_EXTRACTION_ENABLED and pre_extracted_pages is None:
+        from app.services.file_processing import VISION_IMAGE_EXTS
+        if file_type in VISION_IMAGE_EXTS:
+            return _ingest_image_via_vision(
+                filename, file_content, category, owner_id, thread_id,
+                file_type, provenance,
+            )
+
     # 1. Extraction — use the caller's pages (KB) or extract here (live path).
     extract_stats: Dict[str, Any] = {}
+    # Vision extraction applies only to the LIVE PDF path: the KB path
+    # pre-extracts via kb_formats and is deliberately untouched.
+    vision_eligible = (
+        config.VISION_EXTRACTION_ENABLED
+        and pre_extracted_pages is None
+        and file_type == ".pdf"
+    )
+    no_text_error: Optional[Exception] = None
     if pre_extracted_pages is not None:
         page_triples = pre_extracted_pages
         print(f"  1. Using {len(page_triples)} pre-extracted page(s) ({file_type})...")
     else:
         # Lazy import to avoid a circular dependency at module load
-        from app.services.file_processing import extract_pages_from_file
+        from app.services.file_processing import (
+            extract_pages_from_file,
+            UnreadableDocumentError,
+        )
         print(f"  1. Extracting text ({file_type})...")
-        page_triples = extract_pages_from_file(file_content, filename, stats=extract_stats)
+        try:
+            page_triples = extract_pages_from_file(file_content, filename, stats=extract_stats)
+        except UnreadableDocumentError as unreadable_err:
+            # A fully-scanned PDF (no page has a text layer) is exactly the
+            # case vision extraction exists for. extract_stats was filled
+            # before the raise, so the no-text page numbers are known. If
+            # vision is off (or reads nothing), the original error is
+            # re-raised below, unchanged.
+            if not (vision_eligible and extract_stats.get("unreadable_page_numbers")):
+                raise
+            page_triples = []
+            no_text_error = unreadable_err
     pages = [(p, t) for p, t, _ in page_triples]
     ocr_by_page = {p: ocr for p, _, ocr in page_triples}
     total_chars = sum(len(t) for _, t in pages)
     print(f"      Extracted {len(pages)} pages, {total_chars} characters")
 
-    if not pages or total_chars < 10:
+    # 1b. Vision extraction (flag-gated, default OFF): transcribe the pages the
+    # extractor identified as having NO text layer. One page per model call,
+    # capped per document; a failed page stays unindexed and is reported in the
+    # warning below -- it never fails the ingest.
+    vision_result: Optional[Dict[str, Any]] = None
+    vision_pages: List[Tuple[int, str]] = []
+    if vision_eligible and extract_stats.get("unreadable_page_numbers"):
+        from app.services.vision_extraction import extract_vision_pages
+        print(
+            f"  1b. Vision extraction for "
+            f"{len(extract_stats['unreadable_page_numbers'])} no-text page(s)..."
+        )
+        vision_result = extract_vision_pages(
+            file_content, extract_stats["unreadable_page_numbers"], filename
+        )
+        vision_pages = vision_result["pages"]
+
+    if (not pages or total_chars < 10) and not vision_pages:
+        if no_text_error is not None:
+            raise no_text_error
         raise ValueError(f"{filename} appears to be empty or contains no extractable text")
 
     # 2. Structure-aware chunking (v2) — same chunker for every file type
@@ -1679,6 +1865,26 @@ def _ingest_compute(
     )
     chunk_records = chunk_text_v2(pages)
     print(f"      Created {len(chunk_records)} chunks")
+
+    # 2b. Vision-derived chunks, appended AFTER the verbatim chunks and never
+    # merged with them: model-generated interpretation must stay a separate,
+    # flagged content class. Each page is chunked alone so every chunk keeps
+    # its source page number.
+    if vision_pages:
+        base_index = len(chunk_records)
+        vision_chunk_count = 0
+        for vp_num, vp_text in vision_pages:
+            for rec in chunk_text_v2([(vp_num, vp_text)]):
+                rec["chunk_index"] = base_index + vision_chunk_count
+                rec["vision_derived"] = True
+                chunk_records.append(rec)
+                vision_chunk_count += 1
+        total_chars += sum(len(t) for _, t in vision_pages)
+        print(
+            f"      Created {vision_chunk_count} vision-derived chunk(s) "
+            f"from {len(vision_pages)} page(s)"
+        )
+
     if not chunk_records:
         raise ValueError("No text chunks could be created from the file")
 
@@ -1696,6 +1902,7 @@ def _ingest_compute(
     for c, embedding in zip(chunk_records, embeddings):
         page_start = c["page_start"]
         ocr_extracted = bool(ocr_by_page.get(page_start, False))
+        vision_derived = bool(c.get("vision_derived"))
         doc = {
             "text": c["text"],
             "filename": filename,
@@ -1722,6 +1929,16 @@ def _ingest_compute(
             },
             "createdAt": datetime.now(),
         }
+        # Vision-derived chunks are model-generated interpretation, not
+        # extracted text. The flag (plus the model that produced it) is the
+        # provenance that citations and the scope note surface -- it must
+        # never be possible to mistake this content for verbatim document
+        # text. Absent entirely on normal chunks, so flag-off documents are
+        # byte-identical to before.
+        if vision_derived:
+            doc["visionDerived"] = True
+            doc["metadata"]["visionDerived"] = True
+            doc["metadata"]["visionModel"] = (vision_result or {}).get("model")
         # Thread-scoped uploads carry their threadId so retrieval can filter to
         # exactly this conversation thread. Omitted entirely for shared KB and
         # per-user uploads, so their documents are byte-identical to before.
@@ -1741,14 +1958,45 @@ def _ingest_compute(
     # Partially-readable document: some pages carried no text (scanned figure
     # pages are the common case) and are therefore invisible to the assistant.
     # Surfacing this stops a user trusting an answer drawn from half a report.
+    # When vision extraction ran, the warning reports what it transcribed
+    # (flagged as model-interpreted, never verbatim) and which pages STILL
+    # could not be read; with the flag off the wording is unchanged.
     warning: Optional[str] = None
     skipped = extract_stats.get("unreadable_pages") or 0
     total_p = extract_stats.get("total_pages") or 0
     if skipped and total_p:
-        warning = (
-            f"{skipped} of {total_p} pages had no readable text (scanned or "
-            f"image-only) and were not indexed."
-        )
+        if vision_result is not None:
+            ok_pages = [pn for pn, _ in vision_pages]
+            failed_pages = list(vision_result["failed_pages"])
+            over_cap = list(vision_result["skipped_pages"])
+            parts = [
+                f"{skipped} of {total_p} pages had no readable text "
+                f"(scanned or image-only)."
+            ]
+            if ok_pages:
+                parts.append(
+                    f"AI vision transcribed {len(ok_pages)} of them "
+                    f"({_page_word(ok_pages)} {_format_page_list(ok_pages)}); "
+                    f"vision content is model-interpreted, not verbatim text."
+                )
+            if failed_pages:
+                parts.append(
+                    f"{len(failed_pages)} could not be read by vision and "
+                    f"{'was' if len(failed_pages) == 1 else 'were'} not indexed "
+                    f"({_page_word(failed_pages)} {_format_page_list(failed_pages)})."
+                )
+            if over_cap:
+                parts.append(
+                    f"{len(over_cap)} exceeded the vision page cap and "
+                    f"{'was' if len(over_cap) == 1 else 'were'} not indexed "
+                    f"({_page_word(over_cap)} {_format_page_list(over_cap)})."
+                )
+            warning = " ".join(parts)
+        else:
+            warning = (
+                f"{skipped} of {total_p} pages had no readable text (scanned or "
+                f"image-only) and were not indexed."
+            )
         print(f"      [WARNING] {warning}")
 
     # Free the large intermediates; the caller only needs `documents`.
@@ -1797,13 +2045,19 @@ async def ingest_document(
         get_file_type,
         is_supported_file,
         SUPPORTED_EXTENSIONS,
+        VISION_IMAGE_EXTS,
     )
 
     file_type = get_file_type(filename)
     # The KB path pre-extracts via the kb_formats registry (which validates the
     # format itself and supports .txt/.md that file_processing does not), so the
-    # supported-type check only applies when we extract here.
-    if pre_extracted_pages is None and not is_supported_file(filename):
+    # supported-type check only applies when we extract here. .webp is accepted
+    # ONLY via the vision-image path (flag on); it stays out of
+    # SUPPORTED_EXTENSIONS so flag-off behavior is unchanged.
+    vision_image_ok = (
+        config.VISION_EXTRACTION_ENABLED and file_type in VISION_IMAGE_EXTS
+    )
+    if pre_extracted_pages is None and not is_supported_file(filename) and not vision_image_ok:
         raise ValueError(
             f"Unsupported file type: {file_type}. "
             f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"

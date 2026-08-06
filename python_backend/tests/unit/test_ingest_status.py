@@ -109,10 +109,17 @@ def test_legacy_doc_without_status_is_ready():
 
 
 # --- req 6: the Phase 2 piggyback assumption, tested directly ----------------
+# NOTE: thread_document_inventory derives status with the REAL clock (it
+# calls effective_ingest_status(now=datetime.now()) internally), so any
+# "processing" parent fed to _inventory must carry a FRESH createdAt. The
+# fixed NOW constant is for the direct effective_ingest_status tests only --
+# using it here made these tests age into failures once wall-clock passed
+# NOW + INGEST_PENDING_TIMEOUT_SECONDS (the staleness rule kicked in).
 async def test_parent_with_zero_chunks_reports_has_attachments(monkeypatch):
     # Upload registered, ingestion still running: parent exists, ZERO chunks.
     has, fp, states = await _inventory(
-        monkeypatch, [_parent("fresh.pdf", "processing", chunk_count=0)]
+        monkeypatch,
+        [_parent("fresh.pdf", "processing", chunk_count=0, created=datetime.now())],
     )
     assert has is True          # the router CAN classify THREAD_DOC
     assert fp != ""
@@ -124,7 +131,8 @@ async def test_pending_and_completed_do_not_share_cache_key(monkeypatch):
     base = "u:q"
     _, fp_mid, _ = await _inventory(
         monkeypatch, [_parent("a.pdf", "processed", 40),
-                      _parent("big.pdf", "processing", chunk_count=0)]
+                      _parent("big.pdf", "processing", chunk_count=0,
+                              created=datetime.now())]
     )
     _, fp_done, _ = await _inventory(
         monkeypatch, [_parent("a.pdf", "processed", 40),
@@ -140,7 +148,8 @@ async def test_pending_to_failed_changes_key_even_at_zero_chunks(monkeypatch):
     # still separate them, or a cached "still being processed" answer would
     # survive the failure.
     _, fp_pending, _ = await _inventory(
-        monkeypatch, [_parent("big.pdf", "processing", chunk_count=0)]
+        monkeypatch, [_parent("big.pdf", "processing", chunk_count=0,
+                              created=datetime.now())]
     )
     _, fp_failed, _ = await _inventory(
         monkeypatch, [_parent("big.pdf", "failed", chunk_count=0, error="boom")]

@@ -9,7 +9,8 @@
     "lint": "next lint",
     "test:smoke": "playwright test --headed",
     "test:smoke:headless": "playwright test",
-    "test:report": "playwright show-report"
+    "test:report": "playwright show-report",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "csv-parser": "^3.0.0",
@@ -29,10 +30,13 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "typescript": "^5.7.2"
+    "jsdom": "^30.0.1",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
   },
   "prettier": {
     "singleQuote": false

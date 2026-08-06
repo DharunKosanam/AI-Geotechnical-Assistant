@@ -211,6 +211,175 @@
   color: #8e8ea0;
 }
 
+/* Sources panel (SOURCE_SETS_ENABLED): the thread's documents with status,
+   section count, and provenance, plus per-source removal behind an inline
+   dry-run confirm. Same palette as the attachment chips. */
+.sourcesBar {
+  padding: 0 10px 8px 10px;
+}
+
+.sourcesToggle {
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid #565869;
+  border-radius: 12px;
+  background: transparent;
+  color: #444;
+  cursor: pointer;
+}
+
+.sourcesToggle:hover {
+  background: #f0f0f0;
+}
+
+.sourcesPanel {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sourcesEmpty {
+  font-size: 12px;
+  color: #8e8ea0;
+}
+
+.sourceRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background-color: #2a2a2a;
+  color: #fff;
+  font-size: 13px;
+}
+
+.sourceName {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourceMeta {
+  font-size: 11px;
+  color: #8e8ea0;
+  flex: 1;
+  min-width: 140px;
+}
+
+.sourceRemoveBtn,
+.sourceConfirmBtn,
+.sourceCancelBtn {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  border: 1px solid #565869;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.sourceRemoveBtn:hover:not(:disabled),
+.sourceCancelBtn:hover:not(:disabled) {
+  background: #40414f;
+}
+
+/* The destructive confirm reads as destructive. */
+.sourceConfirmBtn {
+  border-color: #f87171;
+  color: #f87171;
+}
+
+.sourceConfirmBtn:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.15);
+}
+
+.sourceRemoveBtn:disabled,
+.sourceConfirmBtn:disabled,
+.sourceCancelBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sourceConfirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #e3b341;
+}
+
+/* Format-generation progress notice. Deliberately heavier than the muted
+   .attachmentNotice line: during a multi-minute generation this is the only
+   signal the request is alive, and a small grey line reads as a hang. Chip
+   language (dark card on the light page) with the existing spinner. */
+.formatProgressNotice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 8px 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background-color: #2a2a2a;
+  color: #fff;
+  font-size: 13px;
+}
+
+/* Source-format generation buttons, shown above the input row when the
+   feature is enabled and the thread has at least one ready document.
+   Design language follows the app's existing controls: enabled mirrors the
+   Send/plus buttons (solid black pill, white label, #333 hover), disabled
+   mirrors the Send button's disabled state (lightgrey fill) so the two
+   states read at a glance. flex-wrap keeps the five pills wrapping cleanly
+   on narrow windows instead of overflowing. */
+.formatButtons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 8px 10px;
+}
+
+/* Secondary to the buttons themselves, like .chipStage's helper text. */
+.formatButtonsLabel {
+  font-size: 12px;
+  color: #8e8ea0;
+}
+
+/* Tooltip carrier: a disabled button does not reliably fire hover for the
+   native title in every browser, so the wrapper span holds the same title
+   and keeps the explanation visible in the disabled state. */
+.formatBtnWrap {
+  display: inline-flex;
+}
+
+.formatBtn {
+  font-size: 13px;
+  padding: 5px 14px;
+  border: 1px solid #000;
+  border-radius: 60px;
+  background-color: #000;
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.formatBtn:hover:not(:disabled) {
+  background-color: #333;
+  border-color: #333;
+}
+
+.formatBtn:disabled {
+  background-color: lightgrey;
+  border-color: lightgrey;
+  color: #666;
+  cursor: not-allowed;
+}
+
 .messages {
   flex-grow: 1;
   min-height: 0;

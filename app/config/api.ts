@@ -159,6 +159,25 @@ export const API_ENDPOINTS = {
     return `/api/files`;
   },
 
+  // --- Source-grounded output formats (SOURCE_FORMATS_ENABLED). Status is the
+  // feature handshake (fails closed); stream is the SSE generation endpoint,
+  // both via dedicated Route Handlers with streaming-safe timeouts. ---
+  formatsStatus: (threadId?: string) =>
+    threadId
+      ? `/api/formats/status?threadId=${encodeURIComponent(threadId)}`
+      : `/api/formats/status`,
+  formatsStream: () => `/api/formats/stream`,
+
+  // --- Named persistent source sets (SOURCE_SETS_ENABLED). Same-origin;
+  // proxied to FastAPI by the /api/assistants rewrite. Status is the feature
+  // handshake; sources lists a thread's documents; remove is dry-run by
+  // default and deletes only with confirm: true. ---
+  sourceSetsStatus: () => `/api/assistants/threads/sources-status`,
+  threadSources: (threadId: string) =>
+    `/api/assistants/threads/${encodeURIComponent(threadId)}/sources`,
+  removeThreadSource: (threadId: string) =>
+    `/api/assistants/threads/${encodeURIComponent(threadId)}/sources/remove`,
+
   // --- Student knowledge-base upload (Phase 4/5). Same-origin; proxied to
   // FastAPI by next.config rewrites(). ---
   kbStatus: () => `${PYTHON_BACKEND_URL}/api/kb/status`,

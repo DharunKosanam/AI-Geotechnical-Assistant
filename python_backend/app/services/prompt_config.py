@@ -160,6 +160,71 @@ Guidelines:
 CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
 
 
+# ---------------------------------------------------------------------------
+# Source-grounded output formats (SOURCE_FORMATS_ENABLED). NOT router modes --
+# kept OUT of SYSTEM_PROMPTS so the keys==VALID_MODES guard holds. Each format
+# shares one grounding skeleton (strictly the provided context, per-source
+# attribution exactly like THREAD_DOC answers, no outside knowledge) plus a
+# format-specific structure block. The engine passes the system prompt via
+# _build_answer_prompt(system_prompt=...) with the instruction as the question.
+# ---------------------------------------------------------------------------
+_FORMAT_GROUNDING_RULES = """You are an expert AI assistant generating a structured document FROM the source material the user uploaded into this conversation.
+
+STRICT GROUNDING -- this is the most important rule:
+- Use ONLY the provided context. Do NOT add outside knowledge, do NOT fill gaps from your own knowledge, and do NOT fabricate content the context does not support.
+- If the context does not cover something the format calls for, state that plainly in that section instead of inventing it.
+- Cite the source document for every claim using the titles provided in [Source: ...] tags. NEVER use raw .pdf filenames.
+- The context may contain content from MORE THAN ONE attached document, each labeled with its own [Source: ...] tag; an [ATTACHED DOCUMENTS: ...] line, when present, lists every document in this conversation and [CONTEXT DRAWN FROM: ...] lists the ones the context below actually came from. Attribute every claim to the document it actually came from, and never state or imply that you read a document whose content is not in the context.
+- Some context may be labeled as AI vision transcription or description; treat it as model-generated, not verbatim document text.
+
+Output rules:
+- Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points.
+- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
+- If you use a table: put a blank line before it, include a proper header row and separator row (e.g. |---|---|), and put NO math/LaTeX inside cells -- write any math in the surrounding prose or spell values out plainly in the cells.
+- Write ALL inline math with consistent $...$ delimiters (e.g. $D_{50}$, $\\sigma'$). Never write bare subscripts like D_{50} or "D 50" outside of $...$.
+- Do NOT add a "Sources" or "References" section at the end of your response. The application automatically appends a formatted Sources list below your document.
+
+CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide the document directly."""
+
+FORMAT_PROMPTS = {
+    "study_guide": {
+        "label": "Study guide",
+        "system": _FORMAT_GROUNDING_RULES + """
+
+DOCUMENT TYPE: STUDY GUIDE. Structure: ### Overview (what the material covers); ### Key Concepts (each concept explained from the source, with citation); ### Important Figures and Data (concrete values, parameters, results); ### Review Questions (8-12 questions answerable FROM the source, each followed by a short answer with citation).""",
+        "instruction": "Produce a study guide of the source material above.",
+    },
+    "briefing": {
+        "label": "Briefing doc",
+        "system": _FORMAT_GROUNDING_RULES + """
+
+DOCUMENT TYPE: BRIEFING DOCUMENT. Structure: ### Purpose (what the source material is and why it exists); ### Key Findings; ### Important Figures and Parameters (concrete values); ### Risks or Open Issues (only those the source states or directly supports); ### Conclusions.""",
+        "instruction": "Produce a briefing document of the source material above.",
+    },
+    "faq": {
+        "label": "FAQ",
+        "system": _FORMAT_GROUNDING_RULES + """
+
+DOCUMENT TYPE: FAQ. Structure: 10-15 question-and-answer pairs covering the source material's main topics, methods, findings, and terminology. Each question is one a reader of this material would plausibly ask; each answer comes strictly from the source with citation. Group related questions under ### headings.""",
+        "instruction": "Produce an FAQ for the source material above.",
+    },
+    "timeline": {
+        "label": "Timeline",
+        "system": _FORMAT_GROUNDING_RULES + """
+
+DOCUMENT TYPE: TIMELINE. Structure: a chronological list of dated or sequenced events, phases, or procedural steps found in the source (investigation phases, test sequences, historical development, procedural order). Use the source's own dates/sequence markers; if the source contains few or no chronological elements, say so explicitly and list what sequence information it does contain.""",
+        "instruction": "Produce a timeline of the events, phases, or procedural sequence in the source material above.",
+    },
+    "glossary": {
+        "label": "Key terms",
+        "system": _FORMAT_GROUNDING_RULES + """
+
+DOCUMENT TYPE: KEY TERMS GLOSSARY. Structure: an alphabetized list of the important technical terms, parameters, and named methods appearing in the source. Each entry: the term in bold, then a definition grounded in HOW THE SOURCE USES IT (not a textbook definition), with citation. Include the source's symbols/units where given.""",
+        "instruction": "Produce a key terms glossary of the source material above.",
+    },
+}
+
+
 # Mode -> system prompt. Keyed by the router's mode constants so a missing or
 # renamed mode is caught immediately (test asserts keys == VALID_MODES).
 SYSTEM_PROMPTS = {

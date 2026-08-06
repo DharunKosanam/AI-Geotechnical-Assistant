@@ -254,6 +254,48 @@ THREAD_DOC_MIN_CHUNKS_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CHUNKS_PER_DOC", "
 # headroom alongside the worst-case prompt.
 THREAD_DOC_SAMPLE_CHUNKS = int(os.getenv("THREAD_DOC_SAMPLE_CHUNKS", "8"))
 
+# ---------------------------------------------------------------------------
+# Source-grounded output formats (additive, flag-gated -- default OFF)
+# ---------------------------------------------------------------------------
+# Feature A: generate structured documents (study guide, briefing doc, FAQ,
+# timeline, key-terms glossary) from EVERY chunk of a thread's ready documents.
+# Engine selection is automatic on measured prompt size:
+#   - single call: the whole document set in one generation, with num_ctx sized
+#     per request (options are per-request in Ollama, so neither the chat path
+#     nor the KB path ever sees a different context size). Measured on the
+#     deployment GPU (H100L 12GB MIG, gemma4:12b Q4_K_M): fully GPU-resident to
+#     ~96k ctx, spills to CPU at >=131k; prefill ~715 tok/s at 10k falling to
+#     ~590 tok/s at 36k; generation ~24 tok/s.
+#   - map-reduce: above SOURCE_FORMATS_SINGLE_CALL_MAX_TOKENS the set is
+#     summarized in reading-order batches (map), then the notes are synthesized
+#     (reduce), hierarchically if the notes themselves overflow one call.
+# 90k keeps the single call safely under the measured 96k spill point with the
+# output budget and estimator error inside the margin.
+SOURCE_FORMATS_ENABLED = os.getenv("SOURCE_FORMATS_ENABLED", "false").lower() == "true"
+SOURCE_FORMATS_SINGLE_CALL_MAX_TOKENS = int(
+    os.getenv("SOURCE_FORMATS_SINGLE_CALL_MAX_TOKENS", "90000")
+)
+# Map batch size in chunks (~9k prompt tokens at the measured ~424 tok/chunk,
+# comfortably inside the default num_ctx with the 640-token note budget), and
+# the note budget itself (512 truncated notes mid-sentence in benchmarking).
+SOURCE_FORMATS_MAP_BATCH_CHUNKS = int(os.getenv("SOURCE_FORMATS_MAP_BATCH_CHUNKS", "20"))
+SOURCE_FORMATS_MAP_NUM_PREDICT = int(os.getenv("SOURCE_FORMATS_MAP_NUM_PREDICT", "640"))
+# Per-Ollama-call ceiling for format generation. A near-ceiling single call is
+# ~153s prefill + ~85s generation, over the 180s chat-call timeout, so format
+# calls carry their own. The SSE transport has no total deadline (heartbeats
+# reset every proxy read timeout), so this bounds a HUNG call, not a slow one.
+SOURCE_FORMATS_TIMEOUT = float(os.getenv("SOURCE_FORMATS_TIMEOUT", "420"))
+
+# ---------------------------------------------------------------------------
+# Named persistent source sets (additive, flag-gated -- default OFF)
+# ---------------------------------------------------------------------------
+# Feature B: the thread-as-source-set surfaces -- the sources view (per-doc
+# status, chunk count, provenance) and per-source removal with a mandatory
+# user-visible dry-run. Gates ONLY those new endpoints and their UI; the
+# rename hardening on PUT /api/assistants/threads/history is a fix to a live
+# path and ships unflagged.
+SOURCE_SETS_ENABLED = os.getenv("SOURCE_SETS_ENABLED", "false").lower() == "true"
+
 # Ingestion staleness rule (Phase 1). A thread-upload parent doc stuck in
 # status "processing" longer than this is REPORTED as failed with a timeout
 # reason wherever status is read (upload-status endpoint, document inventory,

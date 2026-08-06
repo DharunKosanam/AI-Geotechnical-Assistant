@@ -16,9 +16,13 @@ from models import (
     SubmitActionsRequest,
     User,
 )
+from pydantic import BaseModel
+
+from app.core import config
 from app.core.database import conversations_collection, messages_collection, files_collection
 from app.dependencies.auth import get_current_user
 from app.services.llm_service import get_llm
+from app.services.rag_service import effective_ingest_status
 
 router = APIRouter(prefix="/api/assistants/threads", tags=["threads"])
 
@@ -101,35 +105,90 @@ async def create_thread_history(
         )
 
 
+# Upper bound for a user-entered thread name. The auto-generated title is
+# capped at 40 chars; a typed name gets more room but stays sidebar-sane.
+THREAD_NAME_MAX_CHARS = 100
+
+
 @router.put("/history")
 async def update_thread(
     request: UpdateThreadRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Update thread metadata"""
+    """Update thread metadata (rename / group flag).
+
+    Hardened live path: the name is trimmed server-side; an empty or
+    whitespace-only name is rejected (400) rather than persisted; an
+    over-long name is rejected (400); and a threadId that matches nothing
+    for this user -- nonexistent or another user's -- returns 404 instead
+    of silently reporting success. The update writes only name/isGroup and
+    updatedAt on the conversations row: threadId is never rewritten, and
+    nothing here touches files, messages, retrieval, or the document-set
+    fingerprint (which hashes filename/chunkCount/status only).
+    """
     try:
         if not request.threadId or request.threadId == "null":
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid threadId: '{request.threadId}'"
             )
-        
+
         update_fields = {"updatedAt": datetime.now()}
-        
+
         if request.newName is not None:
-            update_fields["name"] = request.newName
-        
+            name = request.newName.strip()
+            if not name:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Thread name cannot be empty."
+                )
+            if len(name) > THREAD_NAME_MAX_CHARS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Thread name is too long (max {THREAD_NAME_MAX_CHARS} characters)."
+                )
+            update_fields["name"] = name
+
         if request.isGroup is not None:
             update_fields["isGroup"] = request.isGroup
-        
+
+        # Conditional rename (first-action auto-title): the name is part of
+        # the match filter, so the replace-only-the-placeholder rule is
+        # enforced atomically in one update -- no read-then-write window in
+        # which a user rename could be clobbered.
+        update_filter = {"userId": current_user.id, "threadId": request.threadId}
+        if request.expectedCurrentName is not None:
+            update_filter["name"] = request.expectedCurrentName
+
         result = await conversations_collection.update_one(
-            {"userId": current_user.id, "threadId": request.threadId},
+            update_filter,
             {"$set": update_fields}
         )
-        
+
+        if result.matched_count == 0:
+            if request.expectedCurrentName is not None:
+                # Distinguish "no such thread" (the hardened 404 contract)
+                # from "thread exists but was renamed first" (409: the
+                # caller's placeholder-replace lost the race and must not
+                # be retried unconditionally).
+                exists = await conversations_collection.find_one(
+                    {"userId": current_user.id, "threadId": request.threadId}
+                )
+                if exists is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Thread name has changed; not overwriting.",
+                    )
+            raise HTTPException(status_code=404, detail="Thread not found")
+
         print(f"[OK] Updated thread: {request.threadId}")
         return {"success": True, "message": "Thread updated successfully"}
-        
+
+    except HTTPException:
+        # Validation and not-found outcomes are the contract, not errors --
+        # the blanket handler below must not flatten them into 500s (it
+        # used to: the original 400 for a bad threadId surfaced as a 500).
+        raise
     except Exception as error:
         print(f"[ERROR] Error updating thread: {error}")
         raise HTTPException(
@@ -380,10 +439,194 @@ async def submit_tool_actions(
     try:
         print(f"[WARNING]  Tool actions not implemented in Groq migration")
         return {"success": True, "message": "Tool outputs acknowledged"}
-        
+
     except Exception as error:
         print(f"[ERROR] Error submitting tool outputs: {error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred, please try again."
         )
+
+
+# ---------------------------------------------------------------------------
+# Named persistent source sets (SOURCE_SETS_ENABLED, default off).
+# The two thread-scoped endpoints below are the ONLY flag-gated surfaces --
+# each 404s with the flag off, exactly as if the route did not exist. The
+# rename hardening on PUT /history above is a live-path fix and is unflagged.
+# ---------------------------------------------------------------------------
+
+class RemoveSourceRequest(BaseModel):
+    filename: str
+    # Dry-run by default: the caller must explicitly confirm to delete.
+    confirm: bool = False
+
+
+@router.get("/sources-status")
+async def source_sets_status():
+    """Ungated feature handshake (kb /status pattern): lets the frontend
+    decide whether to render the sources panel. Flag off -> enabled False."""
+    return {"enabled": config.SOURCE_SETS_ENABLED}
+
+
+@router.get("/{thread_id}/sources")
+async def list_thread_sources(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """The thread's sources with status, chunk count, and provenance.
+
+    Reads ONLY existing facts: lifecycle from the Phase 1
+    effective_ingest_status helper over the parent docs (never recomputed
+    here), chunk counts from the parents' chunkCount, partial indexing from
+    the parents' stored ingest warning, and vision provenance from the
+    chunks' existing metadata.visionDerived / pageStart fields. provenance
+    is "verbatim", "vision" (every chunk model-transcribed, e.g. a scan or
+    image), or "mixed" (some pages vision-transcribed, listed in
+    visionPages)."""
+    if not config.SOURCE_SETS_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    if not thread_id or thread_id == "null":
+        raise HTTPException(status_code=400, detail="Invalid threadId")
+
+    scope = {
+        "userId": current_user.id,
+        "threadId": thread_id,
+        "category": "thread_upload",
+    }
+    now = datetime.now()
+
+    # Vision facts per filename, from existing chunk fields only.
+    vision_chunks: Dict[str, int] = {}
+    vision_pages: Dict[str, set] = {}
+    async for c in files_collection.find(
+        {**scope, "chunkIndex": {"$exists": True}, "metadata.visionDerived": True},
+        {"filename": 1, "pageStart": 1},
+    ):
+        fn = c.get("filename") or ""
+        vision_chunks[fn] = vision_chunks.get(fn, 0) + 1
+        if c.get("pageStart") is not None:
+            vision_pages.setdefault(fn, set()).add(c["pageStart"])
+
+    sources = []
+    async for doc in files_collection.find(
+        {**scope, "chunkIndex": {"$exists": False}},
+        {"filename": 1, "status": 1, "error": 1, "warning": 1,
+         "chunkCount": 1, "createdAt": 1},
+    ):
+        fn = doc.get("filename") or ""
+        doc_status, reason = effective_ingest_status(doc, now=now)
+        chunk_count = int(doc.get("chunkCount") or 0)
+        v_n = vision_chunks.get(fn, 0)
+        if v_n and chunk_count and v_n >= chunk_count:
+            provenance = "vision"
+        elif v_n:
+            provenance = "mixed"
+        else:
+            provenance = "verbatim"
+        sources.append({
+            "filename": fn,
+            "status": doc_status,
+            "reason": reason,
+            "chunkCount": chunk_count,
+            "provenance": provenance,
+            "visionChunkCount": v_n,
+            "visionPages": sorted(vision_pages.get(fn, set())),
+            "partiallyIndexed": bool(doc.get("warning")),
+            "warning": doc.get("warning"),
+            "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None,
+        })
+    sources.sort(key=lambda s: s["filename"])
+    return {"sources": sources}
+
+
+@router.post("/{thread_id}/sources/remove")
+async def remove_thread_source(
+    thread_id: str,
+    request: RemoveSourceRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Remove ONE source from a source set -- dry-run by default.
+
+    Scope is the whole-thread cascade filter narrowed by filename:
+    {userId, threadId, category: "thread_upload", filename} matches exactly
+    this source's chunks and its parent doc, and can never match the shared
+    knowledge_base, plain user_upload docs, another thread's uploads, or the
+    thread's other sources. The response always carries the counts of what
+    WOULD be deleted plus the negative-check counts of what survives; the
+    delete itself runs only with confirm=true. The conversations row is
+    never touched -- removing the last source leaves the set intact and
+    empty. The Phase 2 fingerprint changes automatically because it hashes
+    the surviving parent docs."""
+    if not config.SOURCE_SETS_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    if not thread_id or thread_id == "null":
+        raise HTTPException(status_code=400, detail="Invalid threadId")
+    filename = (request.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+
+    # Ownership gate, mirroring delete_thread's: the conversation row must
+    # exist for THIS user before any file count or delete runs.
+    conv = await conversations_collection.find_one(
+        {"userId": current_user.id, "threadId": thread_id}
+    )
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    scope = {
+        "userId": current_user.id,
+        "threadId": thread_id,
+        "category": "thread_upload",
+        "filename": filename,
+    }
+    chunks_to_delete = await files_collection.count_documents(
+        {**scope, "chunkIndex": {"$exists": True}}
+    )
+    parents_to_delete = await files_collection.count_documents(
+        {**scope, "chunkIndex": {"$exists": False}}
+    )
+    if chunks_to_delete == 0 and parents_to_delete == 0:
+        raise HTTPException(status_code=404, detail="Source not found in this thread")
+
+    # Negative checks -- everything the filter must NOT touch, counted so the
+    # user (and the tests) see the isolation, not just the deletion:
+    #   - the thread's OTHER sources
+    #   - docs carrying this threadId in another category (expected 0)
+    #   - the same filename anywhere else: knowledge_base / user_upload /
+    #     other threads' copies
+    untouched = {
+        "otherSourcesInThread": await files_collection.count_documents(
+            {"userId": current_user.id, "threadId": thread_id,
+             "category": "thread_upload", "filename": {"$ne": filename}}
+        ),
+        "otherCategoriesInThread": await files_collection.count_documents(
+            {"userId": current_user.id, "threadId": thread_id,
+             "category": {"$ne": "thread_upload"}}
+        ),
+        "sameFilenameOtherCategories": await files_collection.count_documents(
+            {"filename": filename, "category": {"$ne": "thread_upload"}}
+        ),
+        "sameFilenameOtherThreads": await files_collection.count_documents(
+            {"filename": filename, "category": "thread_upload",
+             "threadId": {"$ne": thread_id}}
+        ),
+    }
+    preview = {
+        "filename": filename,
+        "chunksToDelete": chunks_to_delete,
+        "parentDocsToDelete": parents_to_delete,
+        "untouched": untouched,
+    }
+    print(
+        f"[SOURCES] Remove '{filename}' from thread {thread_id} "
+        f"(user {current_user.id}): filter={scope} -> would delete "
+        f"{chunks_to_delete} chunk(s) + {parents_to_delete} parent doc(s); "
+        f"untouched={untouched} (confirm={request.confirm})"
+    )
+
+    if not request.confirm:
+        return {"dryRun": True, **preview}
+
+    result = await files_collection.delete_many(scope)
+    print(f"[SOURCES] Deleted {result.deleted_count} doc(s) for '{filename}'")
+    return {"dryRun": False, **preview, "deleted": result.deleted_count}

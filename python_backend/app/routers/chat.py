@@ -4,6 +4,7 @@ Chat endpoints for handling messages with simple JSON responses using Groq + RAG
 import asyncio
 import json
 import re
+import time
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from datetime import datetime
@@ -28,6 +29,8 @@ from app.services.rag_service import (
     query_thread_documents,
     sample_thread_documents,
     thread_document_inventory,
+    load_full_thread_documents,
+    _vision_scope,
     get_clean_title,
 )
 from app.services.citation_filter import filter_sources_by_citations
@@ -42,6 +45,9 @@ from app.services.intent_router import (
     THREAD_DOC,
 )
 from app.services.mode_handlers import handle_general, handle_thread_doc_fallback
+from app.services.prompt_config import FORMAT_PROMPTS
+from app.services.source_formats import generate_format_document
+from pydantic import BaseModel
 
 router = APIRouter(tags=["chat"])
 
@@ -230,7 +236,12 @@ def _vision_note_sentence(scope: Dict) -> str:
     )
 
 
-def _thread_scope_note(scope: Dict) -> str:
+def _thread_scope_note(
+    scope: Dict,
+    *,
+    subject_phrase: str = "This document-level answer",
+    always_state_coverage: bool = False,
+) -> str:
     """Deterministic retrieval-scope statement for a multi-document THREAD_DOC
     answer (Phase 4). Assembled from query_thread_documents' scope_out --
     structured fact from the actual retrieval -- and appended to the answer
@@ -243,6 +254,13 @@ def _thread_scope_note(scope: Dict) -> str:
     searchable (with its stored reason) -- both rendered distinctly from
     searched-and-empty and from matched-but-not-included, so the note neither
     undercounts attachments nor implies an unsearched document was searched.
+
+    The source-formats route reuses this builder rather than growing a
+    parallel one: ``subject_phrase`` opens the coverage sentence (chat keeps
+    the default wording byte-for-byte), and ``always_state_coverage=True``
+    makes a fully-read single-document scope still render its "draws on all
+    sections" line -- a generated document must always state its coverage,
+    where a chat answer deliberately stays quiet when coverage is complete.
     """
     searched = scope.get("searched") or []
     if "grounded" not in scope:
@@ -275,11 +293,11 @@ def _thread_scope_note(scope: Dict) -> str:
     sampled = scope.get("sampled")
     if sampled:
         fully_read = all(s["sampled"] >= s["total"] for s in sampled)
-        if fully_read and total_attached < 2:
+        if fully_read and total_attached < 2 and not always_state_coverage:
             return f"_{vision_sentence}_" if vision_sentence else ""
         if fully_read:
             parts = [
-                f"This document-level answer draws on all sections of "
+                f"{subject_phrase} draws on all sections of "
                 f"{_join_names([s['filename'] for s in sampled])}."
             ]
         else:
@@ -288,7 +306,7 @@ def _thread_scope_note(scope: Dict) -> str:
                 for s in sampled
             )
             parts = [
-                f"This document-level answer draws on a sample: {spans}. "
+                f"{subject_phrase} draws on a sample: {spans}. "
                 f"Details outside the sample may not be reflected."
             ]
         if vision_sentence:
@@ -353,6 +371,28 @@ def _append_non_ready(parts: List[str], pending: List[str], failed: List[Dict]) 
             f'"{f.get("filename")}" could not be processed and was not '
             f"searched ({reason})"
         )
+
+
+def _context_block(chunk: dict) -> str:
+    """One [Source: ...] context block. A vision-derived chunk is labeled as
+    such so the answering model can never mistake AI-vision transcription for
+    verbatim document text; chunks without the flag render exactly as before.
+    Moved verbatim out of _run_chat_turn so the source-formats route shares it."""
+    title = get_clean_title(chunk['filename'])['title']
+    if (chunk.get("metadata") or {}).get("visionDerived"):
+        page = chunk.get("pageStart")
+        if page is None:
+            # Direct image upload: no pages, no verbatim layer.
+            return (
+                f"[Source: {title} - AI vision description of an "
+                f"uploaded image; model-generated, not document "
+                f"text]\n{chunk['text']}"
+            )
+        return (
+            f"[Source: {title} page {page} - AI vision transcription of "
+            f"a scanned page; model-generated, not verbatim]\n{chunk['text']}"
+        )
+    return f"[Source: {title}]\n{chunk['text']}"
 
 
 async def _run_chat_turn(
@@ -617,27 +657,9 @@ async def _run_chat_turn(
             if chunks and len(chunks) > 0:
                 # Context includes ALL chunks (high- and low-confidence) so the LLM
                 # always has something to work with. Sources, below, exclude the
-                # low-confidence ones. A vision-derived chunk is labeled as such in
-                # its [Source: ...] line so the answering model can never mistake
-                # AI-vision transcription for verbatim document text; chunks
-                # without the flag render exactly as before.
-                def _context_block(chunk: dict) -> str:
-                    title = get_clean_title(chunk['filename'])['title']
-                    if (chunk.get("metadata") or {}).get("visionDerived"):
-                        page = chunk.get("pageStart")
-                        if page is None:
-                            # Direct image upload: no pages, no verbatim layer.
-                            return (
-                                f"[Source: {title} - AI vision description of an "
-                                f"uploaded image; model-generated, not document "
-                                f"text]\n{chunk['text']}"
-                            )
-                        return (
-                            f"[Source: {title} page {page} - AI vision transcription of "
-                            f"a scanned page; model-generated, not verbatim]\n{chunk['text']}"
-                        )
-                    return f"[Source: {title}]\n{chunk['text']}"
-
+                # low-confidence ones. (_context_block was defined inline here and
+                # is now module-level, unchanged, so the source-formats route
+                # renders context blocks identically to a THREAD_DOC answer.)
                 context = "\n\n".join([_context_block(chunk) for chunk in chunks])
                 # Phase 4: for a multi-document THREAD_DOC turn, hand the model
                 # the retrieval scope as structured fact so it can attribute
@@ -1118,6 +1140,413 @@ async def chat_with_rag_stream(
             "X-Accel-Buffering": "no",
             # no-transform additionally tells intermediaries not to re-chunk or
             # compress the stream.
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Source-grounded output formats (SOURCE_FORMATS_ENABLED, default off).
+# Everything below is reachable ONLY through the two /chat/formats routes,
+# each of which gates on the flag first -- flag off, no new code path runs.
+# ---------------------------------------------------------------------------
+
+class FormatGenerateRequest(BaseModel):
+    threadId: str
+    format: str
+
+
+# Single in-flight format generation per instance. A format job occupies the
+# one GPU slice for 90s+; without this, stacked jobs would queue chat turns
+# behind an unbounded backlog. Checked and set synchronously in the endpoint
+# (no await between check and set, so the event loop cannot interleave a
+# second request), cleared in the stream generator's finally on every exit
+# path including client disconnect.
+_format_job_active = False
+
+
+def _format_busy_response() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "A document generation is already running. "
+            "Please try again in a moment."
+        ),
+    )
+
+
+def _build_thread_sources(chunks: List[Dict]) -> List[Dict]:
+    """Displayed-source entries for a format document, modeled on the chat
+    turn's Step 2b builder for thread uploads: one entry per clean title, no
+    external URL (private files), vision provenance carried per source. All
+    format chunks are deliberate full-coverage context, never low-confidence."""
+    vision_pages_by_title: Dict[str, set] = {}
+    for chunk in chunks:
+        if (chunk.get("metadata") or {}).get("visionDerived"):
+            vp = vision_pages_by_title.setdefault(
+                get_clean_title(chunk["filename"])["title"], set()
+            )
+            if chunk.get("pageStart") is not None:
+                vp.add(chunk["pageStart"])
+    seen_titles: set = set()
+    sources: List[Dict] = []
+    for chunk in chunks:
+        info = get_clean_title(chunk["filename"])
+        if info["title"] in seen_titles:
+            continue
+        seen_titles.add(info["title"])
+        meta = chunk.get("metadata") or {}
+        file_type = meta.get("fileType")
+        if not file_type:
+            fn = chunk.get("filename", "")
+            file_type = ("." + fn.rsplit(".", 1)[-1].lower()) if "." in fn else ""
+        entry = {
+            "title": info["title"],
+            "url": None,  # thread uploads are private; never build external links
+            "filename": chunk.get("filename"),
+            "fileType": file_type,
+            "canonicalTitle": chunk.get("canonicalTitle"),
+            "uploader": chunk.get("uploaderName"),
+            "project": chunk.get("projectTag"),
+            "version": chunk.get("version"),
+        }
+        if info["title"] in vision_pages_by_title:
+            entry["visionDerived"] = True
+            entry["visionPages"] = sorted(vision_pages_by_title[info["title"]])
+        sources.append(entry)
+    return sources
+
+
+async def _run_format_turn(
+    payload: FormatGenerateRequest,
+    current_user: User,
+    emit: TokenEmitter,
+    progress,
+) -> Dict:
+    """One format generation: inventory -> full-document load -> engine ->
+    scope note -> persistence. Returns {answer, sources, engine, coverage}.
+
+    Mirrors the THREAD_DOC turn's honesty contracts: Phase 1 non-ready
+    documents are stated, never silently omitted; the Phase 4 note (via the
+    shared builder) states coverage of every source; vision provenance keeps
+    its labeling through _context_block and the vision scope."""
+    # Immediate feedback: the inventory + full-document load runs before any
+    # engine stage can report, so name this phase rather than sit silent.
+    #
+    # [FORMATS-TIMING] lines carry their own wall-clock timestamp and flush
+    # immediately: stdout under systemd is block-buffered, so a plain print's
+    # journald timestamp is the moment a buffer DRAINED, not when the code
+    # ran -- that artifact once made an in-generation cold model load look
+    # like a pre-engine stall.
+    def _timing(step: str) -> None:
+        print(f"[FORMATS-TIMING] {datetime.now().isoformat(timespec='milliseconds')} {step}",
+              flush=True)
+
+    _timing("turn start")
+    await progress("prepare", 0, 0)
+    _, _, doc_states = await thread_document_inventory(
+        payload.threadId, current_user.id
+    )
+    _timing("inventory done")
+    pending = [s["filename"] for s in doc_states if s["status"] == "pending"]
+    failed = [
+        {"filename": s["filename"], "reason": s["reason"]}
+        for s in doc_states if s["status"] == "failed"
+    ]
+    ready = [s["filename"] for s in doc_states if s["status"] == "ready"]
+
+    if not ready:
+        # Phase 1 handling, mirroring the chat turn's thread-not-ready answer:
+        # deterministic status text, no LLM call, nothing silently omitted.
+        lines = []
+        if pending:
+            verb = "is" if len(pending) == 1 else "are"
+            lines.append(
+                f"Your document {_join_names(pending)} {verb} still being "
+                f"processed, so there is nothing to generate from yet. "
+                f"Please try again in a moment."
+            )
+        for f in failed:
+            lines.append(
+                f'Your document "{f.get("filename")}" could not be '
+                f"processed: {f.get('reason') or 'Ingestion failed'}"
+            )
+        if not lines:
+            lines.append(
+                "This conversation has no uploaded documents to generate from."
+            )
+        answer = "\n\n".join(lines)
+        await emit(answer)
+        return {"answer": answer, "sources": [], "engine": "none", "coverage": []}
+
+    docs = await load_full_thread_documents(payload.threadId, current_user.id)
+    _timing("chunk load done")
+    # Keep only ready documents (a pending doc can already have partial
+    # chunks mid-ingest; including them would misstate coverage).
+    docs = {fn: chunks for fn, chunks in docs.items() if fn in ready}
+
+    all_chunks = [c for chunks in docs.values() for c in chunks]
+    doc_blocks = [
+        (fn, [_context_block(c) for c in docs[fn]]) for fn in sorted(docs)
+    ]
+    _timing(f"context blocks built ({len(all_chunks)} chunks)")
+    context_header = ""
+    if len(docs) > 1:
+        names = ", ".join(sorted(docs))
+        context_header = (
+            f"[ATTACHED DOCUMENTS: {names}]\n"
+            f"[CONTEXT DRAWN FROM: {names}]"
+        )
+
+    text, meta = await generate_format_document(
+        payload.format,
+        doc_blocks,
+        context_header=context_header,
+        emit=emit,
+        progress=progress,
+    )
+
+    # Coverage honesty (Phase 4 machinery, not a parallel one). sampled is
+    # filled from what was ACTUALLY included -- if the engine ever covered
+    # less than a document's full chunk list, the note would say so rather
+    # than render the full-coverage line.
+    sampled = [
+        {"filename": fn, "sampled": len(chunks), "total": len(chunks)}
+        for fn, chunks in sorted(docs.items())
+    ]
+    scope = {
+        "searched": sorted(docs),
+        "grounded": sorted(docs),
+        "no_relevant": [],
+        "excluded": [],
+        "sampled": sampled,
+        "vision": _vision_scope(all_chunks),
+        "pending": pending,
+        "failed": failed,
+    }
+    note = _thread_scope_note(
+        scope,
+        subject_phrase="This generated document",
+        always_state_coverage=True,
+    )
+    if note:
+        await emit(f"\n\n{note}")
+        text = f"{text}\n\n{note}"
+
+    sources = _build_thread_sources(all_chunks)
+
+    try:
+        await messages_collection.insert_one({
+            "threadId": payload.threadId,
+            "userId": current_user.id,
+            "role": "assistant",
+            "content": text,
+            "sources": sources,
+            "format": payload.format,
+            "engine": meta["engine"],
+            "createdAt": datetime.now(),
+        })
+        print(
+            f"[FORMATS] Persisted generated document: format={payload.format} "
+            f"thread={payload.threadId} engine={meta['engine']} chars={len(text)}",
+            flush=True,
+        )
+    except Exception as save_error:
+        print(f"[FORMATS] Failed to persist generated document: {save_error}")
+
+    coverage = [
+        {**s, "status": "ready"} for s in sampled
+    ] + [
+        {"filename": fn, "status": "pending"} for fn in pending
+    ] + [
+        {"filename": f["filename"], "status": "failed"} for f in failed
+    ]
+    return {
+        "answer": text,
+        "sources": sources,
+        "engine": meta["engine"],
+        "coverage": coverage,
+    }
+
+
+async def _sse_format_turn(payload: FormatGenerateRequest, current_user: User):
+    """SSE stream for one format generation. Same pump discipline as
+    _sse_chat_turn (owned task so disconnect cancels the GPU work, heartbeats
+    between events) with a typed event queue so map-reduce progress events
+    interleave with tokens. Clears the single-job guard on every exit path."""
+    global _format_job_active
+
+    # Wall-clock anchor for the completion/disconnect/failure log lines below:
+    # without them a stream that dies after the last [FORMATS-TIMING] line is
+    # invisible in the logs (a full debugging round was lost to that gap).
+    stream_started = time.monotonic()
+
+    events: "asyncio.Queue[tuple]" = asyncio.Queue()
+
+    async def emit(text: str) -> None:
+        await events.put(("token", {"text": text}))
+
+    async def progress(stage: str, current: int, total: int) -> None:
+        await events.put(("progress", {"stage": stage, "current": current, "total": total}))
+
+    turn: Optional[asyncio.Task] = None
+    getter: Optional[asyncio.Task] = None
+    # EVERYTHING lives inside this try -- including the first yield. A client
+    # that disconnects while the generator is suspended at the start event
+    # raises GeneratorExit right there; with the yield outside the try, the
+    # finally would never run and the single-job guard would leak set forever
+    # (every later request 409s until restart).
+    try:
+        yield _sse("start", {"status": "generating", "format": payload.format})
+
+        turn = asyncio.create_task(
+            _run_format_turn(payload, current_user, emit, progress)
+        )
+        while True:
+            if getter is None:
+                getter = asyncio.create_task(events.get())
+            done, _ = await asyncio.wait(
+                {getter, turn},
+                timeout=SSE_HEARTBEAT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if getter in done:
+                event, data = getter.result()
+                getter = None
+                yield _sse(event, data)
+                continue
+            if turn in done:
+                break
+            yield ": keep-alive\n\n"
+
+        while not events.empty():
+            event, data = events.get_nowait()
+            yield _sse(event, data)
+
+        result = turn.result()
+        yield _sse(
+            "done",
+            {
+                "sources": result["sources"],
+                "engine": result["engine"],
+                "format": payload.format,
+                "coverage": result["coverage"],
+            },
+        )
+        print(
+            f"[FORMATS] Stream complete: format={payload.format} "
+            f"thread={payload.threadId} engine={result['engine']} "
+            f"answer_chars={len(result['answer'])} "
+            f"elapsed={time.monotonic() - stream_started:.1f}s",
+            flush=True,
+        )
+    except HTTPException as http_error:
+        print(
+            f"[FORMATS] Stream ended with HTTP error: format={payload.format} "
+            f"thread={payload.threadId} detail={http_error.detail} "
+            f"elapsed={time.monotonic() - stream_started:.1f}s",
+            flush=True,
+        )
+        yield _sse("error", {"detail": http_error.detail})
+    except asyncio.CancelledError:
+        print(
+            f"[FORMATS] Client disconnected -- cancelling format generation: "
+            f"format={payload.format} thread={payload.threadId} "
+            f"elapsed={time.monotonic() - stream_started:.1f}s",
+            flush=True,
+        )
+        raise
+    except Exception as error:
+        print(
+            f"[ERROR] Format generation failed: format={payload.format} "
+            f"thread={payload.threadId} "
+            f"elapsed={time.monotonic() - stream_started:.1f}s: {error}",
+            flush=True,
+        )
+        import traceback
+        traceback.print_exc()
+        yield _sse("error", {"detail": "An internal error occurred, please try again."})
+    finally:
+        _format_job_active = False
+        if getter is not None and not getter.done():
+            getter.cancel()
+        if turn is not None and not turn.done():
+            turn.cancel()
+            try:
+                await turn
+            except asyncio.CancelledError:
+                pass
+            except Exception as cleanup_error:
+                print(f"[FORMATS] Cancelled turn raised on teardown: {cleanup_error}")
+
+
+@router.get("/chat/formats/status")
+async def formats_status(
+    threadId: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+):
+    """Feature handshake for the frontend (Header /status pattern): whether the
+    feature is on, the available formats, whether a generation is in flight,
+    and -- when a threadId is given -- how many of that thread's documents are
+    ready, so the buttons can show on a revisited thread whose uploads happened
+    in an earlier session. Flag off: {"enabled": False} and nothing else runs.
+    """
+    if not config.SOURCE_FORMATS_ENABLED:
+        return {"enabled": False}
+    out = {
+        "enabled": True,
+        "formats": [
+            {"key": key, "label": spec["label"]}
+            for key, spec in FORMAT_PROMPTS.items()
+        ],
+        "generating": _format_job_active,
+        "readyDocuments": 0,
+    }
+    if threadId:
+        _, _, doc_states = await thread_document_inventory(threadId, current_user.id)
+        out["readyDocuments"] = sum(1 for s in doc_states if s["status"] == "ready")
+    return out
+
+
+@router.post("/chat/formats/stream")
+@limiter.limit(RATE_LIMIT_CHAT, key_func=user_id_key)
+async def chat_formats_stream(
+    request: Request,
+    payload: FormatGenerateRequest,
+    current_user: User = Depends(rate_limit_identify),
+):
+    """Generate a source-grounded format document over SSE.
+
+    Rides the streaming transport by requirement: a full-document generation
+    holds the GPU for 90s+ and the buffered /api/chat proxy has a hard 240s
+    ceiling, while this stream's heartbeats keep every proxy read timeout
+    reset. Self-gating 404 with the flag off, 409 when a generation is
+    already in flight (single job per instance; a second request is refused
+    visibly, never silently stacked)."""
+    global _format_job_active
+    if not config.SOURCE_FORMATS_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    if payload.format not in FORMAT_PROMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown format: {payload.format}",
+        )
+    if not payload.threadId:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="threadId is required",
+        )
+    if _format_job_active:
+        raise _format_busy_response()
+    # No await between the check above and this set: atomic on the event loop.
+    _format_job_active = True
+
+    return StreamingResponse(
+        _sse_format_turn(payload, current_user),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
         },

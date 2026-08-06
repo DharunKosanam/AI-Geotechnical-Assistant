@@ -50,10 +50,17 @@ class ThreadHistoryResponse(BaseModel):
 
 
 class UpdateThreadRequest(BaseModel):
-    """Request model for updating thread metadata"""
+    """Request model for updating thread metadata.
+
+    expectedCurrentName makes the rename conditional: the update applies only
+    while the thread still carries exactly that name. The first-action title
+    (format click on a fresh thread) uses it so an auto-timestamp placeholder
+    is replaced atomically -- a name the user typed, or any other title that
+    landed first, is never overwritten (the mismatch returns 409)."""
     threadId: str
     newName: Optional[str] = None
     isGroup: Optional[bool] = None
+    expectedCurrentName: Optional[str] = None
 
 
 class DeleteThreadRequest(BaseModel):

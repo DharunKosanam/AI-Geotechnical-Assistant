@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import useSWR from "swr";
 import styles from "./chat.module.css";
 import { AssistantStream } from "openai/lib/AssistantStream";
@@ -557,6 +557,12 @@ const Chat = ({
   // attach). Keeps the welcome screen up and drives one-time title generation.
   const [isDraftThread, setIsDraftThread] = useState(false);
   const awaitingFirstMessageRef = useRef(false);
+  // The auto-timestamp placeholder ensureThread registered the sidebar row
+  // with. The first-action title (format click) passes it as the rename's
+  // expectedCurrentName so only the placeholder is ever replaced -- a name
+  // the user typed mid-generation wins. Set with awaitingFirstMessageRef,
+  // cleared wherever that ref is cleared.
+  const draftAutoNameRef = useRef<string | null>(null);
   const [isGroupConversation, setIsGroupConversation] = useState(false);
   const threadListRef = useRef<any>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
@@ -589,6 +595,173 @@ const Chat = ({
   }, []);
   // True while any chip is still uploading/processing — used to block sending.
   const isUploading = attachedFiles.some((f) => f.status === "uploading");
+
+  // --- Source-grounded output formats (backend SOURCE_FORMATS_ENABLED) ---
+  // null until the handshake says the feature is on; fails closed like the
+  // Header's workspace/KB gating. readyDocs comes from the status endpoint so
+  // a revisited thread (whose uploads happened in an earlier session) still
+  // shows the buttons; the OR with ready chips covers a just-finished upload
+  // without waiting for a refetch.
+  const [availableFormats, setAvailableFormats] = useState<
+    { key: string; label: string }[] | null
+  >(null);
+  const [formatReadyDocs, setFormatReadyDocs] = useState(0);
+  const [formatBusy, setFormatBusy] = useState(false);
+  const [formatProgress, setFormatProgress] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(API_ENDPOINTS.formatsStatus(), { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.enabled || !Array.isArray(data.formats)) return;
+        setAvailableFormats(data.formats);
+      })
+      .catch(() => {
+        /* feature stays hidden */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const refreshFormatReadyDocs = useCallback(
+    (tid: string | null) => {
+      if (!availableFormats || !tid) {
+        setFormatReadyDocs(0);
+        return;
+      }
+      fetch(API_ENDPOINTS.formatsStatus(tid), { credentials: "include" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (typeof data?.readyDocuments === "number") {
+            setFormatReadyDocs(data.readyDocuments);
+          }
+        })
+        .catch(() => {
+          /* keep last known count */
+        });
+    },
+    [availableFormats],
+  );
+  useEffect(() => {
+    refreshFormatReadyDocs(threadId || null);
+  }, [threadId, refreshFormatReadyDocs]);
+  const hasReadyFormatDocs =
+    formatReadyDocs > 0 || attachedFiles.some((f) => f.status === "ready");
+
+  // --- Named persistent source sets (backend SOURCE_SETS_ENABLED) ---
+  // The sources panel: per-document status, chunk count, and provenance for
+  // the current thread, with per-source removal behind a dry-run confirm.
+  // Fails closed like the formats handshake.
+  interface ThreadSource {
+    filename: string;
+    status: string;
+    reason: string | null;
+    chunkCount: number;
+    provenance: "verbatim" | "vision" | "mixed";
+    visionPages: number[];
+    partiallyIndexed: boolean;
+    warning: string | null;
+  }
+  const [sourceSetsEnabled, setSourceSetsEnabled] = useState(false);
+  const [showSources, setShowSources] = useState(false);
+  const [threadSources, setThreadSources] = useState<ThreadSource[] | null>(null);
+  // The dry-run preview for the source pending removal; confirm sends the
+  // same request with confirm: true.
+  const [removePreview, setRemovePreview] = useState<{
+    filename: string;
+    chunksToDelete: number;
+    parentDocsToDelete: number;
+  } | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(API_ENDPOINTS.sourceSetsStatus(), { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.enabled) setSourceSetsEnabled(true);
+      })
+      .catch(() => {
+        /* feature stays hidden */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const refreshThreadSources = useCallback(
+    (tid: string | null) => {
+      if (!sourceSetsEnabled || !tid) {
+        setThreadSources(null);
+        return;
+      }
+      fetch(API_ENDPOINTS.threadSources(tid), { credentials: "include" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (Array.isArray(data?.sources)) setThreadSources(data.sources);
+        })
+        .catch(() => {
+          /* keep last known list */
+        });
+    },
+    [sourceSetsEnabled],
+  );
+  useEffect(() => {
+    setShowSources(false);
+    setRemovePreview(null);
+    refreshThreadSources(threadId || null);
+  }, [threadId, refreshThreadSources]);
+
+  // Ask for the dry-run preview; the actual delete happens in confirmRemoveSource.
+  const requestRemoveSource = async (filename: string) => {
+    const tid = threadIdRef.current;
+    if (!tid || removeBusy) return;
+    setRemoveBusy(true);
+    try {
+      const res = await fetch(API_ENDPOINTS.removeThreadSource(tid), {
+        credentials: "include",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename, confirm: false }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setRemovePreview({
+          filename,
+          chunksToDelete: data.chunksToDelete ?? 0,
+          parentDocsToDelete: data.parentDocsToDelete ?? 0,
+        });
+      }
+    } catch (e) {
+      console.error("Source removal preview failed:", e);
+    } finally {
+      setRemoveBusy(false);
+    }
+  };
+
+  const confirmRemoveSource = async () => {
+    const tid = threadIdRef.current;
+    if (!tid || !removePreview || removeBusy) return;
+    setRemoveBusy(true);
+    try {
+      const res = await fetch(API_ENDPOINTS.removeThreadSource(tid), {
+        credentials: "include",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: removePreview.filename, confirm: true }),
+      });
+      if (res.ok) {
+        // The document set changed: refresh the panel, the format-button
+        // gating, and drop a matching attachment chip if one is showing.
+        setAttachedFiles((prev) => prev.filter((f) => f.name !== removePreview.filename));
+        refreshThreadSources(tid);
+        refreshFormatReadyDocs(tid);
+      }
+    } catch (e) {
+      console.error("Source removal failed:", e);
+    } finally {
+      setRemovePreview(null);
+      setRemoveBusy(false);
+    }
+  };
   // Per-file status poll timers so each chip can be cancelled independently (e.g. via X).
   const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
@@ -744,6 +917,13 @@ const Chat = ({
         return;
       }
 
+      // Same first-action rename semantics as applyFormatTitle: the title
+      // only ever replaces the auto-timestamp placeholder captured when the
+      // thread was minted. No placeholder on record means nothing is safely
+      // replaceable, so skip the LLM call too.
+      const placeholder = draftAutoNameRef.current;
+      if (!placeholder) return;
+
       const titleEndpoint = API_ENDPOINTS.generateTitle(targetThreadId);
       const response = await fetch(titleEndpoint, {
         credentials: "include",
@@ -764,9 +944,12 @@ const Chat = ({
       const data = await response.json();
       const title = data.title;
 
-      // Update thread name in history
+      // Update thread name in history -- conditionally: expectedCurrentName
+      // pins the write to the placeholder, so a rename the user made while
+      // the answer was streaming wins (the backend answers 409 and whatever
+      // won stays).
       const updateEndpoint = API_ENDPOINTS.updateThread();
-      await fetch(updateEndpoint, {
+      const update = await fetch(updateEndpoint, {
         credentials: "include",
         method: "PUT",
         headers: {
@@ -775,8 +958,10 @@ const Chat = ({
         body: JSON.stringify({
           threadId: targetThreadId,
           newName: title,
+          expectedCurrentName: placeholder,
         }),
       });
+      if (!update.ok) return; // 409: someone named the thread first
 
       // Refresh thread list to show updated title
       if (threadListRef.current) {
@@ -784,6 +969,53 @@ const Chat = ({
       }
     } catch (error) {
       console.error("Error generating title:", error);
+    }
+  };
+
+  // First-action title for a thread whose opening act is a generated
+  // document. Deterministic "<Format label> - <source title>" instead of the
+  // LLM summarizer: it names the artifact rather than summarizing its text,
+  // costs no model call right after a 60-90s generation on the same GPU, and
+  // is stable across retries. The rename is conditional: expectedCurrentName
+  // pins it to the auto-timestamp placeholder, so a name the user typed
+  // mid-generation -- or any title that landed first -- survives (the
+  // backend answers 409 and whatever won stays).
+  const applyFormatTitle = async (
+    targetThreadId: string,
+    formatLabel: string,
+    sources: any[],
+  ) => {
+    const placeholder = draftAutoNameRef.current;
+    if (!placeholder) return; // nothing safely replaceable
+    const first = sources.find(
+      (s) => s && typeof s === "object" && typeof s.title === "string" && s.title,
+    );
+    let title = formatLabel;
+    if (first) {
+      const extra = sources.length > 1 ? ` and ${sources.length - 1} more` : "";
+      const room = 80 - formatLabel.length - 3 - extra.length;
+      let doc: string = first.title;
+      if (doc.length > room) doc = doc.slice(0, Math.max(10, room - 3)) + "...";
+      title = `${formatLabel} - ${doc}${extra}`;
+    }
+    try {
+      const res = await fetch(API_ENDPOINTS.updateThread(), {
+        credentials: "include",
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          threadId: targetThreadId,
+          newName: title,
+          expectedCurrentName: placeholder,
+        }),
+      });
+      // 409: someone named the thread first (user rename, chat title from
+      // another tab). Theirs stands; nothing to do.
+      if (res.ok && threadListRef.current) {
+        await threadListRef.current.fetchThreads();
+      }
+    } catch (error) {
+      console.error("First-action title update failed:", error);
     }
   };
 
@@ -1029,6 +1261,208 @@ const Chat = ({
     }
   };
 
+  // Generate a source-grounded format document (study guide, briefing, ...)
+  // over the formats SSE endpoint. Mirrors sendMessageStreaming's transport
+  // discipline (silence watchdog, never re-send after first token) plus two
+  // format-specific events: "progress" (map-reduce batch counts, shown in the
+  // notice line until the first token arrives) and the coverage-carrying
+  // "done". A 409 means another generation holds the single per-instance job
+  // slot — surfaced as a notice, never queued silently.
+  const generateFormatDocument = async (formatKey: string, formatLabel: string) => {
+    const actualThreadId = threadIdRef.current;
+    if (!actualThreadId || formatBusy) return;
+
+    // Is this the thread's first action? Captured before any state changes.
+    // The slot is consumed only when a document actually completes (below),
+    // so a failed or empty run leaves the naming to the next success --
+    // whether that is a retried format click or a first chat message.
+    const isFirstAction = awaitingFirstMessageRef.current;
+
+    // Generating a document starts the conversation just like sending a
+    // message does (handleSubmit clears this flag the same way). Without
+    // this, an attach-first thread is still a draft, the render ternary
+    // keeps showing the welcome pane, and the streamed document appends
+    // into message state that is never mounted -- received but invisible.
+    setIsDraftThread(false);
+    setFormatBusy(true);
+    setInputDisabled(true);
+    setAwaitingSince(Date.now());
+    setFormatProgress(
+      `Starting ${formatLabel.toLowerCase()} generation — a large document can take a few minutes...`,
+    );
+
+    const controller = new AbortController();
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    const resetWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => controller.abort(), STREAM_SILENCE_TIMEOUT_MS);
+    };
+
+    let started = false;
+    // Sources from the done event, kept for the first-action title below.
+    let doneSources: any[] | null = null;
+    try {
+      resetWatchdog();
+      const response = await fetch(API_ENDPOINTS.formatsStream(), {
+        credentials: "include",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threadId: actualThreadId, format: formatKey }),
+        signal: controller.signal,
+      });
+
+      if (response.status === 409) {
+        // Single-job guard: visible refusal, not a silent queue.
+        const raw = await response.text().catch(() => "");
+        let detail = "A document generation is already running. Please try again in a moment.";
+        try {
+          detail = (JSON.parse(raw) as { detail?: string }).detail ?? detail;
+        } catch {
+          /* keep default */
+        }
+        setFormatProgress(detail);
+        setTimeout(() => setFormatProgress(null), 6000);
+        return;
+      }
+      if (response.status === 404) {
+        // Feature switched off server-side since the handshake: hide the UI.
+        setAvailableFormats(null);
+        return;
+      }
+      if (!response.ok || !response.body) {
+        const raw = await response.text().catch(() => "");
+        let detail = "";
+        try {
+          detail = (JSON.parse(raw) as { detail?: string }).detail ?? "";
+        } catch {
+          /* not JSON */
+        }
+        appendMessage(
+          "assistant",
+          `\n\n[Error: ${detail || `Failed to generate document (Status: ${response.status})`}]`,
+        );
+        return;
+      }
+
+      setIsStreaming(true);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let eventName = "";
+
+      const stageLabels: Record<string, string> = {
+        prepare: "Preparing",
+        load: "Loading the model",
+        read: "Reading the document",
+        write: "Writing the document",
+        map: "Summarizing sections",
+        reduce: "Synthesizing document",
+        generate: "Generating document",
+      };
+
+      const handleEvent = (name: string, dataLine: string) => {
+        let payload: any;
+        try {
+          payload = JSON.parse(dataLine);
+        } catch {
+          return;
+        }
+        if (name === "token") {
+          const piece: string = payload.text ?? "";
+          if (!piece) return;
+          if (!started) {
+            started = true;
+            shouldForceScrollRef.current = true;
+            setFormatProgress(null);
+            appendMessage("assistant", piece);
+          } else {
+            appendToLastMessage(piece);
+          }
+        } else if (name === "progress") {
+          const label = stageLabels[payload.stage] ?? "Working";
+          if (payload.stage === "load" && payload.total > 0) {
+            // Cold start (first use after a reboot / Ollama restart): the
+            // model weights load from disk before anything else can happen.
+            setFormatProgress(
+              `Loading the model — first run after a restart, about ${payload.total}s...`,
+            );
+          } else if (payload.stage === "read" && payload.total > 0) {
+            // Prefill wait: show the honest estimate and a moving elapsed
+            // counter so a multi-minute silence reads as work, not a hang.
+            const elapsed = payload.current > 0 ? ` — ${payload.current}s elapsed` : "";
+            setFormatProgress(
+              `Reading the document (about ${payload.total}s for this document)${elapsed}...`,
+            );
+          } else {
+            const counted =
+              typeof payload.current === "number" && payload.total > 1
+                ? ` (${payload.current}/${payload.total})`
+                : "";
+            setFormatProgress(`${label}${counted}...`);
+          }
+        } else if (name === "done") {
+          doneSources = payload.sources || [];
+          const block = formatSourcesBlock(payload.sources || []);
+          if (block) {
+            if (started) appendToLastMessage(block);
+            else appendMessage("assistant", block.trimStart());
+          }
+        } else if (name === "error") {
+          const detail = payload.detail || "The document generation failed.";
+          if (started) appendToLastMessage(`\n\n[Error: ${detail}]`);
+          else appendMessage("assistant", `\n\n[Error: ${detail}]`);
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        resetWatchdog();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const record = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          eventName = "";
+          for (const line of record.split("\n")) {
+            if (line.startsWith("event: ")) eventName = line.slice(7).trim();
+            else if (line.startsWith("data: ")) handleEvent(eventName, line.slice(6));
+          }
+        }
+      }
+
+      if (!started) {
+        appendMessage(
+          "assistant",
+          "\n\n[Error: The document generation returned no content.]",
+        );
+      } else if (isFirstAction) {
+        // First action names the thread -- once. The conditional rename in
+        // applyFormatTitle only ever replaces the auto-timestamp
+        // placeholder, so a user rename that landed mid-generation wins.
+        awaitingFirstMessageRef.current = false;
+        await applyFormatTitle(actualThreadId, formatLabel, doneSources ?? []);
+      }
+    } catch (error: any) {
+      const aborted = error?.name === "AbortError";
+      console.error("Format generation error:", error);
+      const detail = aborted
+        ? "The connection went quiet and the generation was cut off. Please try again."
+        : error?.message || "The generation stream failed.";
+      if (started) appendToLastMessage(`\n\n[Error: ${detail}]`);
+      else appendMessage("assistant", `\n\n[Error: ${detail}]`);
+    } finally {
+      if (watchdog) clearTimeout(watchdog);
+      setIsStreaming(false);
+      setFormatBusy(false);
+      setInputDisabled(false);
+      setAwaitingSince(null);
+      setFormatProgress((p) =>
+        p && p.startsWith("A document generation is already running") ? p : null,
+      );
+    }
+  };
+
   const sendMessage = async (text: string, targetThreadId: string | null = null) => {
     const actualThreadId = targetThreadId || threadId;
 
@@ -1228,13 +1662,15 @@ const Chat = ({
       // Sidebar row. Registering it here (rather than at first message) keeps an
       // attach-first thread visible and deletable — deleting a thread cascades
       // to its thread_upload documents, so an abandoned upload is never orphaned.
+      const placeholderName = getDefaultThreadName();
+      draftAutoNameRef.current = placeholderName;
       await fetch(API_ENDPOINTS.createThreadHistory(), {
         credentials: "include",
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           threadId: newThreadId,
-          name: getDefaultThreadName(),
+          name: placeholderName,
           isGroup: false,
         }),
       });
@@ -1628,6 +2064,7 @@ const Chat = ({
     setIsDraftThread(false);
     setAwaitingSince(null); // an abandoned turn must not keep a spinner alive
     awaitingFirstMessageRef.current = false;
+    draftAutoNameRef.current = null;
     clearAttachedFiles();
     setUserInput("");
     lastMessageCountRef.current = 0;
@@ -1647,6 +2084,7 @@ const Chat = ({
     // being opened — drop it on the switch.
     setAwaitingSince(null);
     awaitingFirstMessageRef.current = false;
+    draftAutoNameRef.current = null;
 
     if (selectedThreadId === null) {
       // Show welcome screen - clear the current thread
@@ -1747,6 +2185,10 @@ const Chat = ({
           });
           // Settle the chip back to the calm file icon after the success check.
           setTimeout(() => updateAttachedFile(id, { settled: true }), 1500);
+          // A newly-ready document can enable the format buttons and
+          // belongs in the sources panel.
+          refreshFormatReadyDocs(forThreadId);
+          refreshThreadSources(forThreadId);
         } else if (data.status === "error") {
           stopPolling(id);
           updateAttachedFile(id, { status: "error", error: data.error || "Processing failed" });
@@ -2094,6 +2536,118 @@ const Chat = ({
           {isUploading && (
             <div className={styles.attachmentNotice}>
               Reading your file — you can keep chatting; until it&apos;s ready, answers will note it hasn&apos;t been searched yet.
+            </div>
+          )}
+          {sourceSetsEnabled && threadId && (
+            <div className={styles.sourcesBar}>
+              <button
+                type="button"
+                className={styles.sourcesToggle}
+                onClick={() => setShowSources((s) => !s)}
+              >
+                {showSources ? "Hide sources" : `Sources (${threadSources?.length ?? 0})`}
+              </button>
+              {showSources && (
+                <div className={styles.sourcesPanel}>
+                  {(threadSources ?? []).length === 0 && (
+                    <div className={styles.sourcesEmpty}>
+                      No sources in this conversation yet. Attach a file to add one.
+                    </div>
+                  )}
+                  {(threadSources ?? []).map((s) => (
+                    <div key={s.filename} className={styles.sourceRow}>
+                      <span className={styles.sourceName} title={s.filename}>
+                        {s.filename}
+                      </span>
+                      <span className={styles.sourceMeta}>
+                        {s.status === "ready"
+                          ? `${s.chunkCount} sections`
+                          : s.status === "pending"
+                            ? "processing..."
+                            : `failed${s.reason ? `: ${s.reason}` : ""}`}
+                        {" - "}
+                        {s.provenance === "vision"
+                          ? "AI vision-derived"
+                          : s.provenance === "mixed"
+                            ? `text + AI vision (pages ${s.visionPages.join(", ")})`
+                            : "verbatim text"}
+                        {s.partiallyIndexed && s.warning ? ` - ${s.warning}` : ""}
+                      </span>
+                      {removePreview?.filename === s.filename ? (
+                        <span className={styles.sourceConfirm}>
+                          Delete {removePreview.chunksToDelete} sections and{" "}
+                          {removePreview.parentDocsToDelete} document record? Other
+                          conversations and the knowledge base are not affected.
+                          <button
+                            type="button"
+                            className={styles.sourceConfirmBtn}
+                            disabled={removeBusy}
+                            onClick={confirmRemoveSource}
+                          >
+                            Delete
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.sourceCancelBtn}
+                            disabled={removeBusy}
+                            onClick={() => setRemovePreview(null)}
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className={styles.sourceRemoveBtn}
+                          disabled={removeBusy || formatBusy || isStreaming}
+                          title={`Remove ${s.filename} from this source set`}
+                          onClick={() => requestRemoveSource(s.filename)}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {availableFormats && hasReadyFormatDocs && (
+            <div className={styles.formatButtons}>
+              <span className={styles.formatButtonsLabel}>Generate from sources:</span>
+              {availableFormats.map((f) => {
+                const disabled = formatBusy || isStreaming || inputDisabled || isUploading;
+                // Why disabled matters more than what it does: say which wait
+                // the user is in. The wrapper span carries the tooltip too,
+                // because a disabled button does not reliably hover in every
+                // browser.
+                const tooltip = formatBusy
+                  ? "A document generation is already running — try again shortly."
+                  : isUploading
+                    ? "A document is still processing — available once it's ready."
+                    : disabled
+                      ? "Waiting for the current response to finish."
+                      : `Generate a ${f.label.toLowerCase()} from this conversation's documents — takes a few minutes for a large document`;
+                return (
+                  <span key={f.key} className={styles.formatBtnWrap} title={tooltip}>
+                    <button
+                      type="button"
+                      className={styles.formatBtn}
+                      disabled={disabled}
+                      title={tooltip}
+                      onClick={() => generateFormatDocument(f.key, f.label)}
+                    >
+                      {f.label}
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+          {formatProgress && (
+            <div className={styles.formatProgressNotice}>
+              <Loader2 size={16} className={styles.spinner} />
+              <span>{formatProgress}</span>
             </div>
           )}
           <div className={styles.inputRow}>

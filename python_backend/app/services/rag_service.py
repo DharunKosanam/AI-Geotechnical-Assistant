@@ -1250,6 +1250,52 @@ async def sample_thread_documents(
     return selected
 
 
+async def load_full_thread_documents(
+    thread_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """EVERY chunk of every ready document in a thread, grouped by filename in
+    reading order (SOURCE_FORMATS_ENABLED engine only -- no other caller).
+
+    Unlike sample_thread_documents there is no budget and no selection: the
+    format engine's coverage contract is the whole document, and the engine
+    picks single-call vs map-reduce from the measured size afterwards. Chunk
+    dicts carry the same fields the chat context builder reads, so context
+    blocks render identically to a THREAD_DOC answer (vision provenance
+    included). Isolation comes from the same _thread_scope_filter as every
+    other thread read.
+    """
+    filter_ = _thread_scope_filter(user_id, thread_id)
+    projection = {
+        "text": 1, "filename": 1, "category": 1, "metadata": 1,
+        "chunkingVersion": 1, "pageStart": 1, "sectionHeader": 1,
+        "threadId": 1, "chunkIndex": 1,
+    }
+    by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    async for doc in files_collection.find(filter_, projection):
+        by_doc.setdefault(doc.get("filename", "unknown"), []).append(doc)
+    for chunks in by_doc.values():
+        chunks.sort(key=lambda d: d.get("chunkIndex") or 0)
+    return {
+        fn: [
+            {
+                "id": str(d.get("_id")),
+                "text": d.get("text", ""),
+                "filename": fn,
+                "category": d.get("category", "thread_upload"),
+                "metadata": d.get("metadata", {}),
+                "chunkingVersion": d.get("chunkingVersion"),
+                "pageStart": d.get("pageStart"),
+                "sectionHeader": d.get("sectionHeader"),
+                "threadId": d.get("threadId"),
+                "low_confidence": False,
+            }
+            for d in by_doc[fn]
+        ]
+        for fn in sorted(by_doc)
+    }
+
+
 def _vision_scope(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Vision-derived provenance among the context chunks that can ground an
     answer (non-low-confidence): [{filename, pages, image}], filename-sorted,

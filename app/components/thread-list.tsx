@@ -1,4 +1,4 @@
-import React, { useState, useEffect, forwardRef, useImperativeHandle, useMemo } from "react";
+import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle, useMemo } from "react";
 import styles from "./thread-list.module.css";
 import { API_ENDPOINTS } from "../config/api";
 
@@ -78,11 +78,22 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
   const [newThreadName, setNewThreadName] = useState<string>("");
   const [showThreadInfo, setShowThreadInfo] = useState<{ id: string, name: string, isGroup: boolean } | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  // Read by the async fetch below so a refresh landing mid-rename cannot
+  // clobber the edit: state captured in a closure would be stale, a ref is
+  // always current.
+  const editingRef = useRef<string | null>(null);
+  useEffect(() => {
+    editingRef.current = editingThreadId;
+  }, [editingThreadId]);
 
   const fetchThreads = async () => {
     const response = await fetch(API_ENDPOINTS.getThreadHistory(), { credentials: "include" });
     const data = await response.json();
-    // 确保访问 threads 数组属性并进行反转
+    // A refresh that lands while a rename edit is open (or its PUT is still
+    // in flight) would overwrite the input / optimistic name with the
+    // server's stale copy — drop this result; the rename flow refreshes
+    // again when it settles.
+    if (editingRef.current) return;
     const raw: Thread[] = data.threads || [];
     const seen = new Set<string>();
     const unique = raw.filter((t) => {
@@ -101,10 +112,24 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
     fetchThreads
   }));
 
+  // Refresh on mount and when the window regains focus (multi-tab / multi-
+  // device freshness). The previous 3-second polling timer is gone: the
+  // sidebar lists only this user's own conversation rows, and every action
+  // that mutates them (create, first-message title, rename, delete) already
+  // triggers an explicit refresh — the timer's only real effect was a
+  // steady idle re-fetch of the whole list.
   useEffect(() => {
     fetchThreads();
-    const interval = setInterval(fetchThreads, 3000);
-    return () => clearInterval(interval);
+    const onFocus = () => fetchThreads();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") fetchThreads();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   // 在其他 hooks 后面添加
@@ -175,11 +200,21 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
 
 
   const updateThreadName = async (threadId: string) => {
+    // Mirror the server's validation up front: trim, and treat an empty or
+    // unchanged name as a cancelled edit rather than a request. Blurring an
+    // empty input used to persist name: "" — now it just closes the editor.
+    const name = newThreadName.trim();
+    const current = threads.find((t) => t.threadId === threadId)?.name;
+    if (!name || name === current) {
+      setEditingThreadId(null);
+      setNewThreadName("");
+      return;
+    }
     try {
       const response = await fetch(API_ENDPOINTS.updateThread(), {
         credentials: "include",
         method: 'PUT',
-        body: JSON.stringify({ threadId, newName: newThreadName }),
+        body: JSON.stringify({ threadId, newName: name }),
         headers: {
           'Content-Type': 'application/json',
         },
@@ -188,7 +223,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
         setThreads((prevThreads) => {
           const updated = prevThreads.map((thread) =>
             thread.threadId === threadId
-              ? { ...thread, name: newThreadName, updatedAt: new Date().toISOString() }
+              ? { ...thread, name, updatedAt: new Date().toISOString() }
               : thread
           );
           updated.sort((a, b) =>
@@ -197,11 +232,20 @@ const ThreadList = forwardRef<any, ThreadListProps>(({ currentThreadId, onThread
           );
           return updated;
         });
-        setEditingThreadId(null);
-        setNewThreadName("");
+      } else {
+        // Rejected (too long, thread gone, ...) — keep the old name on
+        // screen rather than an optimistic one the server refused.
+        console.error('Rename rejected with status', response.status);
       }
     } catch (error) {
-      console.error('更新线程名称失败:', error);
+      console.error('Failed to rename thread:', error);
+    } finally {
+      // Close the editor on every outcome, then reconcile with the server
+      // (the fetch skips itself while an edit is open, so clear first).
+      setEditingThreadId(null);
+      setNewThreadName("");
+      editingRef.current = null;
+      fetchThreads();
     }
   };
 

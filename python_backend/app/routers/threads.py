@@ -16,7 +16,7 @@ from models import (
     SubmitActionsRequest,
     User,
 )
-from app.core.database import conversations_collection, messages_collection
+from app.core.database import conversations_collection, messages_collection, files_collection
 from app.dependencies.auth import get_current_user
 from app.services.llm_service import get_llm
 
@@ -172,6 +172,38 @@ async def delete_thread(
             f"thread {request.threadId}"
         )
 
+        # Cascade: also remove any documents the user uploaded INTO this thread
+        # (THREAD_DOC storage -- both the chunk docs and the parent file-metadata
+        # doc, which all carry category=thread_upload + threadId + userId). Scope
+        # is EXACTLY this user + this thread + the thread_upload category, so the
+        # shared knowledge_base, the user's plain user_upload docs, and every
+        # other thread's uploads are never matched. Guarded on a truthy threadId
+        # so an empty value can never broad-match.
+        deleted_thread_documents = 0
+        if request.threadId:
+            scope = {"userId": current_user.id, "threadId": request.threadId}
+            doc_filter = {**scope, "category": "thread_upload"}
+            # Dry-run visibility BEFORE the destructive call: log the exact filter
+            # and a per-category picture -- how many thread_upload docs will go,
+            # and (defense-in-depth) how many docs carrying this threadId are NOT
+            # thread_upload and will therefore be LEFT UNTOUCHED (expected: 0).
+            to_delete = await files_collection.count_documents(doc_filter)
+            other_with_threadid = await files_collection.count_documents(
+                {**scope, "category": {"$ne": "thread_upload"}}
+            )
+            print(
+                f"[CASCADE] Thread-doc cleanup for thread {request.threadId} "
+                f"(user {current_user.id}): filter={doc_filter} -> would delete "
+                f"{to_delete} thread_upload doc(s); {other_with_threadid} "
+                f"other-category doc(s) with this threadId (left untouched)"
+            )
+            doc_result = await files_collection.delete_many(doc_filter)
+            deleted_thread_documents = doc_result.deleted_count
+            print(
+                f"[CASCADE] Deleted {deleted_thread_documents} thread_upload doc(s) "
+                f"for thread {request.threadId}"
+            )
+
         # Also delete the thread messages from memory
         if request.threadId in _thread_messages:
             del _thread_messages[request.threadId]
@@ -181,6 +213,7 @@ async def delete_thread(
             "success": True,
             "message": "Thread deleted successfully",
             "deleted_messages": message_result.deleted_count,
+            "deleted_thread_documents": deleted_thread_documents,
         }
         
     except HTTPException:

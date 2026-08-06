@@ -181,6 +181,36 @@
   background: #3a1f1f;
 }
 
+/* An errored or partially-indexed chip has something to SAY, so it gets room
+   to say it: the reason used to live only in a title tooltip, which meant a
+   failed upload looked like a red filename and nothing else. */
+.chipWithMessage {
+  max-width: 340px;
+  align-items: flex-start;
+}
+
+.chipErrorText {
+  font-size: 11px;
+  color: #f8a5a5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.chipWarningText {
+  font-size: 11px;
+  color: #e3b341;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Shown under the chips while an attachment is still being ingested, so the
+   disabled Send button has a visible reason. */
+.attachmentNotice {
+  padding: 0 10px 8px 10px;
+  font-size: 12px;
+  color: #8e8ea0;
+}
+
 .messages {
   flex-grow: 1;
   min-height: 0;
@@ -231,6 +261,63 @@
   background-color: #efefef;
   white-space: normal;
   line-height: 1.6;
+}
+
+/* Pending-response bubble. Shares .assistantMessage so it sits exactly where
+   the answer will, then is replaced by it. */
+.thinkingBubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.thinkingDots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.thinkingDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #6b7280;
+  animation: thinkingPulse 1.4s ease-in-out infinite;
+}
+
+.thinkingDot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.thinkingDot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.thinkingHint {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+@keyframes thinkingPulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* Respect a reduced-motion preference: keep the indicator, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .thinkingDot {
+    animation: none;
+    opacity: 0.6;
+  }
 }
 
 .codeMessage {

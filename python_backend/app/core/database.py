@@ -21,6 +21,16 @@ files_collection = db["files"]
 messages_collection = db["messages"]  # For persistent chat history
 users_collection = db["users"]  # JWT email/password auth
 
+# GeoPilot workspace History (Phase 3). Separate collections from the Chat tab
+# (conversations/messages) so the two features never share state.
+workspace_runs_collection = db["workspace_runs"]  # persisted calculator runs
+workspace_threads_collection = db["workspace_threads"]  # persisted chat threads
+
+# KB upload audit trail (Phase 6): a SEPARATE collection recording every upload
+# and every deletion (endpoint or CLI), so removals are traceable independent of
+# the KB data itself.
+kb_audit_collection = db["kb_audit"]
+
 
 async def ensure_indexes():
     """Create required indexes. Idempotent -- safe to call on every startup.
@@ -28,8 +38,14 @@ async def ensure_indexes():
     users.email gets a UNIQUE index so duplicate signups are rejected at the
     DB level (a second insert with the same email raises DuplicateKeyError).
     create_index is a no-op if the index already exists.
+
+    files.threadId (sparse: only thread_upload docs carry a threadId) turns the
+    per-turn thread lookups -- the document-inventory/fingerprint read on the
+    THREAD_DOC cache path and the thread-scoped chunk retrieval -- from a
+    25k-doc COLLSCAN into an index seek over one thread's ~100 docs.
     """
     await users_collection.create_index("email", unique=True, name="uniq_email")
+    await files_collection.create_index("threadId", name="threadId_1", sparse=True)
 
 
 async def close_mongo_connection():

@@ -10,11 +10,109 @@ Tests cover:
 """
 import pytest
 import io
+from types import SimpleNamespace
 
-# In-process API tests: they exercise the real retrieval pipeline (vector search,
-# embeddings) and need a DB, so they are integration, not unit. Opt-in via
-# `pytest tests/integration`.
+from bson import ObjectId
+
 pytestmark = pytest.mark.integration
+
+
+# ---------------------------------------------------------------------------
+# Auth + hermetic seams for the protected endpoints.
+#
+# These endpoints require a JWT; without one they 401 before any handler logic
+# runs (auth is a FastAPI dependency). We authenticate the same way the router
+# wiring tests do -- app.dependency_overrides -- and mock the heavy seams (Redis,
+# Mongo writes, the LLM/retrieval calls, the upload background task) so the tests
+# are deterministic and never touch the real DB / Ollama. The public endpoints
+# (health, 404) are unaffected by the overrides.
+# ---------------------------------------------------------------------------
+class _FakeRedis:
+    async def get_cached_answer(self, key):
+        return None
+
+    async def set_cached_answer(self, *a, **k):
+        return None
+
+
+class _FakeCursor:
+    def __init__(self, docs):
+        self._docs = list(docs)
+        self._i = 0
+
+    def sort(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def __aiter__(self):
+        self._i = 0
+        return self
+
+    async def __anext__(self):
+        if self._i >= len(self._docs):
+            raise StopAsyncIteration
+        d = self._docs[self._i]
+        self._i += 1
+        return d
+
+
+class _FakeMessages:
+    def find(self, *a, **k):
+        return _FakeCursor([])
+
+    async def insert_one(self, doc):
+        return SimpleNamespace(inserted_id=ObjectId())
+
+
+@pytest.fixture(autouse=True)
+def api_env(monkeypatch):
+    from app.main import app
+    from app.dependencies.auth import get_current_user
+    from app.core.rate_limit import limiter, rate_limit_identify
+    from app.core.database import files_collection
+    from models import User
+    import app.routers.chat as chat_mod
+    import app.routers.files as files_mod
+
+    fake_user = User(id="api-test-user", email="api@test.com", hashed_password="x")
+    app.dependency_overrides[get_current_user] = lambda: fake_user
+    app.dependency_overrides[rate_limit_identify] = lambda: fake_user
+    monkeypatch.setattr(limiter, "enabled", False)  # no Redis-backed limit check
+
+    # /chat pipeline seams -> no real Redis / Mongo history / Ollama / retrieval.
+    # (generate_answer_with_groq is already mocked by the autouse mock_groq_llm.)
+    monkeypatch.setattr(chat_mod, "get_redis_client", lambda: _FakeRedis())
+    monkeypatch.setattr(chat_mod, "messages_collection", _FakeMessages())
+
+    async def _rewrite(query, history=None):
+        return query
+
+    async def _retrieve(*a, **k):
+        return []
+
+    monkeypatch.setattr(chat_mod, "rewrite_query_with_history", _rewrite)
+    monkeypatch.setattr(chat_mod, "query_vector_store", _retrieve)
+
+    # File endpoints -> no real writes / no background ingest.
+    async def _insert_one(doc):
+        return SimpleNamespace(inserted_id=ObjectId())
+
+    async def _noop_ingest(*a, **k):
+        return None
+
+    async def _delete_many(flt):
+        return SimpleNamespace(deleted_count=1)
+
+    monkeypatch.setattr(files_collection, "insert_one", _insert_one)
+    monkeypatch.setattr(files_collection, "delete_many", _delete_many)
+    monkeypatch.setattr(files_mod, "process_file_ingestion", _noop_ingest)
+
+    yield
+
+    app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(rate_limit_identify, None)
 
 
 @pytest.mark.asyncio

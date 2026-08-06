@@ -19,7 +19,11 @@ RETRIEVAL:
   * When disabled, falls back to the original 5/3 limits + score-floor +
     user-first ordering.
 """
+import hashlib
 import re
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import quote
 import gc
@@ -29,6 +33,7 @@ import fitz  # PyMuPDF
 from fastembed import TextEmbedding
 
 from app.core.database import files_collection
+from app.core import config  # module import for call-time flags (INGEST_OFFLOAD_ENABLED)
 from app.core.config import (
     USER_ID,
     CHUNKING_VERSION,
@@ -39,8 +44,14 @@ from app.core.config import (
     RERANKER_MODEL,
     RERANK_TOP_K,
     RERANK_SCORE_THRESHOLD,
+    THREAD_RERANK_SCORE_THRESHOLD,
+    THREAD_DOC_MIN_CANDIDATES_PER_DOC,
+    THREAD_DOC_MIN_CHUNKS_PER_DOC,
     LOW_CONF_CONTEXT_CHUNKS,
     COMBINED_SEARCH_LIMIT,
+    HYBRID_SEARCH_ENABLED,
+    RRF_K,
+    HYBRID_POOL,
     OCR_ENABLED,
     OCR_MIN_TEXT_LEN,
     PDF_IMAGE_OCR_MIN_DIM,
@@ -84,16 +95,22 @@ def get_clean_title(filename: str) -> Dict[str, str]:
 # Lazy-loaded models (embedding + reranker)
 # ---------------------------------------------------------------------------
 _embedding_model = None
+_embedding_model_lock = threading.Lock()
 _reranker_model = None
 
 
 def get_embedding_model():
-    """Get or initialize the embedding model (lazy loading)."""
+    """Get or initialize the embedding model (lazy loading, thread-safe)."""
     global _embedding_model
     if _embedding_model is None:
-        print("[LOADING] Initializing embedding model (BAAI/bge-small-en-v1.5)...")
-        _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        print("[OK] Embedding model loaded successfully")
+        # Ingestion now runs in a worker-thread pool, so several threads (plus the
+        # loop's query path) can reach this on a cold start. Double-checked lock
+        # -> the model loads exactly once.
+        with _embedding_model_lock:
+            if _embedding_model is None:
+                print("[LOADING] Initializing embedding model (BAAI/bge-small-en-v1.5)...")
+                _embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                print("[OK] Embedding model loaded successfully")
     return _embedding_model
 
 
@@ -235,24 +252,88 @@ def _ocr_embedded_images(doc, page, min_dim: int) -> str:
     return "\n".join(pieces)
 
 
-def extract_pages_from_pdf_with_ocr(file_content: bytes) -> List[Tuple[int, str, bool]]:
+def _pdf_page_count(file_content: bytes) -> int:
+    """Page count only — fitz parses the xref lazily, so this is cheap."""
+    doc = None
+    try:
+        doc = fitz.open(stream=file_content, filetype="pdf")
+        return len(doc)
+    except Exception:
+        return 0
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
+def _no_text_layer_error(filename: str, total_pages: int) -> "Exception":
+    """The user-facing explanation for a PDF whose pages carry no text."""
+    from app.services.file_processing import UnreadableDocumentError, tesseract_available
+
+    if tesseract_available():
+        return UnreadableDocumentError(
+            f"{filename} has no readable text layer and OCR could not read its "
+            f"{total_pages} page(s). Please upload a text-based PDF."
+        )
+    return UnreadableDocumentError(
+        f"{filename} looks like a scanned PDF: all {total_pages} page(s) are images "
+        f"with no readable text layer, and this server cannot run OCR. Please upload "
+        f"a text-based PDF, or re-export it as a searchable PDF first."
+    )
+
+
+def extract_pages_from_pdf_with_ocr(
+    file_content: bytes,
+    filename: str = "This PDF",
+    stats: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[int, str, bool]]:
     """
     Page-aware PDF extraction with OCR fallback.
 
     For each page:
       1. PyMuPDF text layer (fast path).
-      2. If that yields < OCR_MIN_TEXT_LEN chars AND OCR is enabled, render
-         the page and OCR it.
+      2. If that yields < OCR_MIN_TEXT_LEN chars AND OCR is actually usable,
+         render the page and OCR it.
       3. Independently, OCR any large embedded images and append.
 
     Returns (page_number, text, ocr_extracted). ``ocr_extracted`` is True
     when any OCR contributed to the page text.
+
+    A PDF with pages but no readable text on ANY of them raises
+    UnreadableDocumentError, which names the real problem (a scan) instead of
+    letting it surface downstream as a generic "no extractable text".
+    ``stats`` (optional) receives total/unreadable page counts so the caller can
+    warn when only PART of the document could be read.
     """
+    from app.services.file_processing import tesseract_available
+
     pages_pairs = extract_pages_from_pdf(file_content)  # uses existing retry logic
     text_by_page = {p: t for p, t in pages_pairs}
 
-    if not OCR_ENABLED:
-        return [(p, t, False) for p, t in pages_pairs]
+    # Steps 2-3 shell out to the tesseract binary. When it is missing or OCR is
+    # off, every one of those calls raises and is swallowed -- so skip them
+    # outright rather than re-opening the document and rendering each page at 2x
+    # zoom for nothing (measured: ~28 s of ingest CPU on a 120-page scan).
+    if not tesseract_available():
+        total_pages = _pdf_page_count(file_content)
+        readable = [(p, t, False) for p, t in pages_pairs if t and t.strip()]
+        if stats is not None:
+            stats["total_pages"] = total_pages
+            stats["unreadable_pages"] = max(0, total_pages - len(readable))
+            readable_nums = {p for p, _, _ in readable}
+            stats["unreadable_page_numbers"] = [
+                p for p in range(1, total_pages + 1) if p not in readable_nums
+            ]
+        if total_pages and not readable:
+            raise _no_text_layer_error(filename, total_pages)
+        if total_pages > len(readable):
+            print(
+                f"      [INFO] {total_pages - len(readable)}/{total_pages} page(s) have no "
+                f"text layer and OCR is unavailable — they are NOT indexed."
+            )
+        return readable
 
     # Re-open once to drive OCR over all pages (we need fitz Page objects)
     triples: List[Tuple[int, str, bool]] = []
@@ -298,6 +379,17 @@ def extract_pages_from_pdf_with_ocr(file_content: bytes) -> List[Tuple[int, str,
                 pass
 
     triples.sort(key=lambda t: t[0])
+    if stats is not None:
+        stats["total_pages"] = total_pages
+        stats["unreadable_pages"] = max(0, total_pages - len(triples))
+        readable_nums = {p for p, _, _ in triples}
+        stats["unreadable_page_numbers"] = [
+            p for p in range(1, total_pages + 1) if p not in readable_nums
+        ]
+    if total_pages and not triples:
+        # Text layer empty AND OCR read nothing — say so, don't fall through to
+        # the generic "no extractable text".
+        raise _no_text_layer_error(filename, total_pages)
     return triples
 
 
@@ -584,6 +676,10 @@ async def _search_combined(
                 "chunkingVersion": 1,
                 "pageStart": 1,
                 "sectionHeader": 1,
+                "canonicalTitle": 1,
+                "uploaderName": 1,
+                "projectTag": 1,
+                "version": 1,
                 "score": {"$meta": "vectorSearchScore"},
             }
         },
@@ -600,10 +696,148 @@ async def _search_combined(
             "chunkingVersion": doc.get("chunkingVersion"),   # may be None for old v1 chunks
             "pageStart": doc.get("pageStart"),
             "sectionHeader": doc.get("sectionHeader"),
+            "canonicalTitle": doc.get("canonicalTitle"),
+            "uploaderName": doc.get("uploaderName"),
+            "projectTag": doc.get("projectTag"),
+            "version": doc.get("version"),
             "score": doc.get("score", 0.0),
         })
 
     return results[:limit]
+
+
+def _fulltext_scope_filter(user_id: Optional[str]) -> Dict[str, Any]:
+    """
+    Atlas $search ``compound`` filter clause mirroring _combined_search_filter,
+    but expressed natively for $search so the scope is applied INSIDE the BM25
+    query (not as a post-$match). KB chunks are global; user_upload chunks are
+    included only when scoped to ``user_id``. When ``user_id`` is None only the
+    knowledge_base branch is present (eval-harness / KB-only path).
+
+    ``category`` and ``userId`` must be indexed as ``token`` in text_index for
+    the ``equals`` operator to match them.
+    """
+    scope_should: List[Dict[str, Any]] = [
+        {"equals": {"path": "category", "value": "knowledge_base"}}
+    ]
+    if user_id:
+        scope_should.append({
+            "compound": {
+                "must": [
+                    {"equals": {"path": "category", "value": "user_upload"}},
+                    {"equals": {"path": "userId", "value": user_id}},
+                ]
+            }
+        })
+    return {"compound": {"should": scope_should, "minimumShouldMatch": 1}}
+
+
+async def _search_fulltext(
+    query: str,
+    limit: int,
+    user_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Atlas full-text (Lucene BM25) search over the chunk ``text`` field, scoped
+    to KB + the current user's uploads via a native $search compound filter.
+
+    Returns the SAME dict shape as _search_combined (id, text, filename,
+    category, metadata, chunkingVersion, pageStart, sectionHeader, score) so the
+    two result lists are interchangeable for RRF fusion. Here ``score`` carries
+    this search's native relevance ($meta searchScore / BM25); _rrf_merge is
+    responsible for resetting the vector ``score`` to 0.0 for BM25-only docs.
+    """
+    pipeline = [
+        {
+            "$search": {
+                "index": "text_index",
+                "compound": {
+                    "must": [{"text": {"query": query, "path": "text"}}],
+                    "filter": [_fulltext_scope_filter(user_id)],
+                },
+            }
+        },
+        {"$limit": limit},
+        {
+            "$project": {
+                "_id": 1,
+                "text": 1,
+                "filename": 1,
+                "category": 1,
+                "metadata": 1,
+                "chunkingVersion": 1,
+                "pageStart": 1,
+                "sectionHeader": 1,
+                "canonicalTitle": 1,
+                "uploaderName": 1,
+                "projectTag": 1,
+                "version": 1,
+                "score": {"$meta": "searchScore"},
+            }
+        },
+    ]
+
+    results: List[Dict[str, Any]] = []
+    async for doc in files_collection.aggregate(pipeline):
+        results.append({
+            "id": str(doc.get("_id")),
+            "text": doc.get("text", ""),
+            "filename": doc.get("filename", "unknown"),
+            "category": doc.get("category", "unknown"),
+            "metadata": doc.get("metadata", {}),
+            "chunkingVersion": doc.get("chunkingVersion"),
+            "pageStart": doc.get("pageStart"),
+            "sectionHeader": doc.get("sectionHeader"),
+            "canonicalTitle": doc.get("canonicalTitle"),
+            "uploaderName": doc.get("uploaderName"),
+            "projectTag": doc.get("projectTag"),
+            "version": doc.get("version"),
+            "score": doc.get("score", 0.0),
+        })
+
+    return results[:limit]
+
+
+def _rrf_merge(
+    vec_results: List[Dict[str, Any]],
+    bm25_results: List[Dict[str, Any]],
+    limit: int,
+    k: int = RRF_K,
+) -> List[Dict[str, Any]]:
+    """
+    Reciprocal Rank Fusion of the vector and BM25 result lists.
+
+    For each list a doc appears in, it contributes 1/(k + rank) to its fused
+    score (rank is 1-based in list order). Docs are deduped by chunk id; the
+    fused list is sorted by rrf_score descending and trimmed to ``limit``.
+
+    The vector list is folded in FIRST so a doc that appears in both keeps its
+    real vector ``score`` (vectorSearchScore). A doc found ONLY by BM25 has its
+    ``score`` forced to 0.0 — it has no vector similarity, and downstream the
+    legacy reranker-OFF fallback floors on that field (score >= 0.5). This keeps
+    that floor a pure vector-similarity gate rather than leaking a BM25 score
+    into it (edge noted in Phase 1).
+    """
+    fused: Dict[str, Dict[str, Any]] = {}
+
+    for rank, doc in enumerate(vec_results, start=1):
+        d = dict(doc)
+        d["rrf_score"] = 1.0 / (k + rank)
+        fused[doc["id"]] = d
+
+    for rank, doc in enumerate(bm25_results, start=1):
+        doc_id = doc["id"]
+        contribution = 1.0 / (k + rank)
+        if doc_id in fused:
+            fused[doc_id]["rrf_score"] += contribution
+        else:
+            d = dict(doc)
+            d["rrf_score"] = contribution
+            d["score"] = 0.0  # BM25-only: no vector score; keep the legacy floor honest
+            fused[doc_id] = d
+
+    merged = sorted(fused.values(), key=lambda c: c["rrf_score"], reverse=True)
+    return merged[:limit]
 
 
 def _apply_rerank_threshold(
@@ -680,7 +914,18 @@ async def query_vector_store(
     model = get_embedding_model()
     query_vector = list(model.embed([query]))[0].tolist()
 
-    combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT, user_id)
+    if HYBRID_SEARCH_ENABLED:
+        # Run $vectorSearch and $search (BM25) in parallel, fuse via RRF, then
+        # hand the fused pool to the SAME reranker path below (unchanged).
+        print(f"[SEARCH] Hybrid mode: vector + BM25 (pool {HYBRID_POOL} each, RRF k={RRF_K})")
+        vec, bm25 = await asyncio.gather(
+            _search_combined(query_vector, HYBRID_POOL, user_id),
+            _search_fulltext(query, HYBRID_POOL, user_id),
+        )
+        combined = _rrf_merge(vec, bm25, COMBINED_SEARCH_LIMIT, RRF_K)
+        print(f"   Vector {len(vec)} + BM25 {len(bm25)} -> fused {len(combined)}")
+    else:
+        combined = await _search_combined(query_vector, COMBINED_SEARCH_LIMIT, user_id)
 
     # Category split is informational only — useful for debugging "why is this
     # upload still showing up." It does not affect ranking.
@@ -752,6 +997,596 @@ async def query_with_context(
 
 
 # ---------------------------------------------------------------------------
+# Thread-scoped retrieval (THREAD_DOC mode)
+# ---------------------------------------------------------------------------
+def _thread_scope_filter(user_id: Optional[str], thread_id: str) -> Dict[str, Any]:
+    """Mongo ``find`` filter selecting ONLY one thread's uploaded chunks.
+
+    The isolation boundary lives HERE, at the DB query: it matches
+    ``category == "thread_upload"`` AND this exact ``threadId`` (AND ``userId``
+    when provided), and requires ``chunkIndex`` to exist so the parent file-metadata
+    doc (which has no embedding) is skipped. It therefore can NEVER return
+    knowledge_base chunks, plain user_upload chunks, or another thread's chunks --
+    regardless of how similar their text is. Factored out so it is unit-testable
+    without a DB.
+    """
+    f: Dict[str, Any] = {
+        "category": "thread_upload",
+        "threadId": thread_id,
+        "chunkIndex": {"$exists": True},
+    }
+    if user_id:
+        f["userId"] = user_id
+    return f
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    """Plain cosine similarity. Used for in-Python scoring of the small
+    thread-document set (see query_thread_documents for why not $vectorSearch)."""
+    if not a or not b:
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / ((na ** 0.5) * (nb ** 0.5))
+
+
+async def thread_has_documents(thread_id: Optional[str], user_id: Optional[str]) -> bool:
+    """True when this thread has at least one uploaded (thread_upload) document.
+
+    Used by the router to decide whether THREAD_DOC is even possible for the
+    current thread. Matches the parent file-metadata doc OR any chunk (both carry
+    category/threadId/userId), so it is True as soon as an upload is registered,
+    before background chunking finishes.
+    """
+    if not thread_id:
+        return False
+    query: Dict[str, Any] = {"category": "thread_upload", "threadId": thread_id}
+    if user_id:
+        query["userId"] = user_id
+    doc = await files_collection.find_one(query, {"_id": 1})
+    return doc is not None
+
+
+def effective_ingest_status(
+    doc: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> Tuple[str, Optional[str]]:
+    """Derive a parent doc's lifecycle state: ("pending"|"ready"|"failed", reason).
+
+    Storage vocabulary is unchanged ("processing"/"processed"/"failed" -- 35
+    live docs and the deployed status endpoint depend on it); this maps it to
+    the lifecycle semantics, and adds the STALENESS rule: a doc "processing"
+    longer than INGEST_PENDING_TIMEOUT_SECONDS is reported failed with a
+    timeout reason. Derived at read time so read paths stay read-only and the
+    verdict self-corrects everywhere at once (status endpoint, inventory,
+    scope note). A parent with no status field predates the lifecycle and is
+    treated as ready.
+    """
+    raw = doc.get("status")
+    if raw == "failed":
+        return "failed", doc.get("error") or "Ingestion failed"
+    if raw == "processing":
+        created = doc.get("createdAt")
+        now = now or datetime.now()
+        if created is not None and (now - created).total_seconds() > config.INGEST_PENDING_TIMEOUT_SECONDS:
+            return "failed", (
+                f"Ingestion timed out (no result after "
+                f"{config.INGEST_PENDING_TIMEOUT_SECONDS} seconds; the server may "
+                f"have restarted mid-processing). Re-upload the file to retry."
+            )
+        return "pending", None
+    # "processed", or a legacy doc from before the status field existed.
+    return "ready", None
+
+
+async def thread_document_inventory(
+    thread_id: Optional[str],
+    user_id: Optional[str],
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """One query answering router gating, the THREAD_DOC cache key, AND the
+    document lifecycle: (thread_has_attachments, fingerprint, doc_states).
+
+    doc_states is one entry per parent doc: {"filename", "status", "reason"}
+    with status derived by effective_ingest_status -- pending / ready / failed.
+
+    The fingerprint is sha256 over the sorted (filename, chunkCount, status)
+    triples of the thread's PARENT file docs, truncated to 12 hex chars. It
+    changes when a document is added, removed, or re-ingested to a different
+    chunk count -- exactly when a cached THREAD_DOC answer (whose Phase 4
+    scope note names the document set) goes stale. A bare count would miss an
+    add-plus-delete; a bare timestamp would miss a re-ingest. Status joined
+    the triple in Phase 1 so a question answered mid-ingestion ("still being
+    processed") cannot be served after the document becomes ready or failed:
+    chunkCount 0 -> N covers completion, and the status leg covers
+    pending -> failed (where the count stays 0).
+
+    Latency: this REPLACES the thread_has_documents find_one at the router call
+    site rather than adding a second round trip -- Atlas RTT from this host is
+    ~70ms, so any net-new query would blow the read-path budget. Parent-doc
+    existence is the same signal thread_has_documents documents ("True as soon
+    as an upload is registered, before background chunking finishes"): the
+    upload route inserts the parent before scheduling ingestion, and every
+    delete path removes parents and chunks together. A parent with ZERO chunks
+    written (ingestion still running) therefore still reports has-attachments
+    True -- the router can classify THREAD_DOC and the turn can say "still
+    being processed" instead of pretending the thread is empty.
+
+    Returns (False, "", []) for a missing thread_id or an empty document set.
+    """
+    if not thread_id:
+        return False, "", []
+    query: Dict[str, Any] = {
+        "category": "thread_upload",
+        "threadId": thread_id,
+        "chunkIndex": {"$exists": False},
+    }
+    if user_id:
+        query["userId"] = user_id
+    now = datetime.now()
+    triples: List[Tuple[str, int, str]] = []
+    doc_states: List[Dict[str, Any]] = []
+    async for d in files_collection.find(
+        query, {"filename": 1, "chunkCount": 1, "status": 1, "error": 1, "createdAt": 1}
+    ):
+        fn = d.get("filename") or ""
+        status, reason = effective_ingest_status(d, now=now)
+        triples.append((fn, int(d.get("chunkCount") or 0), status))
+        doc_states.append({"filename": fn, "status": status, "reason": reason})
+    if not triples:
+        return False, "", []
+    triples.sort()
+    doc_states.sort(key=lambda s: s["filename"])
+    blob = "|".join(f"{fn}:{n}:{st}" for fn, n, st in triples)
+    fingerprint = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+    return True, fingerprint, doc_states
+
+
+async def sample_thread_documents(
+    thread_id: str,
+    user_id: Optional[str] = None,
+    budget: Optional[int] = None,
+    scope_out: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Structured sample of a thread's documents for DOCUMENT-LEVEL requests
+    (summarize / what is this about / main findings).
+
+    No relevance ranking and no rerank threshold: those are relevance
+    decisions, and a document-level request is a SCOPING decision -- the user
+    asked about the whole document, so representative coverage beats topical
+    match (a summary query floors every chunk below the threshold; measured
+    -11.23..-11.47 on the incident document).
+
+    Selection per document: the opening chunk(s), then an even spread across
+    the remainder, in reading order. The budget splits across documents
+    (Phase 3 quota spirit: every ready document contributes; a two-document
+    thread samples from both). Pending/failed documents have no chunks and
+    are reported via the Phase 1 states, unchanged.
+
+    ``scope_out`` gains ``sampled``: per-doc {filename, sampled, total} so the
+    Phase 4 note can state what was SAMPLED rather than implying an exhaustive
+    search. ``searched``/``grounded`` are filled with the sampled documents so
+    downstream source building works unchanged. Chunks return with
+    ``low_confidence`` False (they are deliberate context, not weak matches).
+    """
+    if budget is None:
+        budget = config.THREAD_DOC_SAMPLE_CHUNKS
+    filter_ = _thread_scope_filter(user_id, thread_id)
+    projection = {
+        "text": 1, "filename": 1, "category": 1, "metadata": 1,
+        "chunkingVersion": 1, "pageStart": 1, "sectionHeader": 1,
+        "threadId": 1, "chunkIndex": 1,
+    }
+    by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    async for doc in files_collection.find(filter_, projection):
+        by_doc.setdefault(doc.get("filename", "unknown"), []).append(doc)
+
+    if scope_out is not None:
+        scope_out["searched"] = sorted(by_doc)
+    if not by_doc:
+        print(f"[THREAD] No documents found for thread {thread_id}")
+        return []
+
+    for chunks in by_doc.values():
+        chunks.sort(key=lambda d: d.get("chunkIndex") or 0)
+
+    doc_order = sorted(by_doc)  # deterministic; no scores exist to rank by
+    n_docs = len(doc_order)
+    base_share = max(1, budget // n_docs)
+
+    selected: List[Dict[str, Any]] = []
+    sampled_info: List[Dict[str, Any]] = []
+    for i, fn in enumerate(doc_order):
+        chunks = by_doc[fn]
+        # Distribute the remainder to the first documents so the full budget
+        # is used: e.g. budget 8 over 3 docs -> shares 3/3/2.
+        share = base_share + (1 if i < budget - base_share * n_docs else 0)
+        share = min(share, len(chunks))
+        if share >= len(chunks):
+            take = chunks
+        else:
+            # Opening chunk first, then an even spread over the remainder,
+            # always in reading order.
+            idxs = {0}
+            remaining = len(chunks) - 1
+            step = remaining / (share - 1) if share > 1 else remaining
+            for k in range(1, share):
+                idxs.add(min(len(chunks) - 1, round(k * step)))
+            take = [chunks[j] for j in sorted(idxs)]
+        sampled_info.append({"filename": fn, "sampled": len(take), "total": len(chunks)})
+        for d in take:
+            selected.append({
+                "id": str(d.get("_id")),
+                "text": d.get("text", ""),
+                "filename": fn,
+                "category": d.get("category", "thread_upload"),
+                "metadata": d.get("metadata", {}),
+                "chunkingVersion": d.get("chunkingVersion"),
+                "pageStart": d.get("pageStart"),
+                "sectionHeader": d.get("sectionHeader"),
+                "threadId": d.get("threadId"),
+                "low_confidence": False,
+            })
+
+    if scope_out is not None:
+        scope_out["grounded"] = list(doc_order)
+        scope_out["no_relevant"] = []
+        scope_out["excluded"] = []
+        scope_out["sampled"] = sampled_info
+        # Vision provenance (additive): a document-level sample can include
+        # AI-vision transcriptions of scanned pages; the note must say so.
+        scope_out["vision"] = _vision_scope(selected)
+    print(
+        "[THREAD] document-level sample: "
+        + "; ".join(f"'{s['filename']}' {s['sampled']}/{s['total']}" for s in sampled_info)
+        + f" (budget {budget})"
+    )
+    return selected
+
+
+def _vision_scope(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Vision-derived provenance among the context chunks that can ground an
+    answer (non-low-confidence): [{filename, pages, image}], filename-sorted,
+    pages ascending. ``image`` is True for a directly uploaded image -- an
+    entirely model-described document with no verbatim layer and no page
+    numbers -- so the scope note can word it as an image description rather
+    than a scanned-page transcription. Empty when the context holds no
+    vision-derived content -- the scope note then says nothing, exactly as
+    today."""
+    from app.services.file_processing import VISION_IMAGE_EXTS
+
+    by_file: Dict[str, Dict[str, Any]] = {}
+    for c in chunks:
+        if c.get("low_confidence"):
+            continue
+        meta = c.get("metadata") or {}
+        if not meta.get("visionDerived"):
+            continue
+        entry = by_file.setdefault(
+            c.get("filename", "unknown"),
+            {"pages": set(), "image": meta.get("fileType") in VISION_IMAGE_EXTS},
+        )
+        if c.get("pageStart") is not None:
+            entry["pages"].add(c["pageStart"])
+    return [
+        {"filename": fn, "pages": sorted(e["pages"]), "image": e["image"]}
+        for fn, e in sorted(by_file.items())
+    ]
+
+
+def _log_thread_doc_mix(stage: str, chunks: List[Dict[str, Any]], score_key: str) -> None:
+    """One ASCII line describing which documents make up ``chunks``: filename,
+    chunks contributed, best score. This is the line to read when a THREAD_DOC
+    retrieval question comes up. (The codebase logs via print; there is no
+    leveled logger to attach a debug level to.)"""
+    by_doc: Dict[str, Dict[str, Any]] = {}
+    for c in chunks:
+        entry = by_doc.setdefault(c.get("filename", "unknown"), {"n": 0, "best": None})
+        entry["n"] += 1
+        s = c.get(score_key)
+        if s is not None and (entry["best"] is None or s > entry["best"]):
+            entry["best"] = s
+    parts = "; ".join(
+        f"'{fn}' n={v['n']} best={v['best']:+.3f}" if v["best"] is not None
+        else f"'{fn}' n={v['n']}"
+        for fn, v in by_doc.items()
+    )
+    print(f"[THREAD] {stage} per-doc composition: {parts}")
+
+
+def _apply_per_doc_candidate_quota(
+    candidates: List[Dict[str, Any]],
+    limit: int,
+    per_doc: int,
+) -> List[Dict[str, Any]]:
+    """Stage-B quota: cap ``candidates`` (sorted by cosine ``score`` desc) to
+    ``limit`` while reserving each document's top ``per_doc`` chunks first, so
+    one large document cannot push another out of the set the reranker sees.
+
+    Reservation is round-robin by per-document rank (every document's #1 chunk,
+    then every #2, ...) in best-document order, so if the reservations alone
+    exceed ``limit`` every document still gets its strongest chunks in. The
+    remaining slots fill by global score order -- identical to the old plain cap.
+    A single-document thread short-circuits to exactly the old ``[:limit]``.
+    """
+    if per_doc <= 0 or len(candidates) <= limit:
+        return candidates[:limit]
+    by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    for c in candidates:
+        by_doc.setdefault(c["filename"], []).append(c)
+    if len(by_doc) <= 1:
+        return candidates[:limit]
+
+    doc_order = sorted(by_doc, key=lambda f: by_doc[f][0]["score"], reverse=True)
+    selected: List[Dict[str, Any]] = []
+    seen: set = set()
+    for rank in range(per_doc):
+        for fn in doc_order:
+            if len(selected) >= limit:
+                break
+            chunks = by_doc[fn]
+            if rank < len(chunks) and chunks[rank]["id"] not in seen:
+                selected.append(chunks[rank])
+                seen.add(chunks[rank]["id"])
+        if len(selected) >= limit:
+            break
+    for c in candidates:
+        if len(selected) >= limit:
+            break
+        if c["id"] not in seen:
+            selected.append(c)
+            seen.add(c["id"])
+
+    selected.sort(key=lambda c: c["score"], reverse=True)
+    return selected
+
+
+def _apply_per_doc_context_quota(
+    ranked: List[Dict[str, Any]],
+    top_k: int,
+    per_doc: int,
+    threshold: float,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Stage-C quota: choose the final ``top_k`` context chunks from ``ranked``
+    (sorted by ``rerank_score`` desc) with per-document representation.
+
+    The threshold is applied FIRST: a document whose best chunk fails it
+    contributes nothing -- the quota guarantees consideration, not inclusion.
+    Among passing chunks, each document holds ``per_doc`` slots (its own best
+    chunks) and the rest fill by global rerank order. When more documents pass
+    than there are slots, slots fill one per document in best-score order and
+    the excluded documents are logged by name.
+
+    Mirrors _apply_rerank_threshold's contract: returns (chunks, no_high_conf),
+    tags low_confidence, and delegates to it verbatim for the single-document
+    and nothing-passes cases so those behave exactly as before.
+    """
+    passing = [c for c in ranked if c.get("rerank_score", 0.0) >= threshold]
+    by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    for c in passing:
+        by_doc.setdefault(c["filename"], []).append(c)
+    if len(by_doc) <= 1:
+        # Zero passing docs -> identical low-confidence fallback; one passing
+        # doc -> identical plain top_k + threshold. No behavior change.
+        return _apply_rerank_threshold(ranked, threshold=threshold, top_k=top_k)
+
+    doc_order = sorted(by_doc, key=lambda f: by_doc[f][0]["rerank_score"], reverse=True)
+    selected: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    if len(doc_order) > top_k:
+        # More documents than context slots: one chunk per document, filling in
+        # best-document order, rather than silently dropping the quota.
+        for fn in doc_order[:top_k]:
+            best = by_doc[fn][0]
+            selected.append(best)
+            seen.add(best["id"])
+        excluded = doc_order[top_k:]
+        print(
+            f"[THREAD] doc quota: {len(excluded)} document(s) excluded from the "
+            f"{top_k}-slot context (one slot per document, best score first): "
+            + ", ".join(f"'{fn}' best={by_doc[fn][0]['rerank_score']:+.2f}" for fn in excluded)
+        )
+    else:
+        # Reserve each document's top per_doc passing chunks (round-robin by
+        # per-document rank so reservations degrade fairly if they exceed
+        # top_k), then fill the remainder by global rerank order.
+        for rank in range(per_doc):
+            for fn in doc_order:
+                if len(selected) >= top_k:
+                    break
+                chunks = by_doc[fn]
+                if rank < len(chunks) and chunks[rank]["id"] not in seen:
+                    selected.append(chunks[rank])
+                    seen.add(chunks[rank]["id"])
+            if len(selected) >= top_k:
+                break
+        for c in passing:
+            if len(selected) >= top_k:
+                break
+            if c["id"] not in seen:
+                selected.append(c)
+                seen.add(c["id"])
+
+    selected.sort(key=lambda c: c.get("rerank_score", 0.0), reverse=True)
+    for c in selected:
+        c["low_confidence"] = False
+    print(
+        f"[RERANK] Threshold {threshold} applied with per-doc quota: kept "
+        f"{len(selected)} across {len(set(c['filename'] for c in selected))} document(s) "
+        f"(lowest kept: {selected[-1]['rerank_score']:+.2f})"
+    )
+    return selected, False
+
+
+async def query_thread_documents(
+    query: str,
+    thread_id: str,
+    user_id: Optional[str] = None,
+    top_k: int = RERANK_TOP_K,
+    scope_out: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Retrieve ONLY the current thread's uploaded document chunks.
+
+    ``scope_out``, when a caller passes a dict, is filled with the retrieval
+    scope as STRUCTURED FACT (Phase 4) so the response can state honestly which
+    documents were searched and which ground the answer -- derived from the
+    actual retrieval result, never from the model's own account:
+
+      searched    -- sorted filenames of every document whose chunks were
+                     scored (the whole thread corpus)
+      grounded    -- filenames contributing to the returned context, best
+                     first (empty when only low-confidence fallback context
+                     was returned)
+      no_relevant -- searched documents with NO chunk at or above the rerank
+                     threshold: searched and legitimately empty, by design
+      excluded    -- documents that HAD passing chunks but received no context
+                     slot (more passing documents than slots)
+
+    Filled only on the router-on reranker path (the only path the THREAD_DOC
+    mode uses); other paths leave everything but ``searched`` absent, and
+    consumers treat that as "no scope statement".
+
+    Isolation: candidates come from a plain Mongo ``find`` scoped by
+    _thread_scope_filter, so KB chunks, plain user_upload chunks and other
+    threads' chunks are never even fetched -- the near-identical-text case can't
+    leak because those rows are excluded at the query, not merely ranked lower.
+
+    Ranking: thread-document sets are small, and a global Atlas ``$vectorSearch``
+    would risk post-filtering those few chunks out of its top candidates, so we
+    score them with in-Python cosine here, then hand them to the SAME
+    cross-encoder rerank + threshold path as the KB search (so THREAD_DOC and
+    KB_QUERY share the same low-confidence semantics and confidence fallback).
+    """
+    filter_ = _thread_scope_filter(user_id, thread_id)
+    projection = {
+        "text": 1,
+        "filename": 1,
+        "category": 1,
+        "metadata": 1,
+        "chunkingVersion": 1,
+        "pageStart": 1,
+        "sectionHeader": 1,
+        "threadId": 1,
+        "embedding": 1,
+    }
+
+    docs: List[Dict[str, Any]] = []
+    async for doc in files_collection.find(filter_, projection):
+        docs.append(doc)
+
+    if not docs:
+        print(f"[THREAD] No documents found for thread {thread_id}")
+        if scope_out is not None:
+            scope_out["searched"] = []
+        return []
+
+    if scope_out is not None:
+        scope_out["searched"] = sorted({d.get("filename", "unknown") for d in docs})
+
+    print(f"[THREAD] Scoring {len(docs)} chunk(s) for thread {thread_id}")
+    model = get_embedding_model()
+    qv = list(model.embed([query]))[0]
+    qv = qv.tolist() if hasattr(qv, "tolist") else list(qv)
+
+    candidates: List[Dict[str, Any]] = []
+    for doc in docs:
+        emb = doc.get("embedding") or []
+        emb = emb.tolist() if hasattr(emb, "tolist") else list(emb)
+        candidates.append({
+            "id": str(doc.get("_id")),
+            "text": doc.get("text", ""),
+            "filename": doc.get("filename", "unknown"),
+            "category": doc.get("category", "thread_upload"),
+            "metadata": doc.get("metadata", {}),
+            "chunkingVersion": doc.get("chunkingVersion"),
+            "pageStart": doc.get("pageStart"),
+            "sectionHeader": doc.get("sectionHeader"),
+            "threadId": doc.get("threadId"),
+            "score": _cosine(qv, emb),
+        })
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    # Stage-B cap. With the router on, reserve each document's top cosine
+    # chunks first (per-doc quota) so one large document cannot monopolise the
+    # candidate set the reranker sees; flag off keeps the old plain cap.
+    if config.ROUTER_ENABLED:
+        candidates = _apply_per_doc_candidate_quota(
+            candidates, COMBINED_SEARCH_LIMIT, THREAD_DOC_MIN_CANDIDATES_PER_DOC
+        )
+        _log_thread_doc_mix("candidate set", candidates, "score")
+    else:
+        candidates = candidates[:COMBINED_SEARCH_LIMIT]
+
+    # Same rerank path as the KB search, but with the PERMISSIVE thread threshold
+    # (THREAD_RERANK_SCORE_THRESHOLD) instead of the KB threshold. The candidate
+    # set is a single user-uploaded document, so we keep the thread's own chunk
+    # for on-target questions rather than dropping it as "noise"; only the most
+    # clearly off-topic questions (scoring at the cross-encoder floor) fall
+    # through. _apply_rerank_threshold still tags low_confidence exactly as for
+    # KB, so chat.py's retrieval-confidence fallback treats THREAD_DOC the same.
+    if RERANKER_ENABLED:
+        try:
+            reranker = get_reranker()
+            scores = list(reranker.rerank(query, [c["text"] for c in candidates]))
+            for c, s in zip(candidates, scores):
+                c["rerank_score"] = float(s)
+            candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
+            # Stage-C cap. With the router on, every document whose best chunk
+            # clears the threshold holds a context slot (per-doc quota); flag
+            # off keeps the old plain top_k + threshold, byte-identical.
+            if config.ROUTER_ENABLED:
+                kept, _no_high_conf = _apply_per_doc_context_quota(
+                    candidates,
+                    top_k=top_k,
+                    per_doc=THREAD_DOC_MIN_CHUNKS_PER_DOC,
+                    threshold=THREAD_RERANK_SCORE_THRESHOLD,
+                )
+                _log_thread_doc_mix("final context", kept, "rerank_score")
+                if scope_out is not None:
+                    # Structured retrieval scope (Phase 4) from the SAME data
+                    # the quota ran on. `grounded` preserves kept order (best
+                    # first); low-confidence fallback context grounds nothing.
+                    passing_docs = {
+                        c["filename"] for c in candidates
+                        if c.get("rerank_score", 0.0) >= THREAD_RERANK_SCORE_THRESHOLD
+                    }
+                    grounded: List[str] = []
+                    for c in kept:
+                        if not c.get("low_confidence") and c["filename"] not in grounded:
+                            grounded.append(c["filename"])
+                    scope_out["grounded"] = grounded
+                    scope_out["no_relevant"] = [
+                        fn for fn in scope_out.get("searched", [])
+                        if fn not in passing_docs
+                    ]
+                    scope_out["excluded"] = [
+                        fn for fn in sorted(passing_docs) if fn not in grounded
+                    ]
+                    # Vision provenance (additive): which grounding chunks are
+                    # AI-vision transcriptions, so the scope note can say so.
+                    scope_out["vision"] = _vision_scope(kept)
+            else:
+                kept, _no_high_conf = _apply_rerank_threshold(
+                    candidates, threshold=THREAD_RERANK_SCORE_THRESHOLD
+                )
+            return kept
+        except Exception as rerank_err:
+            print(f"[WARNING] Thread rerank failed ({rerank_err}); falling back to vector order")
+
+    # Legacy fallback (reranker off/failed): single relevance floor, mirroring
+    # query_vector_store's STEP 3b.
+    MIN_SCORE = 0.5
+    return [c for c in candidates if c.get("score", 0) >= MIN_SCORE]
+
+
+# ---------------------------------------------------------------------------
 # Ingestion + deletion
 # ---------------------------------------------------------------------------
 async def delete_document(filename: str) -> Dict[str, Any]:
@@ -785,53 +1620,242 @@ async def delete_document(filename: str) -> Dict[str, Any]:
         raise ValueError(f"Failed to delete document: {str(e)}")
 
 
-async def ingest_document(
+# ---------------------------------------------------------------------------
+# Ingestion thread pool (Phase 0 — CPU work off the event loop)
+# ---------------------------------------------------------------------------
+_ingest_pool: Optional[ThreadPoolExecutor] = None
+_ingest_pool_lock = threading.Lock()
+
+
+def _get_ingest_pool() -> ThreadPoolExecutor:
+    """Lazily create the dedicated, bounded pool that runs CPU-bound ingestion
+    off the event loop. Kept separate from Starlette's default threadpool so a
+    burst of large uploads can't starve sync route work. Sized by INGEST_WORKERS.
+    """
+    global _ingest_pool
+    if _ingest_pool is None:
+        with _ingest_pool_lock:
+            if _ingest_pool is None:
+                _ingest_pool = ThreadPoolExecutor(
+                    max_workers=max(1, config.INGEST_WORKERS),
+                    thread_name_prefix="ingest",
+                )
+    return _ingest_pool
+
+
+# In-process backlog counter for the queue-depth cap (Phase 0.5). Reserved when
+# an upload is admitted, released when its ingest finishes. One uvicorn worker
+# today, but the lock keeps it correct if the pool ever grows.
+_ingest_inflight = 0
+_ingest_inflight_lock = threading.Lock()
+
+
+def ingest_queue_depth() -> int:
+    """Number of ingests currently queued or running in this process."""
+    return _ingest_inflight
+
+
+def ingest_try_acquire() -> bool:
+    """Reserve one ingest slot. Returns False when the backlog is already at
+    INGEST_MAX_QUEUE, so the caller can reject the upload instead of piling on."""
+    global _ingest_inflight
+    with _ingest_inflight_lock:
+        if _ingest_inflight >= config.INGEST_MAX_QUEUE:
+            return False
+        _ingest_inflight += 1
+        return True
+
+
+def ingest_release() -> None:
+    """Release a slot reserved by ingest_try_acquire (floors at 0)."""
+    global _ingest_inflight
+    with _ingest_inflight_lock:
+        _ingest_inflight = max(0, _ingest_inflight - 1)
+
+
+def _format_page_list(pages: List[int], max_items: int = 12) -> str:
+    """'3, 7, 9' with truncation so a 180-page failure list can't flood the
+    chip warning: '1, 2, ..., 12, ... (168 more)'. Plain ASCII."""
+    shown = ", ".join(str(p) for p in pages[:max_items])
+    if len(pages) > max_items:
+        shown += f", ... ({len(pages) - max_items} more)"
+    return shown
+
+
+def _page_word(pages: List[int]) -> str:
+    return "page" if len(pages) == 1 else "pages"
+
+
+def _ingest_image_via_vision(
     filename: str,
     file_content: bytes,
-    category: str = "user_upload",
-    user_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Multi-format ingest: extract pages, v2 chunk, embed, store.
+    category: str,
+    owner_id: str,
+    thread_id: Optional[str],
+    file_type: str,
+    provenance: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int, int, Optional[str]]:
+    """Ingest a directly uploaded image as ONE vision-described chunk.
 
-    Supported types are defined in file_processing.SUPPORTED_EXTENSIONS.
-    Chunks carry chunkingVersion, pageStart, sectionHeader, fileType, and
-    (for OCR-derived pages) metadata.ocrExtracted = True.
-
-    user_upload chunks are tagged with ``user_id`` (the uploading user's id) so
-    retrieval can scope them per-user. KB ingestion via the kb_admin CLI passes
-    no user_id and falls back to the legacy shared-KB owner id (config.USER_ID),
-    so that admin tooling -- which locates KB chunks by that id -- keeps working
-    unchanged. No HTTP route relies on this fallback; routes always pass an
-    explicit user_id.
+    An image document has NO verbatim layer: the entire indexed content is
+    the model's description. So there is exactly one chunk (no chunker -- the
+    transcript has no page structure to split on), it carries visionDerived
+    plus the model name, and there is NO pageStart at all -- a standalone
+    image has no page for a citation to point at, so the field is omitted
+    rather than storing a fake page 1. describe_image raises
+    UnreadableDocumentError on refusal/failure, which fails the upload with
+    that user-facing reason and indexes nothing.
     """
-    owner_id = user_id if user_id is not None else USER_ID
-    # Lazy import to avoid a circular dependency at module load
-    from app.services.file_processing import (
-        extract_pages_from_file,
-        get_file_type,
-        is_supported_file,
-        SUPPORTED_EXTENSIONS,
+    from app.services.vision_extraction import describe_image
+
+    print("  1. AI vision description (direct image upload)...")
+    result = describe_image(file_content, filename)
+    text = result["text"]
+
+    print("  2. One vision chunk per image (no page structure to chunk on)")
+    print("  3. Generating embedding...")
+    model = get_embedding_model()
+    vec = list(model.embed([text]))[0]
+    embedding = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+
+    doc: Dict[str, Any] = {
+        "text": text,
+        "filename": filename,
+        "source": filename,
+        "embedding": embedding,
+        "userId": owner_id,
+        "category": category,
+        "chunkIndex": 0,
+        "totalChunks": 1,
+        "chunkingVersion": CHUNKING_VERSION,
+        "sectionHeader": None,
+        "visionDerived": True,
+        "metadata": {
+            "chunkSize": len(text),
+            "chunkIndex": 0,
+            "totalChunks": 1,
+            "originalFilename": filename,
+            "category": category,
+            "chunkingVersion": CHUNKING_VERSION,
+            "sectionHeader": None,
+            "fileType": file_type,
+            "ocrExtracted": False,
+            "visionDerived": True,
+            "visionModel": result["model"],
+        },
+        "createdAt": datetime.now(),
+    }
+    if thread_id is not None:
+        doc["threadId"] = thread_id
+        doc["metadata"]["threadId"] = thread_id
+    if provenance:
+        doc.update(provenance)
+
+    # The chip must state the image was interpreted by vision -- stricter than
+    # the PDF case, because here NOTHING in the index is verbatim.
+    warning = (
+        f"{filename} was read by AI vision ({result['model']}): its indexed "
+        f"content is a model-generated description of the image, not "
+        f"extracted text."
     )
+    print(f"      [WARNING] {warning}")
+    return [doc], 1, len(text), warning
 
-    file_type = get_file_type(filename)
-    if not is_supported_file(filename):
-        raise ValueError(
-            f"Unsupported file type: {file_type}. "
-            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
+
+def _ingest_compute(
+    filename: str,
+    file_content: bytes,
+    category: str,
+    owner_id: str,
+    thread_id: Optional[str],
+    file_type: str,
+    pre_extracted_pages: Optional[List[Tuple[int, str, bool]]] = None,
+    provenance: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], int, int, Optional[str]]:
+    """CPU-bound half of ingest: extract -> chunk -> embed -> build doc dicts.
+
+    Pure compute with no event-loop or motor access, so it runs safely in a
+    worker thread. The heavy calls here (PyMuPDF, the tesseract OCR subprocess,
+    fastembed/ONNX embedding) release the GIL, so the event loop stays responsive
+    while this runs. Returns (documents, chunks_created, total_chars, warning) --
+    ``warning`` is a user-facing note when the document was only PARTIALLY
+    readable (e.g. a report whose figure pages are scans); the async Mongo insert
+    stays with the caller on the loop.
+
+    ``pre_extracted_pages`` (KB path) supplies already-extracted (page, text, ocr)
+    triples from the kb_formats registry, skipping step 1. ``provenance`` (KB
+    path) is merged onto every chunk doc so each chunk carries its uploader /
+    project / batch / canonicalTitle / contentHash.
+    """
+    # 0. Direct image upload (flag-gated): the whole document is ONE vision
+    # call and one flagged chunk -- no extraction, no chunker. Flag off, or
+    # the KB path: images fall through to the normal dispatch (OCR or reject),
+    # byte-identical to today.
+    if config.VISION_EXTRACTION_ENABLED and pre_extracted_pages is None:
+        from app.services.file_processing import VISION_IMAGE_EXTS
+        if file_type in VISION_IMAGE_EXTS:
+            return _ingest_image_via_vision(
+                filename, file_content, category, owner_id, thread_id,
+                file_type, provenance,
+            )
+
+    # 1. Extraction — use the caller's pages (KB) or extract here (live path).
+    extract_stats: Dict[str, Any] = {}
+    # Vision extraction applies only to the LIVE PDF path: the KB path
+    # pre-extracts via kb_formats and is deliberately untouched.
+    vision_eligible = (
+        config.VISION_EXTRACTION_ENABLED
+        and pre_extracted_pages is None
+        and file_type == ".pdf"
+    )
+    no_text_error: Optional[Exception] = None
+    if pre_extracted_pages is not None:
+        page_triples = pre_extracted_pages
+        print(f"  1. Using {len(page_triples)} pre-extracted page(s) ({file_type})...")
+    else:
+        # Lazy import to avoid a circular dependency at module load
+        from app.services.file_processing import (
+            extract_pages_from_file,
+            UnreadableDocumentError,
         )
-
-    print(f"[FILE] Ingesting document: {filename} (type: {file_type})")
-
-    # 1. Unified page-aware extraction (returns triples with OCR flag)
-    print(f"  1. Extracting text ({file_type})...")
-    page_triples = extract_pages_from_file(file_content, filename)
+        print(f"  1. Extracting text ({file_type})...")
+        try:
+            page_triples = extract_pages_from_file(file_content, filename, stats=extract_stats)
+        except UnreadableDocumentError as unreadable_err:
+            # A fully-scanned PDF (no page has a text layer) is exactly the
+            # case vision extraction exists for. extract_stats was filled
+            # before the raise, so the no-text page numbers are known. If
+            # vision is off (or reads nothing), the original error is
+            # re-raised below, unchanged.
+            if not (vision_eligible and extract_stats.get("unreadable_page_numbers")):
+                raise
+            page_triples = []
+            no_text_error = unreadable_err
     pages = [(p, t) for p, t, _ in page_triples]
     ocr_by_page = {p: ocr for p, _, ocr in page_triples}
     total_chars = sum(len(t) for _, t in pages)
     print(f"      Extracted {len(pages)} pages, {total_chars} characters")
 
-    if not pages or total_chars < 10:
+    # 1b. Vision extraction (flag-gated, default OFF): transcribe the pages the
+    # extractor identified as having NO text layer. One page per model call,
+    # capped per document; a failed page stays unindexed and is reported in the
+    # warning below -- it never fails the ingest.
+    vision_result: Optional[Dict[str, Any]] = None
+    vision_pages: List[Tuple[int, str]] = []
+    if vision_eligible and extract_stats.get("unreadable_page_numbers"):
+        from app.services.vision_extraction import extract_vision_pages
+        print(
+            f"  1b. Vision extraction for "
+            f"{len(extract_stats['unreadable_page_numbers'])} no-text page(s)..."
+        )
+        vision_result = extract_vision_pages(
+            file_content, extract_stats["unreadable_page_numbers"], filename
+        )
+        vision_pages = vision_result["pages"]
+
+    if (not pages or total_chars < 10) and not vision_pages:
+        if no_text_error is not None:
+            raise no_text_error
         raise ValueError(f"{filename} appears to be empty or contains no extractable text")
 
     # 2. Structure-aware chunking (v2) — same chunker for every file type
@@ -841,6 +1865,26 @@ async def ingest_document(
     )
     chunk_records = chunk_text_v2(pages)
     print(f"      Created {len(chunk_records)} chunks")
+
+    # 2b. Vision-derived chunks, appended AFTER the verbatim chunks and never
+    # merged with them: model-generated interpretation must stay a separate,
+    # flagged content class. Each page is chunked alone so every chunk keeps
+    # its source page number.
+    if vision_pages:
+        base_index = len(chunk_records)
+        vision_chunk_count = 0
+        for vp_num, vp_text in vision_pages:
+            for rec in chunk_text_v2([(vp_num, vp_text)]):
+                rec["chunk_index"] = base_index + vision_chunk_count
+                rec["vision_derived"] = True
+                chunk_records.append(rec)
+                vision_chunk_count += 1
+        total_chars += sum(len(t) for _, t in vision_pages)
+        print(
+            f"      Created {vision_chunk_count} vision-derived chunk(s) "
+            f"from {len(vision_pages)} page(s)"
+        )
+
     if not chunk_records:
         raise ValueError("No text chunks could be created from the file")
 
@@ -858,6 +1902,7 @@ async def ingest_document(
     for c, embedding in zip(chunk_records, embeddings):
         page_start = c["page_start"]
         ocr_extracted = bool(ocr_by_page.get(page_start, False))
+        vision_derived = bool(c.get("vision_derived"))
         doc = {
             "text": c["text"],
             "filename": filename,
@@ -884,11 +1929,164 @@ async def ingest_document(
             },
             "createdAt": datetime.now(),
         }
+        # Vision-derived chunks are model-generated interpretation, not
+        # extracted text. The flag (plus the model that produced it) is the
+        # provenance that citations and the scope note surface -- it must
+        # never be possible to mistake this content for verbatim document
+        # text. Absent entirely on normal chunks, so flag-off documents are
+        # byte-identical to before.
+        if vision_derived:
+            doc["visionDerived"] = True
+            doc["metadata"]["visionDerived"] = True
+            doc["metadata"]["visionModel"] = (vision_result or {}).get("model")
+        # Thread-scoped uploads carry their threadId so retrieval can filter to
+        # exactly this conversation thread. Omitted entirely for shared KB and
+        # per-user uploads, so their documents are byte-identical to before.
+        if thread_id is not None:
+            doc["threadId"] = thread_id
+            doc["metadata"]["threadId"] = thread_id
+        # KB provenance (uploader/project/batch/canonicalTitle/contentHash/...)
+        # stamped identically on every chunk so any single chunk is traceable.
+        if provenance:
+            doc.update(provenance)
         documents.append(doc)
 
     print(f"      Prepared {len(documents)} documents")
 
-    # 5. Insert
+    chunks_created = len(chunk_records)
+
+    # Partially-readable document: some pages carried no text (scanned figure
+    # pages are the common case) and are therefore invisible to the assistant.
+    # Surfacing this stops a user trusting an answer drawn from half a report.
+    # When vision extraction ran, the warning reports what it transcribed
+    # (flagged as model-interpreted, never verbatim) and which pages STILL
+    # could not be read; with the flag off the wording is unchanged.
+    warning: Optional[str] = None
+    skipped = extract_stats.get("unreadable_pages") or 0
+    total_p = extract_stats.get("total_pages") or 0
+    if skipped and total_p:
+        if vision_result is not None:
+            ok_pages = [pn for pn, _ in vision_pages]
+            failed_pages = list(vision_result["failed_pages"])
+            over_cap = list(vision_result["skipped_pages"])
+            parts = [
+                f"{skipped} of {total_p} pages had no readable text "
+                f"(scanned or image-only)."
+            ]
+            if ok_pages:
+                parts.append(
+                    f"AI vision transcribed {len(ok_pages)} of them "
+                    f"({_page_word(ok_pages)} {_format_page_list(ok_pages)}); "
+                    f"vision content is model-interpreted, not verbatim text."
+                )
+            if failed_pages:
+                parts.append(
+                    f"{len(failed_pages)} could not be read by vision and "
+                    f"{'was' if len(failed_pages) == 1 else 'were'} not indexed "
+                    f"({_page_word(failed_pages)} {_format_page_list(failed_pages)})."
+                )
+            if over_cap:
+                parts.append(
+                    f"{len(over_cap)} exceeded the vision page cap and "
+                    f"{'was' if len(over_cap) == 1 else 'were'} not indexed "
+                    f"({_page_word(over_cap)} {_format_page_list(over_cap)})."
+                )
+            warning = " ".join(parts)
+        else:
+            warning = (
+                f"{skipped} of {total_p} pages had no readable text (scanned or "
+                f"image-only) and were not indexed."
+            )
+        print(f"      [WARNING] {warning}")
+
+    # Free the large intermediates; the caller only needs `documents`.
+    del pages, chunk_records, texts, embeddings_list, embeddings
+    return documents, chunks_created, total_chars, warning
+
+
+async def ingest_document(
+    filename: str,
+    file_content: bytes,
+    category: str = "user_upload",
+    user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    pre_extracted_pages: Optional[List[Tuple[int, str, bool]]] = None,
+    provenance: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Multi-format ingest: extract pages, v2 chunk, embed, store.
+
+    Supported types are defined in file_processing.SUPPORTED_EXTENSIONS.
+    Chunks carry chunkingVersion, pageStart, sectionHeader, fileType, and
+    (for OCR-derived pages) metadata.ocrExtracted = True.
+
+    user_upload chunks are tagged with ``user_id`` (the uploading user's id) so
+    retrieval can scope them per-user. KB ingestion via the kb_admin CLI passes
+    no user_id and falls back to the legacy shared-KB owner id (config.USER_ID),
+    so that admin tooling -- which locates KB chunks by that id -- keeps working
+    unchanged. No HTTP route relies on this fallback; routes always pass an
+    explicit user_id.
+
+    ``thread_id`` scopes an upload to a single conversation thread: when set, each
+    chunk additionally carries ``threadId`` (and ``metadata.threadId``) so
+    thread-scoped retrieval (query_thread_documents) can filter to exactly this
+    thread. The caller passes ``category="thread_upload"`` for these so they are a
+    distinct scope -- never mixed into the shared knowledge_base or the per-user
+    ``user_upload`` corpus, and therefore never surfaced by the KB search.
+
+    Steps 1-4 (extract -> chunk -> embed -> build docs) are CPU-bound and run in
+    a dedicated worker-thread pool so the single uvicorn event loop stays
+    responsive during a large ingest; the motor insert (step 5) stays on the
+    loop. Set INGEST_OFFLOAD_ENABLED=false to run inline (pre-Phase-0 behaviour).
+    """
+    owner_id = user_id if user_id is not None else USER_ID
+    # Lazy import to avoid a circular dependency at module load
+    from app.services.file_processing import (
+        get_file_type,
+        is_supported_file,
+        SUPPORTED_EXTENSIONS,
+        VISION_IMAGE_EXTS,
+    )
+
+    file_type = get_file_type(filename)
+    # The KB path pre-extracts via the kb_formats registry (which validates the
+    # format itself and supports .txt/.md that file_processing does not), so the
+    # supported-type check only applies when we extract here. .webp is accepted
+    # ONLY via the vision-image path (flag on); it stays out of
+    # SUPPORTED_EXTENSIONS so flag-off behavior is unchanged.
+    vision_image_ok = (
+        config.VISION_EXTRACTION_ENABLED and file_type in VISION_IMAGE_EXTS
+    )
+    if pre_extracted_pages is None and not is_supported_file(filename) and not vision_image_ok:
+        raise ValueError(
+            f"Unsupported file type: {file_type}. "
+            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
+        )
+
+    print(f"[FILE] Ingesting document: {filename} (type: {file_type})")
+
+    # CPU-bound steps 1-4 off the loop (or inline when the flag is off).
+    if config.INGEST_OFFLOAD_ENABLED:
+        loop = asyncio.get_running_loop()
+        documents, chunks_created, total_chars, warning = await loop.run_in_executor(
+            _get_ingest_pool(),
+            _ingest_compute,
+            filename,
+            file_content,
+            category,
+            owner_id,
+            thread_id,
+            file_type,
+            pre_extracted_pages,
+            provenance,
+        )
+    else:
+        documents, chunks_created, total_chars, warning = _ingest_compute(
+            filename, file_content, category, owner_id, thread_id, file_type,
+            pre_extracted_pages, provenance,
+        )
+
+    # 5. Insert (motor — on the event loop)
     print("  5. Inserting into MongoDB...")
     result = await files_collection.insert_many(documents)
     inserted_count = len(result.inserted_ids)
@@ -896,9 +2094,8 @@ async def ingest_document(
 
     print(f"[OK] Document ingestion complete: {filename}")
 
-    chunks_created = len(chunk_records)
-    # Free large objects before returning
-    del pages, chunk_records, texts, embeddings_list, embeddings, documents
+    # Free the built documents before returning
+    del documents
     gc.collect()
 
     return {
@@ -908,4 +2105,6 @@ async def ingest_document(
         "documents_inserted": inserted_count,
         "chunking_version": CHUNKING_VERSION,
         "status": "success",
+        # None unless part of the document could not be read (see _ingest_compute).
+        "warning": warning,
     }

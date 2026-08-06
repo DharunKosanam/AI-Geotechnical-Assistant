@@ -17,17 +17,39 @@ import SidebarAccount from "./sidebar-account";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
 import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users } from "lucide-react";
 
-// --- File attachment config (mirrors python_backend file_processing.SUPPORTED_EXTENSIONS) ---
-const SUPPORTED_EXTENSIONS = [
+// --- File attachment config ---
+// DEFAULTS: text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately
+// NOT offered by default: their text can only be read by OCR, and this
+// deployment has no tesseract binary, so every image attachment failed after
+// the fact. The backend rejects them up front with the same reasoning
+// (files.py::_validate_upload).
+//
+// The live list comes from GET /api/upload/config (fetched on mount): when the
+// backend runs with VISION_EXTRACTION_ENABLED, it adds JPEG/PNG/WebP -- those
+// are read by the AI vision model, not OCR. If that fetch fails (or the flag
+// is off) these defaults render, which is exactly today's UI.
+const DEFAULT_SUPPORTED_EXTENSIONS = [
   ".pdf", ".docx",
   ".xlsx", ".xls", ".csv",
-  ".png", ".jpg", ".jpeg", ".tiff", ".tif",
   ".pptx",
 ];
-// accept attribute for the hidden file input (per UI spec)
-const FILE_ACCEPT = ".pdf,.docx,.xlsx,.xls,.csv,.pptx,.png,.jpg,.jpeg,.tiff";
-const SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, TIFF";
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — must match backend
+const DEFAULT_SUPPORTED_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX";
+type UploadTypes = { extensions: string[]; label: string };
+const DEFAULT_UPLOAD_TYPES: UploadTypes = {
+  extensions: DEFAULT_SUPPORTED_EXTENSIONS,
+  label: DEFAULT_SUPPORTED_LABEL,
+};
+const MAX_UPLOAD_MB = 50;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024; // must match backend
+
+// Client-side deadline for a chat response. Above the whole server timeout
+// chain (Ollama 180s < /api/chat route 240s < nginx 300s) so it only ever fires
+// when the connection itself died without an error — see sendMessage.
+const CLIENT_RESPONSE_TIMEOUT_MS = 315_000;
+
+// Streaming watchdog: the backend sends a keep-alive comment every 15s, so this
+// much silence means the connection is gone — not that the answer is slow.
+const STREAM_SILENCE_TIMEOUT_MS = 60_000;
 
 // Status polling: the /api/upload response returns immediately while the
 // backend ingests in the background, so we poll until embeddings actually land.
@@ -45,12 +67,77 @@ const STAGE_LABELS: Record<string, string> = {
 const stageLabel = (stage?: string): string =>
   (stage && STAGE_LABELS[stage]) || "Processing...";
 
+// Last-resort message when an upload fails WITHOUT a usable `detail` from the
+// backend — i.e. something between the browser and FastAPI broke. Each case
+// names what the user can actually do; "Upload failed (500)" told them nothing.
+const httpUploadError = (status: number, filename: string): string => {
+  if (status === 401) return "Your session expired. Please sign in again and retry.";
+  if (status === 413)
+    return `${filename} is too large. The limit is ${MAX_UPLOAD_MB} MB.`;
+  if (status === 429)
+    return "Too many uploads in a short time. Wait a minute and try again.";
+  if (status === 503) return "The server is busy processing uploads. Try again shortly.";
+  if (status === 504)
+    return "The upload timed out on the way to the server. Check your connection and retry.";
+  if (status >= 500)
+    return `The server could not accept ${filename} (error ${status}). Please retry; if it keeps failing, report this file.`;
+  return `Upload was rejected (error ${status}).`;
+};
+
+// Renders the trailing "**Sources:**" markdown block appended to an assistant
+// answer. Shared by the streaming and JSON paths so a message looks identical
+// however it arrived — sources are always appended at the END, because the
+// backend can only finalise the list once the answer is complete (the refusal
+// guard can clear it and citation narrowing trims it to what was actually cited).
+// A citation backed (fully or partly) by AI-vision transcription of scanned
+// pages must say so: that text is model-generated interpretation, never
+// verbatim document content. Empty for ordinary sources.
+const visionMarker = (source: any): string => {
+  if (typeof source !== "object" || source === null || !source.visionDerived) return "";
+  const pages: any[] = Array.isArray(source.visionPages) ? source.visionPages : [];
+  if (pages.length === 0) {
+    // No page numbers = a directly uploaded image: the entire cited content
+    // is a model-generated description, with no verbatim layer at all.
+    return " _(AI vision description of this image - model-generated, not document text)_";
+  }
+  return ` _(AI vision transcription of page${pages.length > 1 ? "s" : ""} ${pages.join(", ")} - not verbatim text)_`;
+};
+
+const formatSourcesBlock = (sources: any[]): string => {
+  if (!sources || sources.length === 0) return "";
+  let block = "\n\n**Sources:**\n";
+  sources.forEach((source: any, index: number) => {
+    if (typeof source === "object" && source !== null && source.title && source.url) {
+      block += `${index + 1}. [${source.title}](${source.url})${visionMarker(source)}\n`;
+    } else if (typeof source === "object" && source !== null && source.title) {
+      // No URL by design: thread/user uploads are the user's own files, so
+      // their citations are plain references — no external link to leak the
+      // title to.
+      block += `${index + 1}. ${source.title}${visionMarker(source)}\n`;
+    } else if (typeof source === "string") {
+      try {
+        const parsed = JSON.parse(source);
+        if (parsed.title && parsed.url) {
+          block += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
+        } else {
+          block += `${index + 1}. ${source}\n`;
+        }
+      } catch {
+        block += `${index + 1}. ${source}\n`;
+      }
+    } else {
+      block += `${index + 1}. ${String(source)}\n`;
+    }
+  });
+  return block;
+};
+
 const getExt = (filename: string): string => {
   const i = filename.lastIndexOf(".");
   return i >= 0 ? filename.slice(i).toLowerCase() : "";
 };
-const isSupportedFile = (filename: string): boolean =>
-  SUPPORTED_EXTENSIONS.includes(getExt(filename));
+const isSupportedFile = (filename: string, extensions: string[]): boolean =>
+  extensions.includes(getExt(filename));
 
 // One attachment chip in the input area, tracking its upload lifecycle.
 type AttachedFile = {
@@ -59,7 +146,14 @@ type AttachedFile = {
   status: "uploading" | "ready" | "error";
   stage?: string; // backend ingest stage while processing (extracting/ocr/...)
   error?: string;
+  // Indexed, but only partially readable (e.g. scanned figure pages were
+  // skipped). Not a failure — shown alongside the success state so nobody
+  // assumes the assistant can see the whole document.
+  warning?: string;
   settled?: boolean; // transient: after the success check, revert chip to the file icon
+  // Thread this file was uploaded into. Chips belong to one conversation, so
+  // switching threads clears them (the document itself stays with its thread).
+  threadId?: string;
 };
 
 type MessageProps = {
@@ -74,6 +168,64 @@ const UserMessage = ({ text }: { text: string }) => {
       <div className={styles.messageContent}>
         <div className={styles.messageLabel}>You</div>
         <div className={styles.userMessage}>{text}</div>
+      </div>
+    </div>
+  );
+};
+
+// How long to wait before the indicator starts reassuring the user. Under GPU
+// contention an answer can take minutes; silence that long reads as "broken"
+// and users reload, which adds load and makes the next answer slower still.
+const THINKING_SLOW_MS = 15_000;
+const THINKING_VERY_SLOW_MS = 45_000;
+
+/**
+ * Pending-response indicator — the assistant's turn made visible before any of
+ * its text exists. Deliberately mirrors AssistantMessage's row/label/bubble so
+ * it occupies exactly the spot the answer will appear in, and is simply
+ * replaced by it. Once streaming lands this is the "waiting for first token"
+ * state; the streamed text takes over from here.
+ */
+const ThinkingIndicator = ({ startedAt }: { startedAt: number }) => {
+  // Escalating reassurance, driven by two timers rather than a per-second tick
+  // so a long wait costs two re-renders, not 180.
+  const [phase, setPhase] = useState<0 | 1 | 2>(0);
+
+  useEffect(() => {
+    setPhase(0);
+    const elapsed = Date.now() - startedAt;
+    const timers = [
+      setTimeout(() => setPhase(1), Math.max(0, THINKING_SLOW_MS - elapsed)),
+      setTimeout(() => setPhase(2), Math.max(0, THINKING_VERY_SLOW_MS - elapsed)),
+    ];
+    return () => timers.forEach(clearTimeout);
+  }, [startedAt]);
+
+  const hint =
+    phase === 2
+      ? "Still working — complex questions can take a couple of minutes. No need to reload."
+      : phase === 1
+        ? "Searching the knowledge base and drafting an answer..."
+        : "Thinking...";
+
+  return (
+    <div className={styles.messageRow} style={{ justifyContent: "flex-start" }}>
+      <div className={styles.messageContent}>
+        <div className={styles.messageLabel}>AI Assistant</div>
+        {/* role=status + aria-live announces the wait to screen readers, which
+            would otherwise get the same silence as a blank screen. */}
+        <div
+          className={`${styles.assistantMessage} ${styles.thinkingBubble}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span className={styles.thinkingDots} aria-hidden="true">
+            <span className={styles.thinkingDot} />
+            <span className={styles.thinkingDot} />
+            <span className={styles.thinkingDot} />
+          </span>
+          <span className={styles.thinkingHint}>{hint}</span>
+        </div>
       </div>
     </div>
   );
@@ -385,7 +537,26 @@ const Chat = ({
   const [userInput, setUserInput] = useState("");
   const [messages, setMessages] = useState<MessageProps[]>([]);
   const [inputDisabled, setInputDisabled] = useState(false);
+  // Answer pending: set the moment the user sends, cleared when the answer OR
+  // an error arrives. Kept separate from inputDisabled, which is also toggled
+  // by the legacy tool-call flow and by thread switching, so the indicator
+  // tracks exactly one thing: "we are waiting on this turn's response".
+  const [awaitingSince, setAwaitingSince] = useState<number | null>(null);
+  // True from the first byte of an SSE turn until the stream closes. Used to
+  // silence the history poll, which would otherwise overwrite the message being
+  // streamed with the server's not-yet-written version of it.
+  const [isStreaming, setIsStreaming] = useState(false);
   const [threadId, setThreadId] = useState<string | null>("");
+  // Mirrors threadId for code that mints a thread and then immediately uses it
+  // in the SAME handler (attach -> upload), where the state closure is stale.
+  const threadIdRef = useRef<string | null>("");
+  // In-flight thread creation, so concurrent callers share one thread instead
+  // of racing to create two.
+  const threadCreationRef = useRef<Promise<string> | null>(null);
+  // A thread that exists server-side but has no message yet (e.g. created by an
+  // attach). Keeps the welcome screen up and drives one-time title generation.
+  const [isDraftThread, setIsDraftThread] = useState(false);
+  const awaitingFirstMessageRef = useRef(false);
   const [isGroupConversation, setIsGroupConversation] = useState(false);
   const threadListRef = useRef<any>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
@@ -395,6 +566,27 @@ const Chat = ({
   // --- File attachment UI state (replaces the removed right-hand file panel) ---
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  // Live upload-type list from the backend (adds JPEG/PNG/WebP when vision
+  // extraction is enabled server-side). Defaults -- today's text-only list --
+  // render until the fetch lands, and stay if it fails.
+  const [uploadTypes, setUploadTypes] = useState<UploadTypes>(DEFAULT_UPLOAD_TYPES);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(API_ENDPOINTS.uploadConfig(), { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        if (Array.isArray(data.extensions) && data.extensions.length > 0 && data.label) {
+          setUploadTypes({ extensions: data.extensions, label: data.label });
+        }
+      })
+      .catch(() => {
+        /* keep defaults -- identical to today's UI */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // True while any chip is still uploading/processing — used to block sending.
   const isUploading = attachedFiles.some((f) => f.status === "uploading");
   // Per-file status poll timers so each chip can be cancelled independently (e.g. via X).
@@ -408,6 +600,12 @@ const Chat = ({
       timers.clear();
     };
   }, []);
+
+  // Keep the ref in sync for the paths that set threadId directly
+  // (thread switch, New Chat). ensureThread sets both up front itself.
+  useEffect(() => {
+    threadIdRef.current = threadId;
+  }, [threadId]);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -512,23 +710,8 @@ const Chat = ({
         let text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
         if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          text += "\n\n**Sources:**\n";
-          sources.forEach((source: any, index: number) => {
-            if (typeof source === "object" && source !== null && source.title && source.url) {
-              text += `${index + 1}. [${source.title}](${source.url})\n`;
-            } else if (typeof source === "string") {
-              try {
-                const parsed = JSON.parse(source);
-                if (parsed.title && parsed.url) {
-                  text += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-                } else {
-                  text += `${index + 1}. ${source}\n`;
-                }
-              } catch {
-                text += `${index + 1}. ${source}\n`;
-              }
-            }
-          });
+          // Shared renderer: handles link-less (private upload) citations too.
+          text += formatSourcesBlock(sources);
         }
         return {
           role: msg.role,
@@ -710,10 +893,149 @@ const Chat = ({
     }
   };
 
+  // Streaming turn. Returns false when the backend has streaming switched off
+  // (its /chat/stream 404s) so the caller can fall back to the JSON endpoint —
+  // the frontend therefore needs no flag of its own and follows STREAMING_ENABLED
+  // automatically, with no rebuild to toggle it.
+  //
+  // Once the first token lands, this NEVER falls back: the turn has already run
+  // on the server, so retrying it would generate (and bill, and queue) a second
+  // answer for the same question.
+  const sendMessageStreaming = async (
+    text: string,
+    actualThreadId: string | null,
+  ): Promise<boolean> => {
+    const controller = new AbortController();
+    // Watchdog on SILENCE, not on total duration — the backend heartbeats every
+    // 15s, so a gap this long means the connection is dead, however long the
+    // answer legitimately takes.
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    const resetWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => controller.abort(), STREAM_SILENCE_TIMEOUT_MS);
+    };
+
+    let started = false; // has any token been rendered?
+    try {
+      resetWatchdog();
+      const response = await fetch(API_ENDPOINTS.sendMessageStream(), {
+        credentials: "include",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(getMessageRequestBody(text, actualThreadId)),
+        signal: controller.signal,
+      });
+
+      if (response.status === 404) {
+        // Streaming disabled server-side — the caller uses /api/chat instead.
+        console.log("ℹ️ Streaming disabled on the backend; using /api/chat");
+        return false;
+      }
+      if (!response.ok || !response.body) {
+        const raw = await response.text().catch(() => "");
+        let detail = "";
+        try {
+          detail = (JSON.parse(raw) as { detail?: string }).detail ?? "";
+        } catch {
+          /* not JSON */
+        }
+        appendMessage(
+          "assistant",
+          `\n\n[Error: ${detail || `Failed to send message (Status: ${response.status})`}]`,
+        );
+        setInputDisabled(false);
+        return true; // handled — do NOT re-ask via the JSON path
+      }
+
+      setIsStreaming(true);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let eventName = "";
+
+      const handleEvent = (name: string, dataLine: string) => {
+        let payload: any;
+        try {
+          payload = JSON.parse(dataLine);
+        } catch {
+          return; // malformed frame — ignore rather than break the answer
+        }
+        if (name === "token") {
+          const piece: string = payload.text ?? "";
+          if (!piece) return;
+          if (!started) {
+            started = true;
+            shouldForceScrollRef.current = true;
+            // First token replaces the thinking indicator: creating the
+            // assistant message makes showThinking false on the next render.
+            appendMessage("assistant", piece);
+          } else {
+            appendToLastMessage(piece);
+          }
+        } else if (name === "done") {
+          const block = formatSourcesBlock(payload.sources || []);
+          if (block) {
+            if (started) appendToLastMessage(block);
+            else appendMessage("assistant", block.trimStart());
+          }
+        } else if (name === "error") {
+          const detail = payload.detail || "The assistant failed to answer.";
+          if (started) appendToLastMessage(`\n\n[Error: ${detail}]`);
+          else appendMessage("assistant", `\n\n[Error: ${detail}]`);
+        }
+      };
+
+      // SSE framing: records separated by a blank line; within a record,
+      // "event:" names it and "data:" carries the JSON. Lines starting with
+      // ":" are keep-alive comments and are ignored by design.
+      while (true) {
+        const { done, value } = await reader.read();
+        resetWatchdog();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const record = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          eventName = "";
+          for (const line of record.split("\n")) {
+            if (line.startsWith("event: ")) eventName = line.slice(7).trim();
+            else if (line.startsWith("data: ")) handleEvent(eventName, line.slice(6));
+          }
+        }
+      }
+
+      if (!started) {
+        // Stream ended without a single token — treat as a failed turn rather
+        // than leaving an empty bubble.
+        appendMessage("assistant", "\n\n[Error: The assistant returned an empty response.]");
+      }
+      setInputDisabled(false);
+      return true;
+    } catch (error: any) {
+      const aborted = error?.name === "AbortError";
+      console.error("Streaming error:", error);
+      const detail = aborted
+        ? "The connection went quiet and the answer was cut off. Please try again."
+        : error?.message || "The response stream failed.";
+      if (started) appendToLastMessage(`\n\n[Error: ${detail}]`);
+      else appendMessage("assistant", `\n\n[Error: ${detail}]`);
+      setInputDisabled(false);
+      return true; // a partially-streamed turn must never be re-sent
+    } finally {
+      if (watchdog) clearTimeout(watchdog);
+      setIsStreaming(false);
+    }
+  };
+
   const sendMessage = async (text: string, targetThreadId: string | null = null) => {
     const actualThreadId = targetThreadId || threadId;
-    const isFirstMessage = isNewThread && messages.length === 0;
-    
+
+    // Prefer the stream; fall back to the JSON endpoint only when the backend
+    // says streaming is off (404), never after tokens have started arriving.
+    if (await sendMessageStreaming(text, actualThreadId)) return;
+
     try {
       // Get API endpoint based on configuration (Python or Next.js)
       const endpoint = API_ENDPOINTS.sendMessage(actualThreadId);
@@ -723,15 +1045,30 @@ const Chat = ({
       console.log("📦 Request body:", JSON.stringify(requestBody, null, 2));
       console.log("🆔 Thread ID:", actualThreadId);
       
-      const response = await fetch(endpoint, {
-        credentials: "include",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(requestBody),
-      });
-      
+      // Last-resort client deadline. The server chain already fails inside-out
+      // (Ollama 180s -> /api/chat route 240s -> nginx 300s), but a connection
+      // that silently dies mid-flight — VPN drop, laptop sleep — leaves fetch
+      // hanging with no response and no error, and the indicator with nothing
+      // to stop it. Sits ABOVE the whole server chain so it never preempts a
+      // legitimately slow answer.
+      const controller = new AbortController();
+      const clientDeadline = setTimeout(() => controller.abort(), CLIENT_RESPONSE_TIMEOUT_MS);
+
+      let response: Response;
+      try {
+        response = await fetch(endpoint, {
+          credentials: "include",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(clientDeadline);
+      }
+
       console.log("📨 Response status:", response.status);
 
       if (!response.ok) {
@@ -762,53 +1099,30 @@ const Chat = ({
       // Parse JSON response from Python backend
       const data = await response.json();
       console.log("📦 Response data:", data);
-      
+
       // Extract answer and sources
       const answer = data.answer || "";
       const sources = data.sources || [];
-      
+
       // Build the complete response with clickable source links
-      let fullResponse = answer;
-      
-      if (sources && sources.length > 0) {
-        fullResponse += "\n\n**Sources:**\n";
-        sources.forEach((source: any, index: number) => {
-          if (typeof source === "object" && source !== null && source.title && source.url) {
-            fullResponse += `${index + 1}. [${source.title}](${source.url})\n`;
-          } else if (typeof source === "string") {
-            try {
-              const parsed = JSON.parse(source);
-              if (parsed.title && parsed.url) {
-                fullResponse += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-              } else {
-                fullResponse += `${index + 1}. ${source}\n`;
-              }
-            } catch {
-              fullResponse += `${index + 1}. ${source}\n`;
-            }
-          } else {
-            fullResponse += `${index + 1}. ${String(source)}\n`;
-          }
-        });
-      }
-      
+      const fullResponse = answer + formatSourcesBlock(sources);
+
       console.log("✅ Answer extracted:", answer.substring(0, 100) + "...");
       console.log("📚 Sources:", sources);
-      
+
       appendMessage("assistant", fullResponse);
       setInputDisabled(false);
 
-      // Generate title for first message in new thread
-      if (isFirstMessage) {
-        setIsNewThread(false);
-        generateAndUpdateTitle(text, actualThreadId).catch(error => {
-          console.error("Error generating title:", error);
-        });
-      }
-      
-    } catch (error) {
+      // Title generation is owned by handleSubmit (the only caller), which knows
+      // whether this is the thread's first turn. Doing it here too fired the
+      // title LLM twice for a thread started from "New Chat".
+    } catch (error: any) {
       console.error("Error sending message:", error);
-      appendMessage("assistant", `\n\n[Error: ${error.message || "Failed to send message"}]`);
+      const message =
+        error?.name === "AbortError"
+          ? "The connection was lost before the assistant replied. Please check your connection and try again."
+          : error?.message || "Failed to send message";
+      appendMessage("assistant", `\n\n[Error: ${message}]`);
       setInputDisabled(false);
     }
   };
@@ -866,7 +1180,7 @@ const Chat = ({
         e.preventDefault(); // Prevent newline
         
         // Don't submit if already processing, uploading, or input is empty
-        if (inputDisabled || isUploading || !userInput.trim()) {
+        if (inputDisabled || !userInput.trim()) {
           return;
         }
         
@@ -876,134 +1190,124 @@ const Chat = ({
     }
   };
 
+  // Threads are created lazily — nothing exists server-side until the user
+  // commits something to the conversation. Both the composer's first Send AND
+  // the attach button need a real thread id (an upload without one is stored as
+  // a plain user_upload and is invisible to thread-scoped retrieval), so the
+  // minting lives here: returns the current thread when there is one, otherwise
+  // creates it (id + sidebar history row) and marks it as awaiting its first
+  // message. threadCreationRef collapses concurrent callers onto one creation.
+  const ensureThread = async (): Promise<string> => {
+    if (threadIdRef.current) return threadIdRef.current;
+    if (threadCreationRef.current) return threadCreationRef.current;
+
+    const creation = (async () => {
+      const res = await fetch(API_ENDPOINTS.createThread(), {
+        credentials: "include",
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to create thread (status ${res.status})`);
+      }
+      const data = await res.json();
+      const newThreadId = data.threadId;
+      if (!newThreadId) {
+        throw new Error("Server did not return a thread id");
+      }
+
+      // Publish the id synchronously so the rest of THIS handler (e.g. the
+      // upload that triggered the creation) sees it without a re-render.
+      threadIdRef.current = newThreadId;
+      setThreadId(newThreadId);
+      setIsNewThread(true);
+      awaitingFirstMessageRef.current = true;
+      // Attach-before-typing must not swap the welcome screen for an empty
+      // message pane; the thread only "starts" once a message is sent.
+      setIsDraftThread(true);
+
+      // Sidebar row. Registering it here (rather than at first message) keeps an
+      // attach-first thread visible and deletable — deleting a thread cascades
+      // to its thread_upload documents, so an abandoned upload is never orphaned.
+      await fetch(API_ENDPOINTS.createThreadHistory(), {
+        credentials: "include",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          threadId: newThreadId,
+          name: getDefaultThreadName(),
+          isGroup: false,
+        }),
+      });
+
+      if (threadListRef.current) {
+        await threadListRef.current.fetchThreads();
+      }
+
+      return newThreadId;
+    })();
+
+    threadCreationRef.current = creation;
+    try {
+      return await creation;
+    } finally {
+      threadCreationRef.current = null;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userInput.trim() || inputDisabled || isUploading) return;
+    if (!userInput.trim() || inputDisabled) return;
 
     const messageText = userInput;
     setUserInput("");
     setInputDisabled(true);
+    // Show the indicator NOW — before thread creation, before the request —
+    // so there is never a frame in which the app looks idle after a send.
+    setAwaitingSince(Date.now());
 
-    // If no thread exists, create one first
-    if (!threadId) {
-      try {
-        // 1. Create new thread
-        const createEndpoint = API_ENDPOINTS.createThread();
-        const res = await fetch(createEndpoint, {
-          credentials: "include",
-          method: "POST",
-        });
-        const data = await res.json();
-        const newThreadId = data.threadId;
-        
-        // 2. Set thread ID
-        setThreadId(newThreadId);
-        setIsNewThread(true);
-        
-        // 3. Save to history with default name
-        const defaultName = getDefaultThreadName();
-        const historyEndpoint = API_ENDPOINTS.createThreadHistory();
-        await fetch(historyEndpoint, {
-          credentials: "include",
-          method: "POST",
-          body: JSON.stringify({ 
-            threadId: newThreadId,
-            name: defaultName,
-            isGroup: false
-          }),
-          headers: {
-            'Content-Type': 'application/json',
-          }
-        });
-        
-        // 4. Refresh thread list
-        if (threadListRef.current) {
-          await threadListRef.current.fetchThreads();
-        }
-        
-        // 5. Now send the message with the new threadId
-        const firstMessageText = messageText;
-        
-        shouldForceScrollRef.current = true;
-        setMessages((prevMessages) => {
-          const newMessages: MessageProps[] = [
-            ...prevMessages,
-            { role: "user" as const, text: messageText }
-          ];
-          lastMessageCountRef.current = newMessages.length;
-          return newMessages;
-        });
-        
-        // Send message immediately with new thread ID
-        await sendMessage(messageText, newThreadId);
-        
-        // 6. Generate title for the new thread
-        try {
-          console.log("Generating title for new thread:", newThreadId);
-          const titleEndpoint = API_ENDPOINTS.generateTitle(newThreadId);
-          const titleResponse = await fetch(titleEndpoint, {
-            credentials: "include",
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              message: firstMessageText,
-            }),
-          });
+    // No-op when the thread already exists — whether the user typed into an
+    // open conversation or an attach already minted the thread.
+    let activeThreadId: string;
+    try {
+      activeThreadId = await ensureThread();
+    } catch (error) {
+      console.error("Failed to create thread:", error);
+      setUserInput(messageText); // give the text back rather than losing it
+      setInputDisabled(false);
+      setAwaitingSince(null); // never leave the indicator spinning
+      return;
+    }
 
-          if (titleResponse.ok) {
-            const titleData = await titleResponse.json();
-            const generatedTitle = titleData.title;
-            console.log("Generated title:", generatedTitle);
+    // First turn of this thread, whether it was minted just now or earlier by an
+    // attach. Drives title generation exactly once.
+    const isFirstTurn = awaitingFirstMessageRef.current;
+    awaitingFirstMessageRef.current = false;
+    setIsDraftThread(false);
 
-            // Update thread name in history
-            const updateEndpoint = API_ENDPOINTS.updateThread();
-            await fetch(updateEndpoint, {
-              credentials: "include",
-              method: "PUT",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                threadId: newThreadId,
-                newName: generatedTitle,
-              }),
-            });
+    shouldForceScrollRef.current = true;
+    setMessages((prevMessages) => {
+      const newMessages: MessageProps[] = [
+        ...prevMessages,
+        { role: "user" as const, text: messageText },
+      ];
+      lastMessageCountRef.current = newMessages.length;
+      return newMessages;
+    });
 
-            // Refresh thread list to show updated title
-            if (threadListRef.current) {
-              await threadListRef.current.fetchThreads();
-            }
-            
-            console.log("✅ Thread title updated successfully");
-          } else {
-            console.error("Failed to generate title, status:", titleResponse.status);
-          }
-        } catch (titleError) {
-          console.error("Error generating title:", titleError);
-          // Don't fail the whole operation if title generation fails
-        }
-        
-        setIsNewThread(false); // Mark thread as no longer new
-        
-      } catch (error) {
-        console.error('Failed to create thread:', error);
-        setInputDisabled(false);
-        return;
-      }
-    } else {
-      shouldForceScrollRef.current = true;
-      setMessages((prevMessages) => {
-        const newMessages: MessageProps[] = [
-          ...prevMessages,
-          { role: "user" as const, text: messageText },
-        ];
-        lastMessageCountRef.current = newMessages.length;
-        return newMessages;
-      });
+    try {
+      await sendMessage(messageText, activeThreadId);
+    } finally {
+      // sendMessage handles its own errors today, but a finally is what
+      // GUARANTEES the indicator stops — success, HTTP error, timeout, or an
+      // exception a future change lets escape. It must never outlive the turn.
+      setAwaitingSince(null);
+    }
 
-      sendMessage(messageText);
+    if (isFirstTurn) {
+      // Best-effort: generateAndUpdateTitle swallows its own errors and
+      // refreshes the sidebar itself.
+      await generateAndUpdateTitle(messageText, activeThreadId);
+      setIsNewThread(false);
     }
   };
 
@@ -1228,23 +1532,8 @@ const Chat = ({
         let text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
         if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          text += "\n\n**Sources:**\n";
-          sources.forEach((source: any, index: number) => {
-            if (typeof source === "object" && source !== null && source.title && source.url) {
-              text += `${index + 1}. [${source.title}](${source.url})\n`;
-            } else if (typeof source === "string") {
-              try {
-                const parsed = JSON.parse(source);
-                if (parsed.title && parsed.url) {
-                  text += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-                } else {
-                  text += `${index + 1}. ${source}\n`;
-                }
-              } catch {
-                text += `${index + 1}. ${source}\n`;
-              }
-            }
-          });
+          // Shared renderer: handles link-less (private upload) citations too.
+          text += formatSourcesBlock(sources);
         }
         return {
           role: msg.role,
@@ -1252,7 +1541,7 @@ const Chat = ({
           annotations: msg.content?.[0]?.text?.annotations || []
         };
       });
-      
+
       console.log(`[LOAD] Parsed ${newMessages.length} messages for thread: ${targetThreadId}`);
       
       if (isInitialLoad) {
@@ -1305,8 +1594,11 @@ const Chat = ({
     }
     
     // Only start polling when waiting for AI response (inputDisabled = true)
-    // This prevents constant polling when idle
-    if (threadId && !isNewThread && inputDisabled) {
+    // This prevents constant polling when idle.
+    // NOT while streaming: loadThread() replaces the whole message list from
+    // the DB, and the assistant row is not written until the turn completes —
+    // so a poll landing mid-stream would wipe the text as it is being typed.
+    if (threadId && !isNewThread && inputDisabled && !isStreaming) {
       console.log(`🔄 Starting polling while waiting for AI response: ${threadId}`);
       
       // Poll every 2 seconds only while waiting for response
@@ -1323,14 +1615,20 @@ const Chat = ({
         pollingIntervalRef.current = null;
       }
     };
-  }, [threadId, isNewThread, inputDisabled]); // Added inputDisabled dependency
+  }, [threadId, isNewThread, inputDisabled, isStreaming]);
   const createNewThread = () => {
     // Simply reset to welcome state
-    // Thread will be created when user sends first message
+    // Thread will be created when the user sends the first message OR attaches
+    // the first file, whichever comes first.
     setThreadId(null);
-    setMessages([]); 
+    threadIdRef.current = null;
+    setMessages([]);
     setIsGroupConversation(false);
     setIsNewThread(true);
+    setIsDraftThread(false);
+    setAwaitingSince(null); // an abandoned turn must not keep a spinner alive
+    awaitingFirstMessageRef.current = false;
+    clearAttachedFiles();
     setUserInput("");
     lastMessageCountRef.current = 0;
   };
@@ -1342,9 +1640,18 @@ const Chat = ({
       pollingIntervalRef.current = null;
     }
     
+    // Attachments are per-conversation; never carry chips across a switch.
+    clearAttachedFiles();
+    setIsDraftThread(false);
+    // The indicator belongs to the thread that was waiting, not to the one
+    // being opened — drop it on the switch.
+    setAwaitingSince(null);
+    awaitingFirstMessageRef.current = false;
+
     if (selectedThreadId === null) {
       // Show welcome screen - clear the current thread
       setThreadId("");
+      threadIdRef.current = "";
       setMessages([]);
       setIsGroupConversation(false);
       setIsNewThread(false);
@@ -1365,7 +1672,8 @@ const Chat = ({
       
       // 2. Set thread ID
       setThreadId(selectedThreadId);
-      
+      threadIdRef.current = selectedThreadId;
+
       // 3. Load messages directly (passing selectedThreadId to avoid stale state)
       loadThread(selectedThreadId, true);
     }
@@ -1404,25 +1712,39 @@ const Chat = ({
   // Poll GET /api/upload/status until the backend reports the file is fully
   // ingested (embeddings written) or errored. Each file polls independently so
   // removing its chip via X cancels just that cycle.
-  const startPolling = (id: string, filename: string) => {
+  const startPolling = (id: string, filename: string, forThreadId: string) => {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
 
     const poll = async () => {
       // Safety timeout — don't spin forever if ingest never resolves.
       if (Date.now() > deadline) {
         stopPolling(id);
-        updateAttachedFile(id, { status: "error", error: "Processing timed out" });
+        updateAttachedFile(id, {
+          status: "error",
+          error: `${filename} is still processing after ${Math.round(
+            POLL_TIMEOUT_MS / 60000,
+          )} minutes. It may be very large — try a smaller file, or reopen this chat shortly to see if it finished.`,
+        });
         return;
       }
 
       try {
-        const resp = await fetch(API_ENDPOINTS.uploadStatus(filename), { credentials: "include" });
+        // Scoped to the thread: the same filename can be attached to more than
+        // one conversation, and an unscoped lookup would report the other
+        // upload's status.
+        const resp = await fetch(API_ENDPOINTS.uploadStatus(filename, forThreadId), {
+          credentials: "include",
+        });
         if (!resp.ok) return; // transient server hiccup — keep polling until timeout
         const data = await resp.json();
 
         if (data.status === "ready") {
           stopPolling(id);
-          updateAttachedFile(id, { status: "ready", stage: undefined });
+          updateAttachedFile(id, {
+            status: "ready",
+            stage: undefined,
+            warning: data.warning,
+          });
           // Settle the chip back to the calm file icon after the success check.
           setTimeout(() => updateAttachedFile(id, { settled: true }), 1500);
         } else if (data.status === "error") {
@@ -1443,12 +1765,18 @@ const Chat = ({
     pollTimersRef.current.set(id, timer);
   };
 
-  // Uploads one file and reflects the outcome on its chip.
-  // The /api/upload call itself is unchanged — only the chip status is new.
-  const uploadAttachedFile = async (id: string, file: File) => {
+  // Uploads one file INTO a thread and reflects the outcome on its chip.
+  //
+  // threadId is what makes the file a thread document: with it the backend
+  // stores the upload as category "thread_upload" tagged with this thread, which
+  // is what thread_has_documents() looks for and what lets the router pick
+  // THREAD_DOC. Without it the file lands as a generic user_upload and the
+  // assistant can never see it as "the file you just attached", so we never
+  // upload without one.
+  const uploadAttachedFile = async (id: string, file: File, forThreadId: string) => {
     const data = new FormData();
     data.append("file", file); // "file" (singular) for /upload endpoint
-    data.append("category", "user_upload"); // tag as user upload (not knowledge base)
+    data.append("threadId", forThreadId);
 
     try {
       const resp = await fetch(API_ENDPOINTS.uploadFile(), {
@@ -1458,11 +1786,21 @@ const Chat = ({
       });
 
       if (!resp.ok) {
-        const errorData = await resp.json().catch(() => ({ detail: "Unknown error" }));
-        console.error(`Failed to upload ${file.name}:`, errorData);
+        // The body is not guaranteed to be JSON: a proxy or gateway failure
+        // returns plain text ("Internal Server Error"), and blindly doing
+        // resp.json() there is what used to leave the chip reading
+        // "Unknown error" with nothing to act on. Read it as text first.
+        const raw = await resp.text().catch(() => "");
+        let detail = "";
+        try {
+          detail = (JSON.parse(raw) as { detail?: string }).detail ?? "";
+        } catch {
+          /* not JSON — fall through to the status-based message */
+        }
+        console.error(`Failed to upload ${file.name}: ${resp.status}`, raw.slice(0, 500));
         updateAttachedFile(id, {
           status: "error",
-          error: errorData.detail || `Upload failed (status ${resp.status})`,
+          error: detail || httpUploadError(resp.status, file.name),
         });
         return;
       }
@@ -1482,20 +1820,24 @@ const Chat = ({
       // background task, so the chip stays "uploading" and we poll the status
       // endpoint until embeddings actually land.
       updateAttachedFile(id, { stage: result.stage || "processing" });
-      startPolling(id, file.name);
+      startPolling(id, file.name, forThreadId);
     } catch (error: any) {
+      // fetch only rejects when the request never completed — the connection
+      // dropped, or the browser blocked it. Say that, rather than surfacing a
+      // raw "Failed to fetch" / "NetworkError" to the user.
       console.error(`Error uploading ${file.name}:`, error);
       updateAttachedFile(id, {
         status: "error",
-        error: error?.message || "Upload failed. Please try again.",
+        error: `Couldn't reach the server to upload ${file.name}. Check your connection (and VPN) and try again.`,
       });
     }
   };
 
   // Triggered by the hidden file <input> behind the "+" button.
-  // Pre-flight validation is unchanged; valid files render immediately as
-  // "uploading" chips, then each upload resolves its own chip independently.
-  const handleFileAttach = (event: React.ChangeEvent<HTMLInputElement>) => {
+  // Valid files render immediately as "uploading" chips; the thread is created
+  // first (attaching may be the user's very first action in a new chat, before
+  // any message exists), then each upload resolves its own chip independently.
+  const handleFileAttach = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = event.target.files;
     if (!selectedFiles || selectedFiles.length === 0) return;
 
@@ -1503,8 +1845,8 @@ const Chat = ({
     const valid: File[] = [];
     for (let i = 0; i < selectedFiles.length; i++) {
       const f = selectedFiles[i];
-      if (!isSupportedFile(f.name)) {
-        alert(`"${f.name}" is not a supported file type.\n\nSupported: ${SUPPORTED_LABEL}`);
+      if (!isSupportedFile(f.name, uploadTypes.extensions)) {
+        alert(`"${f.name}" is not a supported file type.\n\nSupported: ${uploadTypes.label}`);
         continue;
       }
       if (f.size > MAX_UPLOAD_BYTES) {
@@ -1537,8 +1879,27 @@ const Chat = ({
       })),
     ]);
 
+    // A file is always uploaded INTO a thread, so mint one if this attach came
+    // before the first message. Cheap and idempotent when a thread is open.
+    let forThreadId: string;
+    try {
+      forThreadId = await ensureThread();
+    } catch (error) {
+      console.error("Failed to create a thread for the attachment:", error);
+      entries.forEach(({ id }) =>
+        updateAttachedFile(id, {
+          status: "error",
+          error: "Couldn't start a conversation for this file. Please try again.",
+        })
+      );
+      return;
+    }
+
     // Fire uploads concurrently; each resolves its own chip by id.
-    entries.forEach(({ id, file }) => uploadAttachedFile(id, file));
+    entries.forEach(({ id, file }) => {
+      updateAttachedFile(id, { threadId: forThreadId });
+      uploadAttachedFile(id, file, forThreadId);
+    });
   };
 
   // Removes an attachment chip from the input (UI only). Cancels its status
@@ -1546,6 +1907,15 @@ const Chat = ({
   const removeAttachedFile = (id: string) => {
     stopPolling(id);
     setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
+  };
+
+  // Drops every chip and its poll. Chips belong to one conversation, so leaving
+  // thread A's attachments visible in thread B would misrepresent what the
+  // assistant can actually see (the documents stay with their own thread).
+  const clearAttachedFiles = () => {
+    pollTimersRef.current.forEach((t) => clearInterval(t));
+    pollTimersRef.current.clear();
+    setAttachedFiles([]);
   };
 
   const deduplicatedMessages = useMemo(() => {
@@ -1557,6 +1927,16 @@ const Chat = ({
     }
     return result;
   }, [messages]);
+
+  // Waiting, and the answer is not already on screen. The 2s history poll that
+  // runs during a wait can surface the assistant's reply slightly before the
+  // request resolves; without this the indicator would sit spinning underneath
+  // an answer that had already arrived. Phrased as "last message isn't the
+  // assistant's" rather than "is the user's" so it also covers the moment
+  // before the user's own message has been appended.
+  const showThinking =
+    awaitingSince !== null &&
+    deduplicatedMessages[deduplicatedMessages.length - 1]?.role !== "assistant";
 
   // Starter card click: fill the input, then wait one frame for the
   // controlled value to render before focusing and placing the caret at the end.
@@ -1599,7 +1979,9 @@ const Chat = ({
       </div>
     <div className={styles.chatContainer}>
       <div className={styles.messages} ref={messagesContainerRef}>
-        {!threadId ? (
+        {/* isDraftThread: a thread minted by an attach but with no message yet —
+            the conversation hasn't started, so keep the welcome screen. */}
+        {!threadId || isDraftThread ? (
           <WelcomeMessage
             onPromptSelect={handleStarterSelect}
             onAttachClick={() => fileInputRef.current?.click()}
@@ -1609,6 +1991,7 @@ const Chat = ({
             {deduplicatedMessages.map((msg, index) => (
               <Message key={`${msg.role}-${index}`} role={msg.role} text={msg.text} annotations={msg.annotations} />
             ))}
+            {showThinking && <ThinkingIndicator startedAt={awaitingSince!} />}
             <div ref={messagesEndRef} />
           </>
         )}
@@ -1640,7 +2023,7 @@ const Chat = ({
           type="file"
           ref={fileInputRef}
           className="hidden"
-          accept={FILE_ACCEPT}
+          accept={uploadTypes.extensions.join(",")}
           multiple
           onChange={handleFileAttach}
         />
@@ -1652,8 +2035,12 @@ const Chat = ({
                   key={file.id}
                   className={`${styles.chip} ${
                     file.status === "error" ? styles.chipError : ""
+                  } ${
+                    (file.status === "error" && file.error) || file.warning
+                      ? styles.chipWithMessage
+                      : ""
                   }`}
-                  title={file.status === "error" ? file.error : undefined}
+                  title={file.status === "error" ? file.error : file.warning}
                 >
                   {file.status === "uploading" && (
                     <Loader2
@@ -1682,6 +2069,15 @@ const Chat = ({
                         {stageLabel(file.stage)}
                       </span>
                     )}
+                    {/* Say what went wrong IN the chip. A tooltip alone left a
+                        failed upload looking like a red filename with no reason. */}
+                    {file.status === "error" && file.error && (
+                      <span className={styles.chipErrorText}>{file.error}</span>
+                    )}
+                    {/* Indexed, but part of the document was unreadable. */}
+                    {file.status === "ready" && file.warning && (
+                      <span className={styles.chipWarningText}>{file.warning}</span>
+                    )}
                   </span>
                   <button
                     type="button"
@@ -1695,12 +2091,17 @@ const Chat = ({
               ))}
             </div>
           )}
+          {isUploading && (
+            <div className={styles.attachmentNotice}>
+              Reading your file — you can keep chatting; until it&apos;s ready, answers will note it hasn&apos;t been searched yet.
+            </div>
+          )}
           <div className={styles.inputRow}>
             <button
               type="button"
               className={styles.plusBtn}
               onClick={() => fileInputRef.current?.click()}
-              title={`Attach files (${SUPPORTED_LABEL})`}
+              title={`Attach files (${uploadTypes.label})`}
               aria-label="Attach files"
             >
               <Plus size={20} />
@@ -1723,8 +2124,8 @@ const Chat = ({
             <button
               type="submit"
               className={styles.button}
-              disabled={inputDisabled || isUploading}
-              title={isUploading ? "Waiting for files to finish uploading..." : undefined}
+              disabled={inputDisabled}
+              title={isUploading ? "A document is still processing - you can ask now; the answer will say it was not searched yet." : undefined}
             >
               Send
             </button>

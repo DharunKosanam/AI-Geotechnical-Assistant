@@ -1,11 +1,87 @@
 """
 Pytest configuration file with shared fixtures for testing.
 """
+import copy
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 import httpx
+from bson import ObjectId
 from unittest.mock import AsyncMock, patch
 from app.main import app
+
+
+# --- In-memory fake for the GeoPilot History collections -------------------
+# Minimal async stand-in for a motor collection: enough of insert_one/find_one/
+# find().sort().limit().to_list()/update_one for app.workspace.history_store, so
+# History tests never touch real Atlas.
+class _FakeCursor:
+    def __init__(self, docs):
+        self._docs = list(docs)
+        self._limit = None
+
+    def sort(self, key, direction):
+        self._docs.sort(key=lambda d: d.get(key), reverse=direction < 0)
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    async def to_list(self, length=None):
+        docs = self._docs if self._limit is None else self._docs[: self._limit]
+        return [copy.deepcopy(d) for d in docs]
+
+
+class FakeCollection:
+    def __init__(self):
+        self._docs = {}
+
+    @staticmethod
+    def _match(doc, query):
+        return all(doc.get(k) == v for k, v in query.items())
+
+    async def insert_one(self, doc):
+        _id = doc.get("_id") or ObjectId()
+        stored = copy.deepcopy(doc)
+        stored["_id"] = _id
+        self._docs[_id] = stored
+        return SimpleNamespace(inserted_id=_id)
+
+    async def find_one(self, query, projection=None):
+        for doc in self._docs.values():
+            if self._match(doc, query):
+                return copy.deepcopy(doc)
+        return None
+
+    def find(self, query, projection=None):
+        matched = [d for d in self._docs.values() if self._match(d, query)]
+        return _FakeCursor(matched)
+
+    async def update_one(self, query, update):
+        for doc in self._docs.values():
+            if self._match(doc, query):
+                for k, v in update.get("$push", {}).items():
+                    doc.setdefault(k, []).append(copy.deepcopy(v))
+                for k, v in update.get("$set", {}).items():
+                    doc[k] = copy.deepcopy(v)
+                return SimpleNamespace(matched_count=1, modified_count=1)
+        return SimpleNamespace(matched_count=0, modified_count=0)
+
+
+@pytest.fixture(autouse=True)
+def workspace_db(monkeypatch):
+    """Swap the History collections for in-memory fakes (autouse, hermetic).
+
+    Returned so tests can inspect persisted docs or simulate a restart.
+    """
+    import app.workspace.history_store as hs
+
+    runs, threads = FakeCollection(), FakeCollection()
+    monkeypatch.setattr(hs, "runs_collection", runs)
+    monkeypatch.setattr(hs, "threads_collection", threads)
+    return SimpleNamespace(runs=runs, threads=threads)
 
 
 @pytest_asyncio.fixture
@@ -89,8 +165,8 @@ def mock_groq_llm(monkeypatch):
     This fixture automatically applies to all tests (autouse=True).
     Returns a realistic mock response for chat completions.
     """
-    async def mock_generate_answer(query: str, context: str, history: list = None):
-        """Mock LLM response based on query"""
+    async def mock_generate_answer(query: str, context: str, history: list = None, *, mode: str = "KB_QUERY"):
+        """Mock LLM response based on query (accepts the router `mode` kwarg)."""
         return f"This is a test response to your query: '{query}'. Based on the provided context about geotechnical engineering, I can provide detailed information. The context includes relevant technical documentation."
     
     # Patch at the router level where it's imported

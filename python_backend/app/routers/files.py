@@ -7,7 +7,8 @@ from datetime import datetime
 from typing import Optional, List
 import io
 from bson import ObjectId
-from app.core.config import RATE_LIMIT_UPLOAD
+from app.core import config
+from app.core.config import RATE_LIMIT_UPLOAD, RATE_LIMIT_UPLOAD_HOURLY
 from app.core.database import files_collection
 from app.core.rate_limit import limiter, rate_limit_identify, user_id_key
 from app.dependencies.auth import get_current_user
@@ -15,12 +16,23 @@ from app.services.file_processing import (
     convert_image_to_pdf,
     needs_image_conversion,
     determine_media_type,
+    is_image_file,
     is_supported_file,
     get_file_type,
     extract_pages_from_file,
+    tesseract_available,
     SUPPORTED_EXTENSIONS,
+    TEXT_FORMATS_LABEL,
+    VISION_IMAGE_EXTS,
 )
-from app.services.rag_service import ingest_document, extract_text_from_pdf, get_embedding_model
+from app.services.rag_service import (
+    effective_ingest_status,
+    ingest_document,
+    extract_text_from_pdf,
+    get_embedding_model,
+    ingest_try_acquire,
+    ingest_release,
+)
 from models import User
 
 router = APIRouter(prefix="/api", tags=["files"])
@@ -29,7 +41,29 @@ router = APIRouter(prefix="/api", tags=["files"])
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 # Friendly format list reused in error messages so the UI can echo it back.
-SUPPORTED_LIST_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX, PNG, JPG, JPEG, TIFF"
+# Images are only genuinely accepted when something can actually read them --
+# AI vision (flag on) or OCR -- so the list is built from capability rather
+# than hardcoded; otherwise a rejection message would advertise PNG/JPG on a
+# server that cannot read either.
+def _supported_list_label() -> str:
+    if config.VISION_EXTRACTION_ENABLED:
+        label = f"{TEXT_FORMATS_LABEL}, PNG, JPG, JPEG, WEBP"
+        if tesseract_available():
+            label += ", TIFF"
+        return label
+    if tesseract_available():
+        return f"{TEXT_FORMATS_LABEL}, PNG, JPG, JPEG, TIFF"
+    return TEXT_FORMATS_LABEL
+
+
+def _vision_image_upload_ok(filename: str) -> bool:
+    """True when this upload is a JPEG/PNG/WebP that the vision path will
+    read. Gated on the flag at call time: with vision off, .webp stays
+    unsupported and PNG/JPG keep today's OCR-only handling, byte-identical."""
+    return (
+        config.VISION_EXTRACTION_ENABLED
+        and get_file_type(filename) in VISION_IMAGE_EXTS
+    )
 
 
 def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
@@ -42,10 +76,10 @@ def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing filename",
         )
-    if not is_supported_file(filename):
+    if not is_supported_file(filename) and not _vision_image_upload_ok(filename):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type. Supported: {SUPPORTED_LIST_LABEL}",
+            detail=f"Unsupported file type. Supported: {_supported_list_label()}",
         )
     if size_bytes <= 0:
         raise HTTPException(
@@ -59,9 +93,53 @@ def _validate_upload(filename: Optional[str], size_bytes: int) -> None:
         )
 
 
+def _reject_unreadable_image(filename: Optional[str]) -> None:
+    """An image's content can only be reached by AI vision (flag on) or OCR.
+    Where neither is available, say so NOW rather than accepting the file,
+    spending a background task on it and failing a few seconds later with a
+    vaguer message."""
+    if not filename or not is_image_file(filename):
+        return
+    if _vision_image_upload_ok(filename):
+        return  # vision reads JPEG/PNG (and WebP) without OCR
+    if not tesseract_available():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{filename} is an image, and this server cannot read text from "
+                f"images (OCR is not available). Please upload a text document "
+                f"instead ({TEXT_FORMATS_LABEL})."
+            ),
+        )
+
+
+# Extensions the upload UI offers with vision OFF -- exactly today's static
+# frontend list. Deliberately narrower than SUPPORTED_EXTENSIONS (no TIFF/PNG/
+# JPG): the UI has never offered images, even where OCR could read them, and
+# the flag-off UI must stay byte-identical.
+_UI_TEXT_EXTENSIONS = [".pdf", ".docx", ".xlsx", ".xls", ".csv", ".pptx"]
+_UI_TEXT_LABEL = "PDF, DOCX, XLSX, XLS, CSV, PPTX"
+
+
+@router.get("/upload/config")
+async def upload_config(current_user: User = Depends(get_current_user)):
+    """Capability handshake for the upload UI: which file types to offer in
+    the picker. The frontend cannot probe this per-request the way it probes
+    streaming (the accept filter must be right BEFORE a file is chosen), so it
+    fetches this once and falls back to the text-only list on any failure --
+    making flag-off rendering identical to today either way."""
+    extensions = list(_UI_TEXT_EXTENSIONS)
+    label = _UI_TEXT_LABEL
+    if config.VISION_EXTRACTION_ENABLED:
+        extensions += sorted(VISION_IMAGE_EXTS)
+        label += ", PNG, JPG, WEBP"
+    return {"extensions": extensions, "label": label}
+
+
 @router.get("/files")
 async def list_files_simple(
     category: Optional[str] = None,
+    threadId: Optional[str] = None,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -69,8 +147,32 @@ async def list_files_simple(
 
     Args:
         category: Optional filter by category ("user_upload" or "knowledge_base")
+        threadId: List THIS conversation's uploaded documents (parent docs
+            only), each with its lifecycle status (pending/ready/failed) and
+            failure reason. Scoped to the caller's own threads.
     """
     try:
+        # Thread-documents listing (Phase 1): parent docs with lifecycle state.
+        if threadId:
+            docs = []
+            async for doc in files_collection.find(
+                {"userId": current_user.id, "threadId": threadId,
+                 "category": "thread_upload", "chunkIndex": {"$exists": False}},
+                {"filename": 1, "chunkCount": 1, "status": 1, "error": 1,
+                 "warning": 1, "createdAt": 1},
+            ).sort("createdAt", 1):
+                life_status, life_reason = effective_ingest_status(doc)
+                docs.append({
+                    "id": str(doc.get("_id")),
+                    "filename": doc.get("filename", "Unknown"),
+                    "status": life_status,
+                    "error": life_reason,
+                    "warning": doc.get("warning"),
+                    "chunkCount": doc.get("chunkCount", 0),
+                    "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None,
+                })
+            return {"files": docs}
+
         # knowledge_base is shared across all users (never userId-scoped);
         # everything else is the caller's own data.
         if category == "knowledge_base":
@@ -135,12 +237,46 @@ async def generate_embeddings(text: str) -> List[float]:
     return embeddings[0].tolist()
 
 
+def _user_facing_ingest_error(filename: str, error: Exception) -> str:
+    """Turn an unexpected ingest exception into something the uploader can act on.
+
+    The chip shows this string verbatim, so it must never be a raw library
+    message ("Failed to open stream", "cannot find loader for this WMF file").
+    We keep a short, specific line per known failure shape and fall back to a
+    generic one; the real exception is always in the server log.
+    """
+    text = str(error).lower()
+    ext = get_file_type(filename)
+
+    if "no text chunks" in text or "no extractable text" in text or "empty" in text:
+        return f"No readable text could be extracted from {filename}."
+    if ext == ".pdf" and ("open stream" in text or "cannot open" in text or "format error" in text):
+        return (
+            f"{filename} could not be opened as a PDF — the file may be damaged "
+            f"or incomplete. Try re-saving or re-downloading it."
+        )
+    if "password" in text or "encrypted" in text:
+        return f"{filename} is password-protected. Please upload an unlocked copy."
+    if "is not installed" in text:
+        # A missing optional extractor library is a server problem, not the
+        # user's file — don't tell them to fix their document.
+        return (
+            f"{filename} could not be processed: this file type is not fully "
+            f"supported on the server yet. Please try a PDF or DOCX."
+        )
+    return (
+        f"{filename} could not be processed. It may be damaged or in an "
+        f"unsupported variant of its format."
+    )
+
+
 async def process_file_ingestion(
     filename: str,
     file_content: bytes,
     category: str = "user_upload",
     parent_id: Optional[ObjectId] = None,
     user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ):
     """
     Background task to process file ingestion.
@@ -148,18 +284,39 @@ async def process_file_ingestion(
     If parent_id is provided, the parent file-metadata doc's status is
     updated to "processed" on success or "failed" on error, so the UI
     can stop showing "Processing..." once chunks land in Mongo.
+
+    ``thread_id`` (with category "thread_upload") scopes the upload to a single
+    conversation thread so it is retrievable only in THREAD_DOC mode.
     """
     import gc
+    from app.services.file_processing import UnreadableDocumentError
     try:
         print(f"[LOADING] Background processing started for: {filename} (category: {category})")
-        result = await ingest_document(filename, file_content, category, user_id=user_id)
+        result = await ingest_document(filename, file_content, category, user_id=user_id, thread_id=thread_id)
         print(f"[OK] Background processing completed: {result}")
+        if parent_id is not None:
+            update = {
+                "status": "processed",
+                "chunkCount": result.get("chunks_created", 0),
+                "processedAt": datetime.now(),
+            }
+            # Indexed, but only partially readable (e.g. scanned figure pages).
+            # The chip shows this next to the success tick so nobody assumes the
+            # assistant can see the whole document.
+            if result.get("warning"):
+                update["warning"] = result["warning"]
+            await files_collection.update_one({"_id": parent_id}, {"$set": update})
+    except UnreadableDocumentError as e:
+        # Expected, explainable outcome (a scan, an image with no OCR) — not a
+        # crash. Its message is written for the user, so pass it through as-is
+        # and skip the traceback.
+        print(f"[INFO] Cannot read {filename}: {e}")
         if parent_id is not None:
             await files_collection.update_one(
                 {"_id": parent_id},
                 {"$set": {
-                    "status": "processed",
-                    "chunkCount": result.get("chunks_created", 0),
+                    "status": "failed",
+                    "error": str(e),
                     "processedAt": datetime.now(),
                 }},
             )
@@ -172,22 +329,28 @@ async def process_file_ingestion(
                 {"_id": parent_id},
                 {"$set": {
                     "status": "failed",
-                    "error": str(e),
+                    # Internal exception text is not for the user — see
+                    # _user_facing_ingest_error.
+                    "error": _user_facing_ingest_error(filename, e),
                     "processedAt": datetime.now(),
                 }},
             )
     finally:
+        # Release the queue-depth slot reserved by the upload route (Phase 0.5).
+        ingest_release()
         del file_content
         gc.collect()
 
 
 @router.post("/upload")
 @limiter.limit(RATE_LIMIT_UPLOAD, key_func=user_id_key)
+@limiter.limit(RATE_LIMIT_UPLOAD_HOURLY, key_func=user_id_key)
 async def upload_document(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     category: str = Form("user_upload"),
+    threadId: Optional[str] = Form(None),
     current_user: User = Depends(rate_limit_identify),
 ):
     """
@@ -195,13 +358,36 @@ async def upload_document(
 
     Always uses background processing so the request returns immediately —
     large Excel/PPT files can take a while to chunk + embed.
+
+    When ``threadId`` is provided the upload is scoped to that conversation
+    thread: it is stored as category "thread_upload" and tagged with the
+    threadId, so it is retrievable only in THREAD_DOC mode for that thread and
+    never mixed into the shared knowledge base or the user's general uploads.
+    Omitting threadId preserves the existing user_upload behavior exactly.
     """
+    # Queue-depth cap (Phase 0.5): reject before buffering the file when the
+    # ingest backlog is already full, so a burst can't exhaust memory/CPU.
+    if not ingest_try_acquire():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The server is busy processing uploads. Please try again shortly.",
+        )
+    handed_off = False  # becomes True once the background task owns the slot
     try:
         # Read first so we can size-check; extension is the source of truth for type.
         file_content = await file.read()
         _validate_upload(file.filename, len(file_content))
+        _reject_unreadable_image(file.filename)
 
-        print(f" Received file: {file.filename} ({len(file_content)} bytes, category: {category})")
+        # Thread-scoped uploads become their own category so they never leak into
+        # the shared KB / user_upload search. A blank threadId is treated as absent.
+        thread_id = threadId or None
+        effective_category = "thread_upload" if thread_id else category
+
+        print(
+            f" Received file: {file.filename} ({len(file_content)} bytes, "
+            f"category: {effective_category}, thread: {thread_id})"
+        )
 
         # Insert a parent file-metadata doc up front. This is what the listing
         # endpoint surfaces to the UI — without it the frontend would never
@@ -213,7 +399,7 @@ async def upload_document(
             "docType": "file",
             "filename": file.filename,
             "userId": current_user.id,
-            "category": category,
+            "category": effective_category,
             "bytes": len(file_content),
             "purpose": "assistants",
             "status": "processing",
@@ -224,18 +410,25 @@ async def upload_document(
                 "fileType": file_type,
             },
         }
+        if thread_id:
+            parent_doc["threadId"] = thread_id
+            parent_doc["metadata"]["threadId"] = thread_id
         insert_result = await files_collection.insert_one(parent_doc)
         parent_id = insert_result.inserted_id
 
-        # Schedule background ingestion with category
+        # Schedule background ingestion with category (+ thread scope if any)
         background_tasks.add_task(
             process_file_ingestion,
             file.filename,
             file_content,
-            category,
+            effective_category,
             parent_id,
             current_user.id,
+            thread_id,
         )
+        # Ownership of the reserved slot passes to the background task, which
+        # releases it in its finally once ingestion completes or fails.
+        handed_off = True
 
         return {
             "success": True,
@@ -245,7 +438,7 @@ async def upload_document(
             "size": len(file_content),
             "status": "processing"
         }
-        
+
     except HTTPException:
         raise
     except Exception as error:
@@ -254,11 +447,17 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred, please try again."
         )
+    finally:
+        # If the slot was never handed to a background task (validation failed,
+        # insert error, or a rejection), release it so the backlog count stays true.
+        if not handed_off:
+            ingest_release()
 
 
 @router.get("/upload/status")
 async def upload_status(
     filename: str,
+    threadId: Optional[str] = None,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -273,18 +472,25 @@ async def upload_status(
     the ingest pipeline.
 
     Scoped to the authenticated user so one user cannot poll another user's
-    upload status.
+    upload status. ``threadId``, when given, narrows it further to that thread's
+    upload: the same filename can be attached to several conversations, and the
+    chip must reflect ITS file's progress, not a namesake in another thread.
     """
     try:
         # Latest parent (file-level) doc for this filename. Chunks are excluded
         # via chunkIndex, matching the listing endpoints.
+        query = {
+            "userId": current_user.id,
+            "filename": filename,
+            "chunkIndex": {"$exists": False},
+        }
+        if threadId:
+            query["threadId"] = threadId
+            query["category"] = "thread_upload"
+
         doc = await files_collection.find_one(
-            {
-                "userId": current_user.id,
-                "filename": filename,
-                "chunkIndex": {"$exists": False},
-            },
-            {"status": 1, "error": 1},
+            query,
+            {"status": 1, "error": 1, "warning": 1, "createdAt": 1},
             sort=[("createdAt", -1)],
         )
 
@@ -292,17 +498,27 @@ async def upload_status(
             # Upload row not visible yet (race right after POST) — treat as processing.
             return {"filename": filename, "status": "processing", "stage": "processing"}
 
-        raw_status = doc.get("status", "processing")
+        # Lifecycle derivation (Phase 1) -- shared with the chat path's document
+        # inventory. Applies the staleness rule: a doc "processing" past
+        # INGEST_PENDING_TIMEOUT_SECONDS reports failed with a timeout reason,
+        # so a backend restart mid-ingest can't leave the chip spinning on a
+        # doc that will never finish.
+        life_status, life_reason = effective_ingest_status(doc)
 
-        if raw_status == "processed":
-            return {"filename": filename, "status": "ready", "stage": "done"}
+        if life_status == "ready":
+            payload = {"filename": filename, "status": "ready", "stage": "done"}
+            # Indexed, but part of the document was unreadable — surfaced next to
+            # the success state, not as a failure.
+            if doc.get("warning"):
+                payload["warning"] = doc["warning"]
+            return payload
 
-        if raw_status == "failed":
+        if life_status == "failed":
             return {
                 "filename": filename,
                 "status": "error",
                 "stage": "error",
-                "error": doc.get("error") or "Ingestion failed",
+                "error": life_reason or "Ingestion failed",
             }
 
         # Still working. The background task doesn't expose fine-grained stages

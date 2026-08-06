@@ -4,7 +4,7 @@ LLM service for managing Groq AI interactions
 import os
 import re
 import sys
-from typing import List, Dict, Optional
+from typing import Awaitable, Callable, List, Dict, Optional
 import httpx
 import ollama
 from llama_index.llms.groq import Groq
@@ -21,6 +21,8 @@ from app.core.config import (
     OLLAMA_REWRITE_TIMEOUT,
     OLLAMA_TEMPERATURE,
 )
+from app.services.intent_router import GENERAL, KB_QUERY
+from app.services.prompt_config import get_system_prompt
 
 # Load environment variables
 load_dotenv()
@@ -120,52 +122,26 @@ def _ollama_options() -> dict:
     }
 
 
-async def generate_answer_with_groq(
-    query: str, 
-    context: str, 
-    history: Optional[List[Dict[str, str]]] = None
+def _build_answer_prompt(
+    query: str,
+    context: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    *,
+    mode: str = KB_QUERY,
+    system_prompt: Optional[str] = None,
 ) -> str:
+    """Assemble the full answer prompt (system + history + context + question).
+
+    Pure and side-effect free so it can be unit-tested without an LLM. The
+    system prompt is ``system_prompt`` when provided (e.g. the THREAD_DOC
+    confidence-fallback prompt), otherwise it is looked up by ``mode`` from
+    prompt_config; the context section is OMITTED entirely for GENERAL (no
+    retrieval), and otherwise keeps the exact assembly used before the router was
+    introduced. For mode=KB_QUERY with no override the returned string is
+    byte-identical to the pre-router prompt.
     """
-    Generate an answer using Groq LLM with RAG context and conversation history.
-    
-    Args:
-        query: The user's question
-        context: The relevant context from vector search (formatted string)
-        history: Optional conversation history as list of {role, content} dicts
-        
-    Returns:
-        The AI-generated answer as a string
-        
-    Raises:
-        Exception: If LLM generation fails
-    """
-    # Initialize LLM
-    llm = get_llm()
-    
-    # Build system prompt
-    system_prompt = """You are an expert AI research assistant specializing in geotechnical engineering and soil mechanics.
+    resolved_prompt = system_prompt if system_prompt is not None else get_system_prompt(mode)
 
-Your task is to answer questions accurately using the provided context from technical documents.
-
-SCOPE RULES:
-- If the user's question is NOT related to geotechnical engineering AND there is no prior conversation context that establishes a geotechnical topic, politely decline. Say: "I'm here to help with questions related to geotechnical engineering and soil mechanics. If you have a specific question about topics like soil properties, erosion mechanisms, or other geotechnical concepts, feel free to ask."
-- However, if the conversation history shows the user is in the middle of discussing a geotechnical topic, treat follow-up questions, clarifications, short responses ('ok', 'go on', 'more detail'), and summarization requests as on-topic — they inherit the topic of the conversation.
-- If the user uploaded a document and asks about it, answer based on that document even if it is not geotechnical.
-
-Guidelines:
-- Use the provided context to answer questions
-- When citing sources inline, use the academic reference titles provided in [Source: ...] tags (e.g. "Bolton (1986)"). NEVER use raw .pdf filenames in your answer.
-- If the context doesn't have enough information, say so and provide general knowledge if helpful
-- Be concise but thorough
-- Use technical terminology appropriately
-- Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points
-- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
-- If you use a table: put a blank line before it, include a proper header row and separator row (e.g. |---|---|), and put NO math/LaTeX inside cells — write any math in the surrounding prose or spell values out plainly in the cells.
-- Write ALL inline math with consistent $...$ delimiters (e.g. $D_{50}$, $\\sigma'$). Never write bare subscripts like D_{50} or "D 50" outside of $...$.
-- Do NOT add a "Sources" or "References" section at the end of your response. The application automatically appends a formatted, clickable Google Scholar Sources list below your answer.
-
-CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
-    
     # Format conversation history if provided. The caller (chat.py) already
     # caps this list (last 20 turns, 6000-token budget), so include all of it
     # rather than re-truncating to the last few messages.
@@ -176,20 +152,19 @@ CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide dire
             role = msg.get('role', 'user').upper()
             content = msg.get('content', '')
             history_text += f"{role}: {content}\n"
-        # Debug: confirm prior turns actually reach the prompt (wire check).
-        print(f"[PROMPT] Including {len(history)} prior turns:{history_text}")
-    else:
-        print("[PROMPT] No CONVERSATION HISTORY in prompt (history empty)")
-    
-    # Format context section
-    context_section = ""
-    if context and context.strip():
+
+    # Format context section. GENERAL answers from the model's own knowledge with
+    # no documents, so there is no context block at all (and no misleading "no
+    # documents found" line). Every other mode keeps the original behavior.
+    if mode == GENERAL:
+        context_section = ""
+    elif context and context.strip():
         context_section = f"\n\nRELEVANT CONTEXT FROM DOCUMENTS:\n{context}\n"
     else:
         context_section = "\n\n[No relevant documents found in the knowledge base]\n"
-    
+
     # Build the complete prompt
-    full_prompt = f"""{system_prompt}
+    return f"""{resolved_prompt}
 {history_text}
 {context_section}
 
@@ -197,8 +172,275 @@ USER QUESTION: {query}
 
 Please provide a detailed answer:"""
 
+
+# A token emitter: called with each newly-final piece of answer text as it is
+# produced. Supplied only by the streaming chat path; None everywhere else.
+TokenEmitter = Callable[[str], Awaitable[None]]
+
+# A healthy generation is hundreds-to-thousands of chars. Below this the model
+# halted almost immediately (historically num_ctx overflow eating the output
+# budget) and we retry once. Streaming holds this many characters back before
+# emitting anything, so the retry is still possible — you cannot un-send a token.
+SHORT_ANSWER_THRESHOLD = 20
+
+
+def _clean_llm_answer(raw_answer: str, *, allow_raw_fallback: bool = True) -> str:
+    """Scrub <think> blocks and stray tags, then normalise whitespace.
+
+    Extracted verbatim from generate_answer_with_groq so the streaming and
+    non-streaming paths share ONE definition of "the answer text" — the
+    reassembled stream is byte-identical to the JSON answer because both end up
+    here with the same raw string.
+
+    ``allow_raw_fallback`` is the "cleaning removed everything" rescue. It must
+    be OFF for partial text: mid-stream, an unterminated <think> block legitimately
+    cleans to "", and falling back to the raw answer there would leak the model's
+    chain-of-thought to the user.
+    """
+    # Strip <think>...</think> only for providers/models that actually emit
+    # them (qwen3 on Groq, and all Ollama output since it serves qwen3.5).
+    # Llama 4 Scout and other non-thinking Groq models never produce these
+    # tags, so the scrub is skipped to avoid eating legitimate <> content.
+    if _active_model_emits_thinking_tags():
+        cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
+        cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
+    else:
+        cleaned_answer = raw_answer
+
+    # Preserve markdown structure: strip each line individually,
+    # then collapse runs of 3+ blank lines down to one blank line.
+    lines = cleaned_answer.split('\n')
+    final_answer = '\n'.join(line.strip() for line in lines)
+    final_answer = re.sub(r'\n{3,}', '\n\n', final_answer).strip()
+
+    # If cleaning removed everything, try to extract content after </think>.
+    if allow_raw_fallback and not final_answer and raw_answer:
+        print("   [WARNING] Cleaning removed all content, trying to extract after </think>")
+        match = re.search(r'</think>\s*(.*)', raw_answer, re.DOTALL | re.IGNORECASE)
+        if match:
+            final_answer = match.group(1).strip()
+            print(f"   [EXTRACTED] Found content after </think>: {len(final_answer)} chars")
+        else:
+            final_answer = raw_answer.strip()
+            print("   [FALLBACK] Using raw answer")
+
+    return final_answer
+
+
+def _stable_raw_prefix(raw: str) -> str:
+    """The longest prefix of ``raw`` whose CLEANED form can no longer change.
+
+    Streaming may only ever emit text that is already final — a token cannot be
+    recalled — so this holds back everything the remaining input could still
+    rewrite:
+
+      1. An unterminated ``<think>`` block. Its content vanishes once the
+         closing tag arrives, so nothing from the opener onward may be emitted.
+         This is the tag suppressor: without it the user watches the model's
+         chain-of-thought get typed out and then disappear.
+      2. A half-received tag (``<``, ``<b``, ``<bo``...). It might close into a
+         tag that gets stripped.
+      3. Trailing whitespace. Per-line ``strip()`` and the 3+ newline collapse
+         both operate on a run that is not finished until a non-space arrives.
+
+    Everything before those points is settled: text only ever appends, so a
+    cleaned stable prefix is always a prefix of the next one, and of the final
+    answer.
+    """
+    lower = raw.lower()
+    open_idx = lower.rfind("<think>")
+    if open_idx != -1 and lower.find("</think>", open_idx) == -1:
+        raw = raw[:open_idx]
+
+    lt_idx = raw.rfind("<")
+    if lt_idx != -1 and raw.find(">", lt_idx) == -1:
+        raw = raw[:lt_idx]
+
+    return raw.rstrip()
+
+
+async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
+    """Generate with Ollama in streaming mode, emitting cleaned text as it settles.
+
+    Returns the SAME final string the non-streaming path would return for the
+    same raw output, and guarantees the concatenation of everything passed to
+    ``emit`` equals that string — so what the user watched, what gets persisted
+    and what gets cached are one and the same text.
+    """
+    client = ollama.AsyncClient(host=OLLAMA_BASE_URL, timeout=OLLAMA_REQUEST_TIMEOUT)
+    raw_parts: List[str] = []
+    emitted = ""
+    timed_out = False
+
+    try:
+        try:
+            stream = await client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": full_prompt}],
+                think=False,
+                options=_ollama_options(),
+                stream=True,
+            )
+            async for part in stream:
+                piece = ((part.get("message") or {}).get("content")) or ""
+                if not piece:
+                    continue
+                raw_parts.append(piece)
+
+                candidate = _clean_llm_answer(
+                    _stable_raw_prefix("".join(raw_parts)),
+                    allow_raw_fallback=False,
+                )
+                # Prefix buffer: nothing leaves until the short-answer guard
+                # below can no longer need to retry.
+                if len(candidate) < SHORT_ANSWER_THRESHOLD:
+                    continue
+                if not candidate.startswith(emitted):
+                    # Should be impossible (see _stable_raw_prefix). Hold rather
+                    # than emit text that contradicts what the user already saw.
+                    print("   [STREAM] Non-monotonic clean; holding this delta")
+                    continue
+                delta = candidate[len(emitted):]
+                if delta:
+                    await emit(delta)
+                    emitted = candidate
+        except httpx.TimeoutException:
+            # Generation exceeded OLLAMA_REQUEST_TIMEOUT part-way through.
+            timed_out = True
+            print(
+                f"   [TIMEOUT] Ollama streaming exceeded {OLLAMA_REQUEST_TIMEOUT}s "
+                f"after {len(emitted)} emitted chars"
+            )
+    finally:
+        # Deterministic teardown — on cancellation this is what drops the HTTP
+        # connection and makes Ollama abandon the generation. See the
+        # non-streaming path for the full rationale.
+        try:
+            await client.close()
+        except Exception as close_err:
+            print(f"   [WARNING] Closing Ollama client failed: {close_err}")
+
+    raw_answer = "".join(raw_parts)
+
+    # Short-answer guard, same threshold and same retry as the non-streaming
+    # path. Reachable only while the prefix buffer still holds everything back,
+    # so a retry never contradicts text the user has already seen.
+    if not timed_out and len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
+        print(
+            f"   [GUARD] Suspiciously short raw answer "
+            f"({len(raw_answer.strip())} chars): {raw_answer!r} — retrying once"
+        )
+        retry_client = ollama.AsyncClient(host=OLLAMA_BASE_URL, timeout=OLLAMA_REQUEST_TIMEOUT)
+        try:
+            resp = await retry_client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": full_prompt}],
+                think=False,
+                options=_ollama_options(),
+            )
+            raw_answer = resp["message"]["content"] or ""
+        finally:
+            try:
+                await retry_client.close()
+            except Exception:
+                pass
+        if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
+            print(
+                f"   [GUARD] Still short after retry "
+                f"({len(raw_answer.strip())} chars): {raw_answer!r} — returning fallback"
+            )
+            fallback = "I couldn't generate a complete answer — please try again."
+            await emit(fallback)
+            return fallback
+
+    final_answer = _clean_llm_answer(raw_answer)
+
+    if timed_out and not emitted and not final_answer:
+        # Timed out before producing anything usable: identical to the
+        # non-streaming timeout behaviour.
+        message = "The assistant took too long to respond. Please try again."
+        await emit(message)
+        return message
+
+    # Flush whatever the stable-prefix rule was still holding back.
+    if final_answer.startswith(emitted):
+        tail = final_answer[len(emitted):]
+        if tail:
+            await emit(tail)
+            emitted = final_answer
+    else:
+        # Defensive: never happens with the truncation rules above, but if it
+        # ever did, the text on screen is authoritative — do NOT contradict it.
+        print(
+            "   [STREAM] Final answer diverged from the streamed text; "
+            "keeping what the user already received"
+        )
+        final_answer = emitted
+
+    if timed_out:
+        # The user watched a partial answer appear; say so, and persist/cache
+        # the SAME text they saw rather than replacing it with a generic notice.
+        note = "\n\n_(Response cut short — the assistant timed out.)_"
+        await emit(note)
+        final_answer += note
+
+    print(f"   [OK] Final answer length: {len(final_answer)} chars (streamed)")
+    return final_answer
+
+
+async def generate_answer_with_groq(
+    query: str,
+    context: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    *,
+    mode: str = KB_QUERY,
+    system_prompt: Optional[str] = None,
+    emit: Optional[TokenEmitter] = None,
+) -> str:
+    """
+    Generate an answer using the configured LLM with an optional RAG context and
+    conversation history.
+
+    Args:
+        query: The user's question
+        context: The relevant context from vector search (formatted string). May
+            be empty (GENERAL mode passes "").
+        history: Optional conversation history as list of {role, content} dicts
+        mode: Router mode selecting the system prompt (prompt_config). Defaults
+            to KB_QUERY, which reproduces the pre-router behavior exactly.
+        system_prompt: Optional explicit system prompt that overrides the
+            mode-keyed lookup (e.g. the THREAD_DOC confidence-fallback prompt).
+            When None, the prompt is chosen by ``mode``.
+        emit: Optional async callback receiving the answer in pieces as it is
+            generated (the SSE chat path supplies one). When None — every other
+            caller, including POST /chat — generation is a single blocking call
+            and this function behaves exactly as it always has.
+
+    Returns:
+        The AI-generated answer as a string
+
+    Raises:
+        Exception: If LLM generation fails
+    """
+    # Initialize LLM
+    llm = get_llm()
+
+    # Debug: confirm prior turns actually reach the prompt (wire check).
+    if history and len(history) > 0:
+        print(f"[PROMPT] Including {len(history)} prior turns (mode={mode})")
+    else:
+        print(f"[PROMPT] No CONVERSATION HISTORY in prompt (history empty, mode={mode})")
+
+    # Build the complete prompt (system prompt selected by mode, or overridden)
+    full_prompt = _build_answer_prompt(query, context, history, mode=mode, system_prompt=system_prompt)
+
     # Generate response
     try:
+        if LLM_PROVIDER == "ollama" and emit is not None:
+            # Streaming path: same prompt, same model, same options, same
+            # cleaning — delivered incrementally instead of all at once.
+            return await _ollama_stream_and_clean(full_prompt, emit)
+
         if LLM_PROVIDER == "ollama":
             # Bypass llama-index for Ollama: its wrapper does NOT reliably forward
             # the think=false flag (constructor thinking=False -> 70s; the /no_think
@@ -220,27 +462,39 @@ Please provide a detailed answer:"""
                 )
                 return resp["message"]["content"] or ""
 
-            raw_answer = await _ollama_generate()
-
-            # Safety net: a healthy generation is hundreds-to-thousands of chars.
-            # A sub-20-char raw answer means the model halted almost immediately
-            # (historically caused by num_ctx overflow eating the output budget).
-            # With num_ctx now sized for the worst-case prompt this should not
-            # happen; if it still does, retry once, then surface a clear message
-            # instead of rendering a one-word fragment like "Based".
-            SHORT_ANSWER_THRESHOLD = 20
-            if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
-                print(
-                    f"   [GUARD] Suspiciously short raw answer "
-                    f"({len(raw_answer.strip())} chars): {raw_answer!r} — retrying once"
-                )
+            # `finally: close()` tears the underlying httpx connection down
+            # DETERMINISTICALLY instead of leaving it to the garbage collector.
+            # It matters most on cancellation: when a caller goes away mid-turn
+            # (a browser that closed an SSE stream), CancelledError propagates
+            # into the await below, and closing here drops the HTTP connection to
+            # Ollama — which is what makes Ollama abandon the generation instead
+            # of running it to completion on a GPU nobody is waiting on.
+            try:
                 raw_answer = await _ollama_generate()
+
+                # Safety net: a healthy generation is hundreds-to-thousands of chars.
+                # A sub-20-char raw answer means the model halted almost immediately
+                # (historically caused by num_ctx overflow eating the output budget).
+                # With num_ctx now sized for the worst-case prompt this should not
+                # happen; if it still does, retry once, then surface a clear message
+                # instead of rendering a one-word fragment like "Based".
                 if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
                     print(
-                        f"   [GUARD] Still short after retry "
-                        f"({len(raw_answer.strip())} chars): {raw_answer!r} — returning fallback"
+                        f"   [GUARD] Suspiciously short raw answer "
+                        f"({len(raw_answer.strip())} chars): {raw_answer!r} — retrying once"
                     )
-                    return "I couldn't generate a complete answer — please try again."
+                    raw_answer = await _ollama_generate()
+                    if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
+                        print(
+                            f"   [GUARD] Still short after retry "
+                            f"({len(raw_answer.strip())} chars): {raw_answer!r} — returning fallback"
+                        )
+                        return "I couldn't generate a complete answer — please try again."
+            finally:
+                try:
+                    await client.close()
+                except Exception as close_err:  # never mask the real outcome
+                    print(f"   [WARNING] Closing Ollama client failed: {close_err}")
         else:
             response = await llm.acomplete(full_prompt)
             raw_answer = response.text
@@ -248,40 +502,14 @@ Please provide a detailed answer:"""
         print(f"   [TEXT] Raw answer length: {len(raw_answer)} chars")
         if len(raw_answer) > 0:
             print(f"   [TEXT] First 300 chars: {raw_answer[:300]}")
-        
-        # Strip <think>...</think> only for providers/models that actually emit
-        # them (qwen3 on Groq, and all Ollama output since it serves qwen3.5).
-        # Llama 4 Scout and other non-thinking Groq models never produce these
-        # tags, so the scrub is skipped to avoid eating legitimate <> content.
-        if _active_model_emits_thinking_tags():
-            cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
-            cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
-        else:
-            cleaned_answer = raw_answer
-        
-        # Preserve markdown structure: strip each line individually,
-        # then collapse runs of 3+ blank lines down to one blank line.
-        lines = cleaned_answer.split('\n')
-        final_answer = '\n'.join(line.strip() for line in lines)
-        final_answer = re.sub(r'\n{3,}', '\n\n', final_answer).strip()
-        
+
+        # Shared with the streaming path — one definition of the cleaning, so
+        # the two paths cannot drift apart.
+        final_answer = _clean_llm_answer(raw_answer)
+
         print(f"   [CLEAN] Cleaned answer length: {len(final_answer)} chars")
-        
-        # If cleaning removed everything, try to extract content after </think>
-        if not final_answer and raw_answer:
-            print("   [WARNING] Cleaning removed all content, trying to extract after </think>")
-            # Try to find content after the closing think tag
-            match = re.search(r'</think>\s*(.*)', raw_answer, re.DOTALL | re.IGNORECASE)
-            if match:
-                final_answer = match.group(1).strip()
-                print(f"   [EXTRACTED] Found content after </think>: {len(final_answer)} chars")
-            else:
-                # Last resort: return raw answer
-                final_answer = raw_answer.strip()
-                print("   [FALLBACK] Using raw answer")
-        
         print(f"   [OK] Final answer length: {len(final_answer)} chars")
-        
+
         return final_answer
     except httpx.TimeoutException:
         # Ollama generation exceeded OLLAMA_REQUEST_TIMEOUT (worker released, not

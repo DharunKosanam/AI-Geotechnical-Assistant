@@ -30,6 +30,11 @@ export const API_ENDPOINTS = {
     }
     return `/api/assistants/threads/${threadId}/messages`;
   },
+
+  // SSE variant of sendMessage. The client tries this first and falls back to
+  // sendMessage() when it 404s, which is exactly what FastAPI returns while
+  // STREAMING_ENABLED is off — so the backend flag alone controls the mode.
+  sendMessageStream: () => `/api/chat/stream`,
   
   // Thread management
   createThread: () => {
@@ -115,11 +120,24 @@ export const API_ENDPOINTS = {
     return `/api/files/upload`;
   },
 
+  // Upload capability handshake -- which file types the picker should offer.
+  // Backend-computed so the accept list follows server capability (e.g. images
+  // appear only when vision extraction is enabled there). Fetched once on
+  // mount; the client falls back to its static text-only defaults on failure.
+  uploadConfig: () => {
+    if (BACKEND_TYPE === 'python') {
+      return `${PYTHON_BACKEND_URL}/api/upload/config`;
+    }
+    return `/api/files/upload/config`;
+  },
+
   // File processing status — polled after upload while the backend ingests
-  // (extraction/OCR/chunking/embedding) in a background task.
-  uploadStatus: (filename: string, userId?: string) => {
+  // (extraction/OCR/chunking/embedding) in a background task. threadId scopes
+  // the lookup to the conversation the file was attached to, so the same
+  // filename in another thread can't answer for this one.
+  uploadStatus: (filename: string, threadId?: string) => {
     const params = new URLSearchParams({ filename });
-    if (userId) params.set("user_id", userId);
+    if (threadId) params.set("threadId", threadId);
     const qs = params.toString();
     if (BACKEND_TYPE === 'python') {
       return `${PYTHON_BACKEND_URL}/api/upload/status?${qs}`;
@@ -140,6 +158,14 @@ export const API_ENDPOINTS = {
     }
     return `/api/files`;
   },
+
+  // --- Student knowledge-base upload (Phase 4/5). Same-origin; proxied to
+  // FastAPI by next.config rewrites(). ---
+  kbStatus: () => `${PYTHON_BACKEND_URL}/api/kb/status`,
+  kbUpload: () => `${PYTHON_BACKEND_URL}/api/kb/upload`,
+  kbBulkUpload: () => `${PYTHON_BACKEND_URL}/api/kb/bulk-upload`,
+  kbBatchStatus: (batchId: string) => `${PYTHON_BACKEND_URL}/api/kb/batch/${batchId}`,
+  kbMyUploads: () => `${PYTHON_BACKEND_URL}/api/kb/my-uploads`,
 };
 
 /**

@@ -3,7 +3,7 @@ Pydantic models for request/response validation.
 These mirror the TypeScript interfaces from the Next.js app.
 """
 
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from typing import Optional, List, Any, Dict
 from datetime import datetime
 
@@ -135,12 +135,47 @@ class RAGChatResponse(BaseModel):
 #   UserCreate  -- what the client sends to sign up (plain password in)
 #   User        -- the internal/stored shape (carries hashed_password)
 #   UserPublic  -- what the client gets back (NO password field, ever)
+
+# THE server-side password rule set -- exactly one, shared by signup
+# (UserCreate.password below) and password reset (ResetPasswordRequest
+# .new_password in app/routers/auth.py), so the two paths can never drift.
+# The signup/reset pages mirror the same minimum client-side for UX; this
+# validator is the actual gate. Login (LoginRequest) deliberately does NOT
+# validate: existing accounts must always be able to log in.
+PASSWORD_MIN_LENGTH = 8
+
+
+def validate_password_rules(value: str) -> str:
+    """Validate a plain-text password against the shared rules.
+
+    Raises ValueError -- which pydantic surfaces as a 422 field error at the
+    endpoint boundary -- for an empty or whitespace-only password, or one
+    shorter than PASSWORD_MIN_LENGTH. Returns the password UNCHANGED: no
+    trimming, since spaces are legal password characters; whitespace-only is
+    rejected because it strips to nothing.
+    """
+    if not value or not value.strip():
+        raise ValueError("Password must not be empty.")
+    if len(value) < PASSWORD_MIN_LENGTH:
+        raise ValueError(
+            "Password must be at least %d characters." % PASSWORD_MIN_LENGTH
+        )
+    return value
+
+
 class UserCreate(BaseModel):
     """Signup input. The plain password is hashed before storage and never
-    persisted or returned."""
+    persisted or returned. password is gated by the shared
+    validate_password_rules (see above) -- the same rule set as the
+    password-reset endpoint."""
     email: EmailStr
     password: str = Field(..., description="Plain-text password (hashed before storage)")
     full_name: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def _password_rules(cls, value: str) -> str:
+        return validate_password_rules(value)
 
 
 class User(BaseModel):
@@ -156,6 +191,13 @@ class User(BaseModel):
     full_name: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     role: str = "user"
+    # Session-invalidation counter. Every JWT carries this value as the "tv"
+    # claim at creation; get_current_user rejects a token whose "tv" no longer
+    # matches, so incrementing the stored value revokes every outstanding
+    # session at once (e.g. after a password reset). A user doc missing the
+    # field (pre-backfill) is treated as 1 everywhere. Internal-only:
+    # deliberately NOT on UserPublic -- clients have no use for it.
+    token_version: int = 1
 
 
 class UserPublic(BaseModel):

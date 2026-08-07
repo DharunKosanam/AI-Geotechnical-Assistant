@@ -31,16 +31,30 @@ def verify_password(plain: str, hashed: str) -> bool:
     return _pwd_context.verify(plain, hashed)
 
 
-def create_access_token(user_id: str) -> str:
+def effective_token_version(value) -> int:
+    """Normalize a stored/claimed token_version to its effective value.
+
+    A user doc written before the token_version backfill has no such field
+    (value None), and a JWT minted before this change has no "tv" claim --
+    both mean version 1, so pre-existing sessions keep working until a
+    deliberate bump invalidates them. Shared by token creation and
+    get_current_user so the two sides can never disagree on the default.
+    """
+    return 1 if value is None else int(value)
+
+
+def create_access_token(user_id: str, token_version: int = 1) -> str:
     """Create a signed JWT access token for the given user id.
 
     Encodes the standard JWT claims "sub" (subject = user id) and "exp"
-    (expiry = now + JWT_EXPIRE_DAYS), signed with JWT_SECRET_KEY using
+    (expiry = now + JWT_EXPIRE_DAYS), plus the custom "tv" claim = the user's
+    token_version at issue time (get_current_user rejects the token once the
+    stored version moves past it). Signed with JWT_SECRET_KEY using
     JWT_ALGORITHM (HS256). python-jose converts the datetime "exp" to a Unix
     timestamp internally. See decode_access_token for the inverse.
     """
     expire = datetime.utcnow() + timedelta(days=JWT_EXPIRE_DAYS)
-    payload = {"sub": user_id, "exp": expire}
+    payload = {"sub": user_id, "exp": expire, "tv": effective_token_version(token_version)}
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 

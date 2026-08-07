@@ -47,6 +47,16 @@ async def ensure_indexes():
     await users_collection.create_index("email", unique=True, name="uniq_email")
     await files_collection.create_index("threadId", name="threadId_1", sparse=True)
 
+    # Password reset (Phase 3): TTL + unique-hash indexes on the
+    # password_reset_tokens collection. Imported inside the function because
+    # password_reset_service imports THIS module at its top level -- a
+    # module-level import here would be circular. By the time startup calls
+    # ensure_indexes() both modules are fully initialized, so the deferred
+    # import is safe.
+    from app.services.password_reset_service import ensure_password_reset_indexes
+
+    await ensure_password_reset_indexes()
+
 
 async def close_mongo_connection():
     """Close MongoDB connection"""

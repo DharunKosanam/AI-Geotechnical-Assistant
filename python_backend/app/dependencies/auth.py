@@ -16,7 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 
 from app.core.database import users_collection
-from app.services.auth_service import decode_access_token
+from app.services.auth_service import decode_access_token, effective_token_version
 from models import User, UserPublic
 
 # HTTPBearer reads "Authorization: Bearer <token>" directly. We use it (not
@@ -77,6 +77,20 @@ async def get_current_user(
         # User was deleted after the token was issued.
         raise _credentials_exception
 
+    # Session invalidation: the token's "tv" claim must match the user's
+    # stored token_version. Both sides default to 1 when absent (a JWT minted
+    # before the "tv" claim existed, or a user doc from before the backfill),
+    # so pre-existing sessions keep working until a DELIBERATE version bump
+    # (password reset) revokes them. Same opaque 401 as every other failure.
+    try:
+        token_tv = effective_token_version(payload.get("tv"))
+        stored_tv = effective_token_version(user_doc.get("token_version"))
+    except (TypeError, ValueError):
+        # A non-numeric value on either side can never match anything.
+        raise _credentials_exception
+    if token_tv != stored_tv:
+        raise _credentials_exception
+
     return User(
         id=str(user_doc["_id"]),
         email=user_doc["email"],
@@ -84,6 +98,7 @@ async def get_current_user(
         full_name=user_doc.get("full_name"),
         created_at=user_doc["created_at"],
         role=user_doc.get("role", "user"),
+        token_version=stored_tv,
     )
 
 

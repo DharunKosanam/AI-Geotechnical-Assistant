@@ -154,6 +154,13 @@ RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "10/minute")
 # so a single user cannot queue a large backlog over an hour. Applies to
 # /api/upload (thread + user uploads) and the KB upload endpoint.
 RATE_LIMIT_UPLOAD_HOURLY = os.getenv("RATE_LIMIT_UPLOAD_HOURLY", "60/hour")
+# Password reset endpoints (Phase 3), keyed by client IP (no user yet, like
+# login). forgot-password is tight because each request can send an email;
+# reset-password is a little looser but still stops online token guessing
+# (the 256-bit token space makes brute force absurd anyway; this just keeps
+# the noise down).
+RATE_LIMIT_FORGOT_PASSWORD = os.getenv("RATE_LIMIT_FORGOT_PASSWORD", "5/hour")
+RATE_LIMIT_RESET_PASSWORD = os.getenv("RATE_LIMIT_RESET_PASSWORD", "10/hour")
 
 # Application Constants
 USER_ID = "default-user"  # Hardcoded user ID to match Next.js implementation
@@ -171,6 +178,55 @@ if not JWT_SECRET_KEY:
 # Signing algorithm and token lifetime. Env-overridable, with sane defaults.
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
+
+# ---------------------------------------------------------------------------
+# Password reset (Phase 1 -- token storage + email sender interface only)
+# ---------------------------------------------------------------------------
+# Master switch for the password-reset feature. Default OFF; in this phase
+# nothing reads it yet (no endpoints exist), it is declared ahead of Phase 2 so
+# the flag name is settled. Read at call time (via the config module) so it can
+# be toggled in tests without re-import. Accepts 1/true/yes/on
+# (case-insensitive).
+PASSWORD_RESET_ENABLED = os.getenv("PASSWORD_RESET_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Which EmailSender implementation get_email_sender() constructs: "console"
+# (default -- log the message to stdout), "resend", or "brevo". The factory
+# raises on anything else so a misconfigured provider fails loudly instead of
+# silently dropping mail.
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "console").strip().lower()
+
+# Credentials/identity for the real email providers (Phase 5). Only required
+# when EMAIL_PROVIDER is "resend" or "brevo"; the console sender needs none,
+# so startup does not fail on their absence (the factory checks instead).
+# EMAIL_API_KEY must NEVER be logged or embedded in error messages.
+EMAIL_API_KEY = os.getenv("EMAIL_API_KEY", "")
+EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "")
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Geotechnical Assistant")
+
+# Lifetime of a password-reset token, in minutes. Applied when the token is
+# CREATED (stored as an absolute expires_at); verification compares against
+# that stored instant, so changing this does not affect tokens already issued.
+RESET_TOKEN_TTL_MINUTES = int(os.getenv("RESET_TOKEN_TTL_MINUTES", "30"))
+
+# Public base URL of the frontend, used to build the reset link placed in the
+# email (e.g. APP_BASE_URL + "/reset-password?token=..."). Local dev default;
+# set the production HTTPS origin in .env when deploying.
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:3000")
+
+# Per-EMAIL cap on reset emails per rolling hour (Redis counter, Phase 3).
+# Complements the per-IP slowapi limit on /auth/forgot-password: a caller
+# rotating IPs still cannot mail-bomb one address. Applied to EVERY request
+# for an address whether or not an account exists (a throttle that only
+# counted real accounts would itself be an enumeration oracle); over the cap
+# the endpoint returns the same generic 200 and silently does not send.
+PASSWORD_RESET_EMAIL_MAX_PER_HOUR = int(
+    os.getenv("PASSWORD_RESET_EMAIL_MAX_PER_HOUR", "3")
+)
 
 # Secure attribute for the access_token cookie set at login.
 #   * Production (HTTPS): set COOKIE_SECURE=True so the cookie is transmitted

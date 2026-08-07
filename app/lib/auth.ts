@@ -91,6 +91,36 @@ export async function logout(): Promise<void> {
   if (!res.ok) await raise(res);
 }
 
+/**
+ * Request a password-reset email. The backend returns the SAME generic 200
+ * whether or not the address has an account (anti-enumeration), so a resolved
+ * promise means only "the request was accepted", never "the account exists".
+ */
+export async function forgotPassword(email: string): Promise<void> {
+  const res = await fetch(`${PYTHON_BACKEND_URL}/auth/forgot-password`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    credentials: "include",
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) await raise(res);
+}
+
+/** Complete a password reset with a token from the reset email. 400 means the
+ * token is invalid, expired, or already used (deliberately indistinct). */
+export async function resetPassword(
+  token: string,
+  newPassword: string,
+): Promise<void> {
+  const res = await fetch(`${PYTHON_BACKEND_URL}/auth/reset-password`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    credentials: "include",
+    body: JSON.stringify({ token, new_password: newPassword }),
+  });
+  if (!res.ok) await raise(res);
+}
+
 /** Returns the current user, or null if not authenticated (401). */
 export async function getCurrentUser(): Promise<AuthUser | null> {
   const res = await fetch(`${PYTHON_BACKEND_URL}/auth/me`, {

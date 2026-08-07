@@ -165,8 +165,21 @@ def mock_groq_llm(monkeypatch):
     This fixture automatically applies to all tests (autouse=True).
     Returns a realistic mock response for chat completions.
     """
-    async def mock_generate_answer(query: str, context: str, history: list = None, *, mode: str = "KB_QUERY"):
-        """Mock LLM response based on query (accepts the router `mode` kwarg)."""
+    async def mock_generate_answer(
+        query: str,
+        context: str,
+        history: list = None,
+        *,
+        mode: str = "KB_QUERY",
+        system_prompt: str = None,
+        emit=None,
+    ):
+        """Mock LLM response. MIRRORS the real generate_answer_with_groq
+        signature (llm_service.py): the router `mode` kwarg, the optional
+        `system_prompt` override, and the streaming `emit` callback that the
+        chat router now passes on every call (None on the non-streaming
+        path). emit is accepted but unused -- the mock returns its answer in
+        one piece, which is exactly the emit=None behavior."""
         return f"This is a test response to your query: '{query}'. Based on the provided context about geotechnical engineering, I can provide detailed information. The context includes relevant technical documentation."
     
     # Patch at the router level where it's imported

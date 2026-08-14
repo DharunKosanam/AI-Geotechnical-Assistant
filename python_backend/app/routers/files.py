@@ -113,6 +113,56 @@ def _reject_unreadable_image(filename: Optional[str]) -> None:
         )
 
 
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _validate_diagram_upload(
+    filename: Optional[str],
+    size_bytes: int,
+    file_content: bytes,
+    diagram_xml: Optional[str],
+) -> None:
+    """Entry validation for a diagram upload (DIAGRAM_EDITOR_ENABLED): a PNG
+    for display plus the draw.io XML as the ONLY extraction source.
+
+    Replaces _validate_upload/_reject_unreadable_image for this source type:
+    those gates decide whether PIXELS are readable (OCR/vision), which is
+    irrelevant here — the text comes from the XML, and a diagram must stay
+    valid on a server with neither OCR nor vision. Size/emptiness rules match
+    _validate_upload exactly.
+    """
+    if not filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing filename",
+        )
+    if get_file_type(filename) != ".png":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A diagram upload must be a .png file.",
+        )
+    if size_bytes <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File is empty",
+        )
+    if size_bytes > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large ({size_bytes / 1024 / 1024:.1f} MB). Max: 50 MB.",
+        )
+    if not file_content.startswith(_PNG_MAGIC):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The diagram image is not a valid PNG.",
+        )
+    if not diagram_xml or not diagram_xml.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A diagram upload must include its source XML (diagramXml).",
+        )
+
+
 # Extensions the upload UI offers with vision OFF -- exactly today's static
 # frontend list. Deliberately narrower than SUPPORTED_EXTENSIONS (no TIFF/PNG/
 # JPG): the UI has never offered images, even where OCR could read them, and
@@ -133,7 +183,13 @@ async def upload_config(current_user: User = Depends(get_current_user)):
     if config.VISION_EXTRACTION_ENABLED:
         extensions += sorted(VISION_IMAGE_EXTS)
         label += ", PNG, JPG, WEBP"
-    return {"extensions": extensions, "label": label}
+    payload = {"extensions": extensions, "label": label}
+    # Diagram editor capability (DIAGRAM_EDITOR_ENABLED). Present only when ON:
+    # a flag-off server returns byte-identical bytes to before the feature, and
+    # the frontend treats an absent field as off (fails closed).
+    if config.DIAGRAM_EDITOR_ENABLED:
+        payload["diagramEditor"] = True
+    return payload
 
 
 @router.get("/files")
@@ -277,6 +333,8 @@ async def process_file_ingestion(
     parent_id: Optional[ObjectId] = None,
     user_id: Optional[str] = None,
     thread_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    diagram_xml: Optional[str] = None,
 ):
     """
     Background task to process file ingestion.
@@ -287,12 +345,32 @@ async def process_file_ingestion(
 
     ``thread_id`` (with category "thread_upload") scopes the upload to a single
     conversation thread so it is retrievable only in THREAD_DOC mode.
+
+    ``source_type == "diagram"`` (DIAGRAM_EDITOR_ENABLED): ``diagram_xml`` is
+    flattened to text by pure parsing (zero LLM calls) and fed into the NORMAL
+    chunk/embed path via ingest_document's pre-extracted-pages hook, with
+    provenance stamping sourceType on every chunk. The PNG in ``file_content``
+    is display-only; because pre_extracted_pages is set, ingest_document's
+    vision branch (which requires it to be None) can never see a diagram.
     """
     import gc
     from app.services.file_processing import UnreadableDocumentError
+    from app.services.diagram_extraction import EmptyDiagramError, extract_diagram_text
     try:
         print(f"[LOADING] Background processing started for: {filename} (category: {category})")
-        result = await ingest_document(filename, file_content, category, user_id=user_id, thread_id=thread_id)
+        if source_type == "diagram":
+            flat_text = extract_diagram_text(diagram_xml or "")
+            result = await ingest_document(
+                filename,
+                file_content,
+                category,
+                user_id=user_id,
+                thread_id=thread_id,
+                pre_extracted_pages=[(1, flat_text, False)],
+                provenance={"sourceType": "diagram"},
+            )
+        else:
+            result = await ingest_document(filename, file_content, category, user_id=user_id, thread_id=thread_id)
         print(f"[OK] Background processing completed: {result}")
         if parent_id is not None:
             update = {
@@ -306,10 +384,10 @@ async def process_file_ingestion(
             if result.get("warning"):
                 update["warning"] = result["warning"]
             await files_collection.update_one({"_id": parent_id}, {"$set": update})
-    except UnreadableDocumentError as e:
-        # Expected, explainable outcome (a scan, an image with no OCR) — not a
-        # crash. Its message is written for the user, so pass it through as-is
-        # and skip the traceback.
+    except (UnreadableDocumentError, EmptyDiagramError) as e:
+        # Expected, explainable outcome (a scan, an image with no OCR, a
+        # shapeless diagram) — not a crash. Its message is written for the
+        # user, so pass it through as-is and skip the traceback.
         print(f"[INFO] Cannot read {filename}: {e}")
         if parent_id is not None:
             await files_collection.update_one(
@@ -351,6 +429,8 @@ async def upload_document(
     file: UploadFile = File(...),
     category: str = Form("user_upload"),
     threadId: Optional[str] = Form(None),
+    sourceType: Optional[str] = Form(None),
+    diagramXml: Optional[str] = Form(None),
     current_user: User = Depends(rate_limit_identify),
 ):
     """
@@ -364,6 +444,12 @@ async def upload_document(
     threadId, so it is retrievable only in THREAD_DOC mode for that thread and
     never mixed into the shared knowledge base or the user's general uploads.
     Omitting threadId preserves the existing user_upload behavior exactly.
+
+    ``sourceType == "diagram"`` + ``diagramXml`` (both honored ONLY while
+    DIAGRAM_EDITOR_ENABLED is on): the PNG is stored on the parent doc for
+    display and the XML becomes the indexed text. With the flag off both
+    fields are ignored entirely, so the request validates and ingests exactly
+    as any other upload — byte-identical to pre-diagram behavior.
     """
     # Queue-depth cap (Phase 0.5): reject before buffering the file when the
     # ingest backlog is already full, so a burst can't exhaust memory/CPU.
@@ -376,8 +462,18 @@ async def upload_document(
     try:
         # Read first so we can size-check; extension is the source of truth for type.
         file_content = await file.read()
-        _validate_upload(file.filename, len(file_content))
-        _reject_unreadable_image(file.filename)
+        # Diagram uploads (flag-gated) validate as PNG + XML instead of the
+        # image-readability gates: their text source is the XML, not pixels,
+        # so OCR/vision availability must not decide their fate. Flag off,
+        # is_diagram is always False and this branch cannot be reached.
+        is_diagram = config.DIAGRAM_EDITOR_ENABLED and sourceType == "diagram"
+        if is_diagram:
+            _validate_diagram_upload(
+                file.filename, len(file_content), file_content, diagramXml
+            )
+        else:
+            _validate_upload(file.filename, len(file_content))
+            _reject_unreadable_image(file.filename)
 
         # Thread-scoped uploads become their own category so they never leak into
         # the shared KB / user_upload search. A blank threadId is treated as absent.
@@ -413,6 +509,14 @@ async def upload_document(
         if thread_id:
             parent_doc["threadId"] = thread_id
             parent_doc["metadata"]["threadId"] = thread_id
+        if is_diagram:
+            parent_doc["sourceType"] = "diagram"
+            parent_doc["metadata"]["sourceType"] = "diagram"
+            # PNG bytes for the human, served by GET /api/files/{id}/content
+            # exactly like legacy stored uploads — NEVER sent to any model.
+            parent_doc["content"] = file_content
+            # The XML is the (only) extraction source; kept for provenance.
+            parent_doc["diagramXml"] = diagramXml
         insert_result = await files_collection.insert_one(parent_doc)
         parent_id = insert_result.inserted_id
 
@@ -425,6 +529,8 @@ async def upload_document(
             parent_id,
             current_user.id,
             thread_id,
+            "diagram" if is_diagram else None,
+            diagramXml if is_diagram else None,
         )
         # Ownership of the reserved slot passes to the background task, which
         # releases it in its finally once ingestion completes or fails.

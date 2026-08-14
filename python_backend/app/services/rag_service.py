@@ -1133,12 +1133,19 @@ async def thread_document_inventory(
     triples: List[Tuple[str, int, str]] = []
     doc_states: List[Dict[str, Any]] = []
     async for d in files_collection.find(
-        query, {"filename": 1, "chunkCount": 1, "status": 1, "error": 1, "createdAt": 1}
+        query,
+        {"filename": 1, "chunkCount": 1, "status": 1, "error": 1, "createdAt": 1,
+         "sourceType": 1},
     ):
         fn = d.get("filename") or ""
         status, reason = effective_ingest_status(d, now=now)
         triples.append((fn, int(d.get("chunkCount") or 0), status))
-        doc_states.append({"filename": fn, "status": status, "reason": reason})
+        # sourceType ("diagram") lets the scope note label a drawn diagram as
+        # one; absent (None) for every pre-diagram document, additive only.
+        doc_states.append({
+            "filename": fn, "status": status, "reason": reason,
+            "sourceType": d.get("sourceType"),
+        })
     if not triples:
         return False, "", []
     triples.sort()
@@ -1520,6 +1527,7 @@ async def query_thread_documents(
         "pageStart": 1,
         "sectionHeader": 1,
         "threadId": 1,
+        "sourceType": 1,
         "embedding": 1,
     }
 
@@ -1555,6 +1563,7 @@ async def query_thread_documents(
             "pageStart": doc.get("pageStart"),
             "sectionHeader": doc.get("sectionHeader"),
             "threadId": doc.get("threadId"),
+            "sourceType": doc.get("sourceType"),
             "score": _cosine(qv, emb),
         })
 
@@ -1588,21 +1597,61 @@ async def query_thread_documents(
             # clears the threshold holds a context slot (per-doc quota); flag
             # off keeps the old plain top_k + threshold, byte-identical.
             if config.ROUTER_ENABLED:
+                # Diagram bypass: a diagram is a whole-document object -- one
+                # small structured chunk whose lexical surface the prose-
+                # calibrated cross-encoder floors below even the permissive
+                # thread threshold (the same pathology sample_thread_documents
+                # documents for summary queries). Inclusion is therefore a
+                # SCOPING decision like DOC_LEVEL's, not a relevance one:
+                # diagram chunks leave the ranked pool before the threshold,
+                # and prose chunks run the identical quota/threshold path.
+                # Capped by THREAD_DIAGRAM_BYPASS_MAX so a diagram-heavy
+                # thread cannot flood the context; `candidates` is already in
+                # rerank order, so the slice keeps the best-scoring diagram
+                # chunks (the score is unused for dropping, but it is still
+                # the tiebreak for the cap).
+                diagram_chunks = [c for c in candidates if c.get("sourceType") == "diagram"]
+                prose = [c for c in candidates if c.get("sourceType") != "diagram"]
+                cap = config.THREAD_DIAGRAM_BYPASS_MAX
+                included_diagrams = diagram_chunks[:cap]
+                omitted_diagrams = diagram_chunks[cap:]
+                if omitted_diagrams:
+                    print(
+                        f"[THREAD] diagram cap: {len(omitted_diagrams)} diagram chunk(s) over "
+                        f"THREAD_DIAGRAM_BYPASS_MAX={cap} omitted: "
+                        + ", ".join(
+                            f"'{c['filename']}' rerank={c.get('rerank_score', 0.0):+.2f}"
+                            for c in omitted_diagrams
+                        )
+                    )
                 kept, _no_high_conf = _apply_per_doc_context_quota(
-                    candidates,
+                    prose,
                     top_k=top_k,
                     per_doc=THREAD_DOC_MIN_CHUNKS_PER_DOC,
                     threshold=THREAD_RERANK_SCORE_THRESHOLD,
                 )
+                for c in included_diagrams:
+                    # Deliberate context, not a weak match (DOC_LEVEL's rule) —
+                    # and one non-low-confidence chunk is what keeps chat.py's
+                    # all-low-confidence gate from taking the thread-aware
+                    # fallback on a diagram-only thread.
+                    c["low_confidence"] = False
+                kept = kept + included_diagrams
                 _log_thread_doc_mix("final context", kept, "rerank_score")
                 if scope_out is not None:
                     # Structured retrieval scope (Phase 4) from the SAME data
                     # the quota ran on. `grounded` preserves kept order (best
                     # first); low-confidence fallback context grounds nothing.
+                    # passing/no_relevant/excluded are PROSE bookkeeping: a
+                    # bypassed diagram is neither "relevant" nor "searched and
+                    # empty" -- its inclusion mode is reported separately via
+                    # diagram_bypass / diagram_omitted, set ONLY when diagrams
+                    # exist so a diagram-free scope dict stays byte-identical.
                     passing_docs = {
-                        c["filename"] for c in candidates
+                        c["filename"] for c in prose
                         if c.get("rerank_score", 0.0) >= THREAD_RERANK_SCORE_THRESHOLD
                     }
+                    diagram_names = {c["filename"] for c in diagram_chunks}
                     grounded: List[str] = []
                     for c in kept:
                         if not c.get("low_confidence") and c["filename"] not in grounded:
@@ -1610,11 +1659,19 @@ async def query_thread_documents(
                     scope_out["grounded"] = grounded
                     scope_out["no_relevant"] = [
                         fn for fn in scope_out.get("searched", [])
-                        if fn not in passing_docs
+                        if fn not in passing_docs and fn not in diagram_names
                     ]
                     scope_out["excluded"] = [
                         fn for fn in sorted(passing_docs) if fn not in grounded
                     ]
+                    if included_diagrams:
+                        scope_out["diagram_bypass"] = sorted(
+                            {c["filename"] for c in included_diagrams}
+                        )
+                    if omitted_diagrams:
+                        scope_out["diagram_omitted"] = sorted(
+                            {c["filename"] for c in omitted_diagrams}
+                        )
                     # Vision provenance (additive): which grounding chunks are
                     # AI-vision transcriptions, so the scope note can say so.
                     scope_out["vision"] = _vision_scope(kept)

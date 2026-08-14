@@ -270,6 +270,42 @@ def _thread_scope_note(
     # thread, so every "no note" early-exit downgrades to a vision-only note
     # when the sentence is non-empty.
     vision_sentence = _vision_note_sentence(scope)
+    # Diagram labeling (DIAGRAM_EDITOR_ENABLED uploads): a drawn diagram is
+    # named as one wherever a source list renders, from the parent docs'
+    # sourceType (deterministic retrieval fact, never model prose). Both
+    # helpers are the identity for a diagram-free thread, so every existing
+    # wording below stays byte-identical.
+    diagram_files = set(scope.get("diagram_files") or [])
+
+    def _name(fn: str) -> str:
+        return f"the diagram {fn}" if fn in diagram_files else fn
+
+    def _names(fns: List[str]) -> List[str]:
+        return [_name(fn) for fn in fns]
+
+    # Diagram-bypass provenance (deterministic, from scope keys the retrieval
+    # sets only when diagrams were actually included/omitted): a bypassed
+    # diagram was included WITHOUT being relevance-ranked, and the note must
+    # say so rather than imply a relevance verdict; an omitted diagram must
+    # never read as having been consulted. Sentences are plain filenames --
+    # they already name themselves as diagrams.
+    bypass = scope.get("diagram_bypass") or []
+    omitted = scope.get("diagram_omitted") or []
+    bypass_sentence = ""
+    if bypass:
+        verb = "is" if len(bypass) == 1 else "are"
+        bypass_sentence = (
+            f"{_join_names(bypass)} {verb} included in full: diagrams are "
+            f"read whole rather than relevance-ranked."
+        )
+    omitted_sentence = ""
+    if omitted:
+        verb = "was" if len(omitted) == 1 else "were"
+        omitted_sentence = (
+            f"{_join_names(omitted)} {verb} not read for this answer "
+            f"(over the per-answer diagram limit)."
+        )
+
     grounded = scope.get("grounded") or []
     no_relevant = [fn for fn in (scope.get("no_relevant") or []) if fn not in grounded]
     excluded = [
@@ -298,11 +334,11 @@ def _thread_scope_note(
         if fully_read:
             parts = [
                 f"{subject_phrase} draws on all sections of "
-                f"{_join_names([s['filename'] for s in sampled])}."
+                f"{_join_names(_names([s['filename'] for s in sampled]))}."
             ]
         else:
             spans = "; ".join(
-                f"{s['sampled']} of {s['total']} sections from {s['filename']}"
+                f"{s['sampled']} of {s['total']} sections from {_name(s['filename'])}"
                 for s in sampled
             )
             parts = [
@@ -311,32 +347,41 @@ def _thread_scope_note(
             ]
         if vision_sentence:
             parts.append(vision_sentence)
-        _append_non_ready(parts, pending, failed)
+        _append_non_ready(parts, _names(pending), failed)
         return "_" + " ".join(parts) + "_"
 
     if total_attached < 2 or not searched:
         # Fewer than two attachments keeps today's no-note behavior; zero
         # searchable documents is owned by the deterministic all-non-ready
         # answer in _run_chat_turn, not by the note. Vision provenance is the
-        # exception: it must surface even for a single attachment.
-        return f"_{vision_sentence}_" if vision_sentence else ""
+        # exception: it must surface even for a single attachment -- and the
+        # diagram-bypass sentences follow the same precedent, so a
+        # diagram-only thread still explains that its diagram was included
+        # without being relevance-scored.
+        extra = " ".join(
+            s for s in (bypass_sentence, omitted_sentence, vision_sentence) if s
+        )
+        return f"_{extra}_" if extra else ""
 
+    # "documents" stays verbatim for a diagram-free thread; with a diagram
+    # attached the collective noun must not miscount it as a document.
+    noun = "sources" if diagram_files else "documents"
     if total_attached == len(searched):
         # All attachments searched: byte-identical to the Phase 4 wording.
-        parts = [f"Searched {len(searched)} attached documents: {_join_names(searched)}."]
+        parts = [f"Searched {len(searched)} attached {noun}: {_join_names(_names(searched))}."]
     else:
         parts = [
-            f"Searched {len(searched)} of {total_attached} attached documents: "
-            f"{_join_names(searched)}."
+            f"Searched {len(searched)} of {total_attached} attached {noun}: "
+            f"{_join_names(_names(searched))}."
         ]
     if grounded:
-        parts.append(f"This answer is grounded in {_join_names(grounded)}.")
+        parts.append(f"This answer is grounded in {_join_names(_names(grounded))}.")
         if no_relevant:
             # Searched-and-empty is the CORRECT outcome for a document with
             # nothing above the rerank threshold -- name it, don't omit it.
             parts.append(
                 f"No content relevant to this question was found above the "
-                f"confidence threshold in {_join_names(no_relevant)}."
+                f"confidence threshold in {_join_names(_names(no_relevant))}."
             )
     else:
         parts.append(
@@ -347,12 +392,16 @@ def _thread_scope_note(
         # Searched AND matched, but no context slot (more passing documents
         # than slots) -- distinct from searched-and-empty above.
         parts.append(
-            f"{_join_names(excluded)} matched this question but was not "
+            f"{_join_names(_names(excluded))} matched this question but was not "
             f"included in the context for this answer."
         )
+    if bypass_sentence:
+        parts.append(bypass_sentence)
+    if omitted_sentence:
+        parts.append(omitted_sentence)
     if vision_sentence:
         parts.append(vision_sentence)
-    _append_non_ready(parts, pending, failed)
+    _append_non_ready(parts, _names(pending), failed)
     return "_" + " ".join(parts) + "_"
 
 
@@ -647,6 +696,14 @@ async def _run_chat_turn(
                 thread_scope["failed"] = [
                     {"filename": s["filename"], "reason": s["reason"]}
                     for s in thread_doc_states if s["status"] == "failed"
+                ]
+                # Which attachments are drawn diagrams (DIAGRAM_EDITOR_ENABLED
+                # uploads), from the parent docs' sourceType. Empty for a
+                # documents-only thread, which keeps every note wording
+                # byte-identical to before.
+                thread_scope["diagram_files"] = [
+                    s["filename"] for s in thread_doc_states
+                    if s.get("sourceType") == "diagram"
                 ]
             else:
                 chunks = await query_vector_store(retrieval_query, top_k=8, user_id=current_user.id)

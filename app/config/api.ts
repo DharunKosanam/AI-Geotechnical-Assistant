@@ -151,6 +151,12 @@ export const API_ENDPOINTS = {
     }
     return `/api/files`;
   },
+
+  // Raw stored bytes of an uploaded file (diagram PNG thumbnails). Reaches
+  // FastAPI's GET /api/files/{id}/content via the beforeFiles rewrite in
+  // next.config.mjs, which shadows the legacy OpenAI route handler.
+  fileContent: (fileId: string) =>
+    `${PYTHON_BACKEND_URL}/api/files/${encodeURIComponent(fileId)}/content`,
   
   deleteFile: () => {
     if (BACKEND_TYPE === 'python') {

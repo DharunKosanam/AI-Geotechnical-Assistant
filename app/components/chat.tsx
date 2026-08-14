@@ -14,8 +14,9 @@ import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistant
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
 import ThreadList from "./thread-list";
 import SidebarAccount from "./sidebar-account";
+import DiagramEditorModal from "./diagram-editor-modal";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
-import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users } from "lucide-react";
+import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users, PenLine } from "lucide-react";
 
 // --- File attachment config ---
 // DEFAULTS: text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately
@@ -154,6 +155,12 @@ type AttachedFile = {
   // Thread this file was uploaded into. Chips belong to one conversation, so
   // switching threads clears them (the document itself stays with its thread).
   threadId?: string;
+  // Diagram chips only (DIAGRAM_EDITOR_ENABLED): "diagram" marks the chip so
+  // a ready chip can render its stored PNG as a thumbnail; fileId is the
+  // parent doc id the PNG is served under. Document chips never set either,
+  // so their rendering is untouched.
+  sourceType?: "diagram";
+  fileId?: string;
 };
 
 type MessageProps = {
@@ -576,6 +583,12 @@ const Chat = ({
   // extraction is enabled server-side). Defaults -- today's text-only list --
   // render until the fetch lands, and stay if it fails.
   const [uploadTypes, setUploadTypes] = useState<UploadTypes>(DEFAULT_UPLOAD_TYPES);
+  // Diagram editor capability (backend DIAGRAM_EDITOR_ENABLED), from the same
+  // handshake. The field is OMITTED by a flag-off server, and absent/false
+  // keeps the plain "+" button — fails closed, like the uploadTypes default.
+  const [diagramEditorEnabled, setDiagramEditorEnabled] = useState(false);
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [showDiagramEditor, setShowDiagramEditor] = useState(false);
   useEffect(() => {
     let cancelled = false;
     fetch(API_ENDPOINTS.uploadConfig(), { credentials: "include" })
@@ -584,6 +597,9 @@ const Chat = ({
         if (cancelled || !data) return;
         if (Array.isArray(data.extensions) && data.extensions.length > 0 && data.label) {
           setUploadTypes({ extensions: data.extensions, label: data.label });
+        }
+        if (data.diagramEditor === true) {
+          setDiagramEditorEnabled(true);
         }
       })
       .catch(() => {
@@ -2275,6 +2291,138 @@ const Chat = ({
     }
   };
 
+  // --- Diagram upload (DIAGRAM_EDITOR_ENABLED) ---
+
+  // Filename for a drawn diagram, derived from the draw.io page title: slug of
+  // [a-z0-9-], max 40 chars, fallback "diagram" for an empty/Untitled title,
+  // then a 6-char random suffix + ".png". Chips, status polling, retrieval and
+  // the scope note all key on filename, so two "Untitled" diagrams in one
+  // thread must never collide — the suffix guarantees uniqueness.
+  const diagramFilename = (xml: string): string => {
+    let title = "";
+    try {
+      const doc = new DOMParser().parseFromString(xml, "text/xml");
+      title = doc.querySelector("diagram")?.getAttribute("name") ?? "";
+    } catch {
+      /* no title — fall through to the default name */
+    }
+    let slug = title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40)
+      .replace(/-+$/g, "");
+    if (!slug || slug === "untitled") slug = "diagram";
+    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+    let suffix = "";
+    if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+      const bytes = crypto.getRandomValues(new Uint8Array(6));
+      bytes.forEach((b) => (suffix += alphabet[b % alphabet.length]));
+    } else {
+      for (let i = 0; i < 6; i++)
+        suffix += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return `${slug}-${suffix}.png`;
+  };
+
+  // draw.io's xmlpng export arrives as a data URI; the upload endpoint takes
+  // multipart, so decode it to a Blob. Null for anything that isn't the
+  // base64 PNG form we asked for.
+  const pngDataUriToBlob = (dataUri: string): Blob | null => {
+    const match = /^data:image\/png;base64,(.+)$/.exec(dataUri);
+    if (!match) return null;
+    try {
+      const bytes = atob(match[1]);
+      const arr = new Uint8Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+      return new Blob([arr], { type: "image/png" });
+    } catch {
+      return null;
+    }
+  };
+
+  // Uploads a drawn diagram INTO the thread: PNG (display) + XML (the indexed
+  // source, flattened server-side with zero model calls). Deliberately a
+  // SIBLING of uploadAttachedFile rather than a change to it — the document
+  // upload path stays untouched — but the chip lifecycle downstream of the
+  // POST (startPolling -> ready/failed) is the same one documents use.
+  const uploadDiagram = async (pngDataUri: string, xml: string) => {
+    const blob = pngDataUriToBlob(pngDataUri);
+    if (!blob || !xml.trim()) {
+      alert("The editor returned an unusable diagram export. Please try saving again.");
+      return;
+    }
+    const filename = diagramFilename(xml);
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${filename}`;
+    setAttachedFiles((prev) => [
+      ...prev,
+      { id, name: filename, status: "uploading" as const, sourceType: "diagram" as const },
+    ]);
+
+    // Same rule as handleFileAttach: a diagram is always uploaded INTO a
+    // thread, so mint one if drawing came before the first message.
+    let forThreadId: string;
+    try {
+      forThreadId = await ensureThread();
+    } catch (error) {
+      console.error("Failed to create a thread for the diagram:", error);
+      updateAttachedFile(id, {
+        status: "error",
+        error: "Couldn't start a conversation for this diagram. Please try again.",
+      });
+      return;
+    }
+    updateAttachedFile(id, { threadId: forThreadId });
+
+    const data = new FormData();
+    data.append("file", blob, filename);
+    data.append("threadId", forThreadId);
+    data.append("sourceType", "diagram");
+    data.append("diagramXml", xml);
+
+    try {
+      const resp = await fetch(API_ENDPOINTS.uploadFile(), {
+        credentials: "include",
+        method: "POST",
+        body: data,
+      });
+      if (!resp.ok) {
+        // Same text-first error handling as uploadAttachedFile: the body is
+        // not guaranteed to be JSON when a proxy or gateway fails.
+        const raw = await resp.text().catch(() => "");
+        let detail = "";
+        try {
+          detail = (JSON.parse(raw) as { detail?: string }).detail ?? "";
+        } catch {
+          /* not JSON — fall through to the status-based message */
+        }
+        console.error(`Failed to upload ${filename}: ${resp.status}`, raw.slice(0, 500));
+        updateAttachedFile(id, {
+          status: "error",
+          error: detail || httpUploadError(resp.status, filename),
+        });
+        return;
+      }
+      // Accepted: ingestion (XML flatten -> chunk -> embed) runs in a backend
+      // background task; poll the same status endpoint documents use. The
+      // response's file_id is where the stored PNG is served from — kept on
+      // the chip so the ready state can render a thumbnail. A body that
+      // fails to parse only costs the thumbnail, never the chip lifecycle.
+      const result = await resp.json().catch(() => ({} as { file_id?: string }));
+      updateAttachedFile(id, { stage: "processing", fileId: result.file_id });
+      startPolling(id, filename, forThreadId);
+    } catch (error) {
+      console.error(`Error uploading ${filename}:`, error);
+      updateAttachedFile(id, {
+        status: "error",
+        error: `Couldn't reach the server to upload ${filename}. Check your connection (and VPN) and try again.`,
+      });
+    }
+  };
+
   // Triggered by the hidden file <input> behind the "+" button.
   // Valid files render immediately as "uploading" chips; the thread is created
   // first (attaching may be the user's very first action in a new chat, before
@@ -2459,6 +2607,19 @@ const Chat = ({
             </div>
           </div>
         )}
+        {showDiagramEditor && (
+          <DiagramEditorModal
+            onExport={(pngDataUri, xml) => {
+              setShowDiagramEditor(false);
+              uploadDiagram(pngDataUri, xml);
+            }}
+            onClose={() => setShowDiagramEditor(false)}
+            onError={(message) => {
+              setShowDiagramEditor(false);
+              alert(message);
+            }}
+          />
+        )}
         {/* Hidden file input — kept in the DOM, triggered by the "+" button.
             Same picker the old "Attach files" button used. */}
         <input
@@ -2499,6 +2660,29 @@ const Chat = ({
                   {file.status === "error" && (
                     <AlertCircle size={16} color="#f87171" className={styles.chipIcon} />
                   )}
+                  {/* Diagram chips only: the stored PNG as a thumbnail once
+                      ready, served through the /api/files beforeFiles rewrite.
+                      Click opens the full-size image in a new tab. Purely
+                      additive — document chips (no sourceType) are untouched,
+                      and the pending/ready/failed lifecycle is unchanged. */}
+                  {file.sourceType === "diagram" &&
+                    file.status === "ready" &&
+                    file.fileId && (
+                      <a
+                        className={styles.chipThumbLink}
+                        href={API_ENDPOINTS.fileContent(file.fileId)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`View ${file.name} full size`}
+                      >
+                        <img
+                          className={styles.chipThumb}
+                          src={API_ENDPOINTS.fileContent(file.fileId)}
+                          alt={`Diagram ${file.name}`}
+                          loading="lazy"
+                        />
+                      </a>
+                    )}
                   <span className={styles.chipText}>
                     <span
                       className={styles.chipName}
@@ -2651,15 +2835,68 @@ const Chat = ({
             </div>
           )}
           <div className={styles.inputRow}>
-            <button
-              type="button"
-              className={styles.plusBtn}
-              onClick={() => fileInputRef.current?.click()}
-              title={`Attach files (${uploadTypes.label})`}
-              aria-label="Attach files"
-            >
-              <Plus size={20} />
-            </button>
+            {diagramEditorEnabled ? (
+              /* Flag ON: "+" opens a two-option menu. The flag-off branch below
+                 is the pre-diagram button, character-identical. */
+              <div className={styles.attachMenuWrap}>
+                <button
+                  type="button"
+                  className={styles.plusBtn}
+                  onClick={() => setShowAttachMenu((open) => !open)}
+                  title={`Attach files (${uploadTypes.label}) or draw a diagram`}
+                  aria-label="Add an attachment"
+                  aria-expanded={showAttachMenu}
+                  aria-haspopup="menu"
+                >
+                  <Plus size={20} />
+                </button>
+                {showAttachMenu && (
+                  <>
+                    {/* Transparent backdrop: any click outside dismisses. */}
+                    <div
+                      className={styles.attachMenuBackdrop}
+                      onClick={() => setShowAttachMenu(false)}
+                    />
+                    <div className={styles.attachMenu} role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.attachMenuItem}
+                        onClick={() => {
+                          setShowAttachMenu(false);
+                          fileInputRef.current?.click();
+                        }}
+                      >
+                        <FileIcon size={16} />
+                        Upload document
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.attachMenuItem}
+                        onClick={() => {
+                          setShowAttachMenu(false);
+                          setShowDiagramEditor(true);
+                        }}
+                      >
+                        <PenLine size={16} />
+                        Draw a diagram
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <button
+                type="button"
+                className={styles.plusBtn}
+                onClick={() => fileInputRef.current?.click()}
+                title={`Attach files (${uploadTypes.label})`}
+                aria-label="Attach files"
+              >
+                <Plus size={20} />
+              </button>
+            )}
             <textarea
               ref={textareaRef}
               className={styles.input}

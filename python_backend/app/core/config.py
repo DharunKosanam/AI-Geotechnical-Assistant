@@ -114,6 +114,23 @@ STREAMING_ENABLED = os.getenv("STREAMING_ENABLED", "false").strip().lower() in (
     "on",
 )
 
+# ---------------------------------------------------------------------------
+# In-chat diagram editor (draw.io embed) feature flag
+# ---------------------------------------------------------------------------
+# Master switch for the composer's "Draw a diagram" flow. Default OFF: the
+# /api/upload/config handshake omits its capability field entirely (not
+# false — omitted, so the response bytes are identical to before the feature
+# existed), the frontend keeps the plain "+" button, and no diagram-specific
+# upload fields are accepted. Read at call time (via the config module, e.g.
+# config.DIAGRAM_EDITOR_ENABLED) so it can be toggled in tests without
+# re-import. Accepts 1/true/yes/on (case-insensitive).
+DIAGRAM_EDITOR_ENABLED = os.getenv("DIAGRAM_EDITOR_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
@@ -299,6 +316,17 @@ THREAD_DOC_MIN_CANDIDATES_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CANDIDATES_PER
 # rest fill by global rerank order. When a thread holds more documents than
 # context slots, slots fill one per document in best-score order instead.
 THREAD_DOC_MIN_CHUNKS_PER_DOC = int(os.getenv("THREAD_DOC_MIN_CHUNKS_PER_DOC", "1"))
+# THREAD_DIAGRAM_BYPASS_MAX: how many diagram chunks may join the THREAD_DOC
+# context per answer OUTSIDE the reranker threshold. A diagram is a whole-
+# document object -- one small structured chunk with almost no lexical
+# surface, which the prose-calibrated cross-encoder floors below even the
+# permissive thread threshold -- so its inclusion is a scoping decision
+# (DOC_LEVEL's rule), not a relevance one. The cap keeps a diagram-heavy
+# thread from flooding the context: over it, diagrams are included by rerank
+# score order (the score is unused for dropping but is still a reasonable
+# tiebreak) and the omitted ones are named in the scope note. Read at call
+# time (config.THREAD_DIAGRAM_BYPASS_MAX) so tests can tune it.
+THREAD_DIAGRAM_BYPASS_MAX = int(os.getenv("THREAD_DIAGRAM_BYPASS_MAX", "3"))
 
 # Context budget for DOCUMENT-LEVEL thread requests (summarize / what is this
 # about). These bypass relevance ranking -- a summary query shares no content

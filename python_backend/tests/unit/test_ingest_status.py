@@ -123,7 +123,12 @@ async def test_parent_with_zero_chunks_reports_has_attachments(monkeypatch):
     )
     assert has is True          # the router CAN classify THREAD_DOC
     assert fp != ""
-    assert states == [{"filename": "fresh.pdf", "status": "pending", "reason": None}]
+    # sourceType joined the state dict for diagram labeling (Phase 4); None
+    # for every ordinary document.
+    assert states == [{
+        "filename": "fresh.pdf", "status": "pending", "reason": None,
+        "sourceType": None,
+    }]
 
 
 # --- fingerprint x lifecycle: mid-ingestion vs completed ---------------------

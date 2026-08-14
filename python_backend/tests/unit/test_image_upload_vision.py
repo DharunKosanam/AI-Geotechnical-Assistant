@@ -368,6 +368,9 @@ def test_flag_off_ingest_takes_ocr_path_not_vision(monkeypatch):
 
 async def test_upload_config_flag_off_is_todays_static_list(monkeypatch):
     monkeypatch.setattr(config, "VISION_EXTRACTION_ENABLED", False)
+    # Pinned off so the exact-equality assert below stays hermetic regardless
+    # of the host's .env (load_dotenv() in config.py leaks it into tests).
+    monkeypatch.setattr(config, "DIAGRAM_EDITOR_ENABLED", False)
     out = await files_router.upload_config(current_user=object())
     assert out == {
         "extensions": [".pdf", ".docx", ".xlsx", ".xls", ".csv", ".pptx"],
@@ -377,6 +380,7 @@ async def test_upload_config_flag_off_is_todays_static_list(monkeypatch):
 
 async def test_upload_config_flag_on_adds_vision_image_types(monkeypatch):
     monkeypatch.setattr(config, "VISION_EXTRACTION_ENABLED", True)
+    monkeypatch.setattr(config, "DIAGRAM_EDITOR_ENABLED", False)
     out = await files_router.upload_config(current_user=object())
     assert out["extensions"][:6] == [".pdf", ".docx", ".xlsx", ".xls", ".csv", ".pptx"]
     assert set(out["extensions"][6:]) == {".jpeg", ".jpg", ".png", ".webp"}

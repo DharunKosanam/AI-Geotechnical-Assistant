@@ -104,6 +104,70 @@
   background-color: #333;
 }
 
+/* Two-option attach menu behind the "+" (DIAGRAM_EDITOR_ENABLED only):
+   Upload document / Draw a diagram. Anchored to the button, opens upward. */
+.attachMenuWrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.attachMenuBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  background: transparent;
+}
+
+.attachMenu {
+  position: absolute;
+  bottom: 52px;
+  left: 0;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  z-index: 20;
+}
+
+.attachMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attachMenuItem:hover {
+  background: rgba(128, 128, 128, 0.15);
+}
+
+/* Full-screen draw.io editor modal (DIAGRAM_EDITOR_ENABLED). Above .modal's
+   z-index 1000 so it always layers over the join dialog. */
+.diagramModalOverlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 1100;
+}
+
+.diagramModalFrame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
 /* ChatGPT-style attachment chips above the textarea. */
 .attachmentChips {
   display: flex;
@@ -126,6 +190,24 @@
 
 .chipIcon {
   flex-shrink: 0;
+}
+
+/* Diagram-chip PNG thumbnail (DIAGRAM_EDITOR_ENABLED). New classes only —
+   .chip itself is untouched so document chips render exactly as before. */
+.chipThumbLink {
+  flex-shrink: 0;
+  display: inline-flex;
+  line-height: 0;
+}
+
+.chipThumb {
+  max-height: 44px;
+  max-width: 80px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: #fff; /* diagrams export on white; keep them legible on the dark chip */
+  cursor: pointer;
+  object-fit: contain;
 }
 
 .chipText {

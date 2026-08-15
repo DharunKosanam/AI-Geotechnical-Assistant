@@ -12,11 +12,10 @@ import "katex/dist/katex.min.css";
 // @ts-expect-error - no types for this yet
 import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistants";
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
-import ThreadList from "./thread-list";
-import SidebarAccount from "./sidebar-account";
+import Sidebar from "./sidebar";
 import DiagramEditorModal from "./diagram-editor-modal";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
-import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users, PenLine } from "lucide-react";
+import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, PenLine } from "lucide-react";
 
 // --- File attachment config ---
 // DEFAULTS: text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately
@@ -2543,30 +2542,13 @@ const Chat = ({
 
   return (
     <div className={styles.container}>
-      <div className={styles.leftPanel}>
-        <button
-          type="button"
-          onClick={createNewThread}
-          className={styles.newChatBtn}
-        >
-          <SquarePen size={16} />
-          New Chat
-        </button>
-        <ThreadList
-          ref={threadListRef}
-          currentThreadId={threadId}
-          onThreadSelect={handleThreadSelect}
-        />
-        <button
-          type="button"
-          onClick={() => setShowJoinModal(true)}
-          className={styles.joinTeamBtn}
-        >
-          <Users size={16} />
-          Join Team Chat
-        </button>
-        <SidebarAccount />
-      </div>
+      <Sidebar
+        threadListRef={threadListRef}
+        currentThreadId={threadId}
+        onThreadSelect={handleThreadSelect}
+        onNewChat={createNewThread}
+        onJoinTeam={() => setShowJoinModal(true)}
+      />
     <div className={styles.chatContainer}>
       <div className={styles.messages} ref={messagesContainerRef}>
         {/* isDraftThread: a thread minted by an attach but with no message yet —

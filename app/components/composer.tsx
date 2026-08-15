@@ -138,13 +138,43 @@ const Composer = ({
     return () => document.removeEventListener("keydown", onKey);
   }, [showAttachMenu, setShowAttachMenu]);
 
+  // Join modal: trap Tab inside the dialog while open; restore focus to the
+  // opener on close. (Escape-close is handled by chat.tsx, which owns the
+  // state.)
+  const joinModalRef = React.useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!showJoinModal) return;
+    const opener = document.activeElement as HTMLElement | null;
+    const FOCUSABLE =
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const focusables = joinModalRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
+      if (!focusables || focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      opener?.focus();
+    };
+  }, [showJoinModal]);
+
   const sendDisabled = inputDisabled || !userInput.trim();
 
   return (
     <form onSubmit={handleSubmit} className={c.composerArea}>
       {showJoinModal && (
         <div className={c.modal}>
-          <div className={c.modalContent} role="dialog" aria-modal="true">
+          <div className={c.modalContent} role="dialog" aria-modal="true" ref={joinModalRef}>
             <h3>Join team chat</h3>
             <input
               type="text"

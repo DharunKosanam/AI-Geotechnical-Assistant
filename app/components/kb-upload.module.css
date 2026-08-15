@@ -130,7 +130,11 @@
 }
 .row {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
+}
+.row .field {
+  min-width: 160px;
 }
 .row .field {
   flex: 1;

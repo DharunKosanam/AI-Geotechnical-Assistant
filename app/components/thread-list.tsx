@@ -3,16 +3,40 @@ import { MoreHorizontal, Users } from "lucide-react";
 import styles from "./thread-list.module.css";
 import { API_ENDPOINTS } from "../config/api";
 
+const FOCUSABLE =
+  'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
 const Modal = ({ show, onClose, children }: { show: boolean; onClose: () => void; children: React.ReactNode }) => {
-  // Escape closes while open. Registered here so the listener lives and dies
-  // with the modal.
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  // While open: Escape closes, Tab cycles inside the dialog; on close, focus
+  // returns to whatever opened it. Registered here so the listeners live and
+  // die with the modal.
   useEffect(() => {
     if (!show) return;
+    const opener = document.activeElement as HTMLElement | null;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
+      if (e.key === "Tab") {
+        const focusables = boxRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
+        if (!focusables || focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    boxRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      opener?.focus();
+    };
   }, [show, onClose]);
 
   if (!show) return null;
@@ -24,7 +48,7 @@ const Modal = ({ show, onClose, children }: { show: boolean; onClose: () => void
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className={styles.modal} role="dialog" aria-modal="true">
+      <div className={styles.modal} role="dialog" aria-modal="true" ref={boxRef}>
         <button className={styles.closeBtn} onClick={onClose} aria-label="Close">
           &times;
         </button>

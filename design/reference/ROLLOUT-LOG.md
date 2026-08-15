@@ -409,3 +409,97 @@ deliberately shows only what the payload proves.
 in live CSS: the 5 documented strata colors and the 3 documented `#fff`
 light-artifact grounds. No `prefers-color-scheme` blocks, no `lightgrey`, no
 light-palette values anywhere live.
+
+---
+
+## Phase 6 — QA pass
+
+**Files touched:** `sidebar.module.css`, `page.tsx`, `workspace.module.css`,
+`kb-upload.module.css`, `chat.module.css`, `composer.module.css`,
+`composer.tsx`, `thread-list.tsx`, `message-list.module.css` — targeted fixes
+only.
+
+No browser automation is permitted in this project, so QA is code-level
+verification plus fixes; items needing a real browser are called out.
+
+**Responsive to 380px**
+
+- Below 720px the chat sidebar becomes a fixed overlay (same collapse state,
+  `--e3` shadow) and `page.tsx` starts it collapsed via `matchMedia`, so
+  narrow screens open onto the conversation.
+- Workspace stacks vertically below 720px (doc panel becomes a 180px row).
+- KB metadata `.row` fields wrap (min 160px each).
+- Header segments already drop labels below 720px; composer keyboard hint
+  hides below 560px; the sub-header's two disabled placeholder buttons hide
+  below 560px (title, LAB SHARED chip and ⋯ stay).
+- Horizontal overflow: all wide content (markdown tables, KaTeX display math,
+  code blocks, CPT table, KB sample block) sits in its own `overflow-x`/
+  `overflow` container; turns cap at the measure; long tokens break via
+  `overflow-wrap`. **Needs one real-browser spot check at 380px.**
+
+**Keyboard + focus**
+
+- Every interactive element is a real `<button>`/`<a>`/`<input>`; the global
+  double focus ring (`--bg` + `--accent`) applies app-wide via
+  `:focus-visible`.
+- Hover-revealed controls are also revealed by `:focus-within` (thread-row ⋯
+  menu, message actions, workspace doc-remove) and the starter chevron by
+  `:focus-visible`.
+- **Modals** (Share thread ID, Join team chat): Escape closes, backdrop
+  closes (share), Tab is trapped and cycles, focus moves in on open and
+  returns to the opener on close.
+- **Popover menus** (account, thread-row ⋯, sub-header ⋯, attach): Escape and
+  outside-click close all four; the account menu returns focus to the avatar
+  on Escape. Popovers are light-dismiss by design, not focus-trapped — Tab
+  walks on and the outside-click handler closes behind it.
+
+**Reduced motion**: global kill switch (Phase 1) zeroes every animation and
+transition; the thinking dots additionally keep their explicit static
+fallback. The two remaining keyframe users (spinners, toast entry) are
+covered by the global rule.
+
+**Contrast (WCAG, computed against the surfaces actually used)**
+
+- `--t1` 12.4–17.0:1, `--t2` 5.6–7.7:1, `--accent-2` ≥8.3:1, `--oxide`
+  ≥5.5:1, `--warn-2` ≥8.5:1, `--danger-2` ≥6.4:1, send-button text on
+  `--accent` 7.5:1 — all AA or better everywhere they appear.
+- `--t3` measures 3.47:1 on `--bg` falling to 2.83:1 on `--s3`. It is
+  spec-defined for tertiary metadata and placeholders and is used only
+  there; the one informative case on a raised surface (chip ingest stage)
+  was bumped to `--t2`. Disabled-control labels in `--t3` are
+  WCAG-exempt. If AA-for-everything is wanted later, raising `--t3` to
+  ~#7d766f clears 4.5:1 on `--bg`/`--s1`.
+
+**Layout shift**
+
+- Stream start: the thinking indicator shares the assistant turn's exact
+  structure (same rail marker, label, padding) — the first token swaps
+  content, not layout.
+- Sidebar collapse: width animates under `--ease` (and is overlay below
+  720px, zero reflow); no snap.
+- Sources panel: renders inside the scroll container below the finished
+  answer; composer geometry untouched; `scrollbar-gutter: stable` added to
+  the conversation scroller so the scrollbar's appearance no longer nudges
+  content.
+
+**Final greps**: zero hardcoded colors in live TSX; live CSS carries only the
+8 documented intentional hex values (5 strata + 3 white artifact grounds); no
+`prefers-color-scheme`, `lightgrey`, or light-palette remnants outside dead
+files; no references to removed CSS classes.
+
+**Build:** pass (final clean rebuild). **Unit tests:** 7/7 pass.
+
+**Left broken / not fully verifiable here**
+
+1. The mockup never reached this VM — fidelity to it is untested by
+   definition; the build follows the written spec.
+2. `ui=dark` on the diagrams.net embed is unverified in a browser (save
+   round-trip is skin-independent, but check once).
+3. KaTeX got only baseline dark treatment (inherits `currentColor`, display
+   math scrolls); exotic constructs (`\colorbox`) may need targeted overrides
+   once seen in real content.
+4. Dead files (`file-viewer.*`, `warnings.*`) and the now-unmounted
+   `sidebar-account.*` remain light-themed on purpose — delete branch.
+5. A frontend rebuild + restart on the test instance is needed to see any of
+   this: `stop → rm -rf .next → npm run build → start` (build already run
+   here; the running instance still serves the old bundle until restarted).

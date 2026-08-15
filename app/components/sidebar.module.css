@@ -15,6 +15,23 @@
   width: 0;
 }
 
+/* Narrow screens: the sidebar overlays the chat instead of squeezing it.
+   Same collapse state — page.tsx starts it collapsed below this width. */
+@media (max-width: 720px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 48px;
+    bottom: 0;
+    z-index: 90;
+    box-shadow: var(--e3);
+  }
+
+  .sidebar[data-collapsed] {
+    box-shadow: none;
+  }
+}
+
 .inner {
   display: flex;
   flex-direction: column;

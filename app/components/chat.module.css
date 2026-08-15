@@ -141,6 +141,14 @@
   background: var(--s3);
 }
 
+/* Narrow screens: keep title + LAB SHARED chip + ⋯; the two disabled
+   placeholder buttons yield the space. */
+@media (max-width: 560px) {
+  .threadHeaderBtn:disabled {
+    display: none;
+  }
+}
+
 /* Full-screen draw.io editor modal (DIAGRAM_EDITOR_ENABLED). Above the join
    dialog's z-index 1000 so it always layers over it. */
 .diagramModalOverlay {

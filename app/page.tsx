@@ -12,6 +12,14 @@ const FileSearchPage = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const toggleSidebar = () => setSidebarCollapsed((c) => !c);
 
+  // Narrow screens start collapsed — below 720px the sidebar overlays the
+  // conversation (sidebar.module.css), so defaulting it open would cover it.
+  React.useEffect(() => {
+    if (window.matchMedia("(max-width: 720px)").matches) {
+      setSidebarCollapsed(true);
+    }
+  }, []);
+
   return (
     <AuthProvider>
       <AuthGuard>

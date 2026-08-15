@@ -5,6 +5,7 @@
   flex-grow: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable; /* no sideways jump when the scrollbar appears */
   padding: 8px 16px;
   display: flex;
   flex-direction: column;

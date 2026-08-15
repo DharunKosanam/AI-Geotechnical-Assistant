@@ -257,11 +257,12 @@
   white-space: nowrap;
 }
 
-/* Small ingest-stage line under the filename while a chip is uploading. */
+/* Small ingest-stage line under the filename while a chip is uploading.
+   --t2, not --t3: on the --s3 chip --t3 lands under 3:1 contrast. */
 .chipStage {
   font-family: var(--font-mono);
   font-size: 10.5px;
-  color: var(--t3);
+  color: var(--t2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

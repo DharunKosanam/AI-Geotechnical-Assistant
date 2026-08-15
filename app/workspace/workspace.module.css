@@ -18,6 +18,19 @@
   overflow: hidden;
 }
 
+/* Narrow screens: stack the panels so neither is squeezed unusable. */
+@media (max-width: 720px) {
+  .workspace {
+    flex-direction: column;
+  }
+
+  .docPanel {
+    width: 100%;
+    height: 180px;
+    flex-shrink: 0;
+  }
+}
+
 /* ============================ Document panel ============================ */
 .docPanel {
   width: 260px;

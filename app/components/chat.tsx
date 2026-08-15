@@ -80,53 +80,11 @@ const httpUploadError = (status: number, filename: string): string => {
   return `Upload was rejected (error ${status}).`;
 };
 
-// Renders the trailing "**Sources:**" markdown block appended to an assistant
-// answer. Shared by the streaming and JSON paths so a message looks identical
-// however it arrived — sources are always appended at the END, because the
-// backend can only finalise the list once the answer is complete (the refusal
-// guard can clear it and citation narrowing trims it to what was actually cited).
-// A citation backed (fully or partly) by AI-vision transcription of scanned
-// pages must say so: that text is model-generated interpretation, never
-// verbatim document content. Empty for ordinary sources.
-const visionMarker = (source: any): string => {
-  if (typeof source !== "object" || source === null || !source.visionDerived) return "";
-  const pages: any[] = Array.isArray(source.visionPages) ? source.visionPages : [];
-  if (pages.length === 0) {
-    // No page numbers = a directly uploaded image: the entire cited content
-    // is a model-generated description, with no verbatim layer at all.
-    return " _(AI vision description of this image - model-generated, not document text)_";
-  }
-  return ` _(AI vision transcription of page${pages.length > 1 ? "s" : ""} ${pages.join(", ")} - not verbatim text)_`;
-};
-
-const formatSourcesBlock = (sources: any[]): string => {
-  if (!sources || sources.length === 0) return "";
-  let block = "\n\n**Sources:**\n";
-  sources.forEach((source: any, index: number) => {
-    if (typeof source === "object" && source !== null && source.title && source.url) {
-      block += `${index + 1}. [${source.title}](${source.url})${visionMarker(source)}\n`;
-    } else if (typeof source === "object" && source !== null && source.title) {
-      // No URL by design: thread/user uploads are the user's own files, so
-      // their citations are plain references — no external link to leak the
-      // title to.
-      block += `${index + 1}. ${source.title}${visionMarker(source)}\n`;
-    } else if (typeof source === "string") {
-      try {
-        const parsed = JSON.parse(source);
-        if (parsed.title && parsed.url) {
-          block += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-        } else {
-          block += `${index + 1}. ${source}\n`;
-        }
-      } catch {
-        block += `${index + 1}. ${source}\n`;
-      }
-    } else {
-      block += `${index + 1}. ${String(source)}\n`;
-    }
-  });
-  return block;
-};
+// Sources are no longer flattened into the message text: each assistant
+// message carries the retrieval payload's sources array as structured data,
+// and message-list.tsx renders it as the "Grounded in" panel. The panel is
+// assembled deterministically from that payload — never from model output —
+// and vision-derived citations keep their "not verbatim" disclaimer there.
 
 const getExt = (filename: string): string => {
   const i = filename.lastIndexOf(".");
@@ -590,16 +548,19 @@ const Chat = ({
   useEffect(() => {
     if (messageData?.messages && isGroupConversation && threadId) {
       const parsed = messageData.messages.map((msg: any) => {
-        let text = msg.content?.[0]?.text?.value || msg.content || '';
+        const text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
-        if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          // Shared renderer: handles link-less (private upload) citations too.
-          text += formatSourcesBlock(sources);
-        }
         return {
           role: msg.role,
           text,
-          annotations: msg.content?.[0]?.text?.annotations || []
+          annotations: msg.content?.[0]?.text?.annotations || [],
+          // Legacy rows may already carry the old "**Sources:**" block inside
+          // the text — attach the structured panel only when they don't, so
+          // sources never render twice.
+          sources:
+            msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')
+              ? sources
+              : undefined,
         };
       });
       if (parsed.length > lastMessageCountRef.current) {
@@ -915,10 +876,10 @@ const Chat = ({
             appendToLastMessage(piece);
           }
         } else if (name === "done") {
-          const block = formatSourcesBlock(payload.sources || []);
-          if (block) {
-            if (started) appendToLastMessage(block);
-            else appendMessage("assistant", block.trimStart());
+          const sources = payload.sources || [];
+          if (sources.length > 0) {
+            if (started) attachSourcesToLastMessage(sources);
+            else appendMessage("assistant", "", sources);
           }
         } else if (name === "error") {
           const detail = payload.detail || "The assistant failed to answer.";
@@ -1112,10 +1073,9 @@ const Chat = ({
           }
         } else if (name === "done") {
           doneSources = payload.sources || [];
-          const block = formatSourcesBlock(payload.sources || []);
-          if (block) {
-            if (started) appendToLastMessage(block);
-            else appendMessage("assistant", block.trimStart());
+          if (doneSources.length > 0) {
+            if (started) attachSourcesToLastMessage(doneSources);
+            else appendMessage("assistant", "", doneSources);
           }
         } else if (name === "error") {
           const detail = payload.detail || "The document generation failed.";
@@ -1248,13 +1208,10 @@ const Chat = ({
       const answer = data.answer || "";
       const sources = data.sources || [];
 
-      // Build the complete response with clickable source links
-      const fullResponse = answer + formatSourcesBlock(sources);
-
       console.log("✅ Answer extracted:", answer.substring(0, 100) + "...");
       console.log("📚 Sources:", sources);
 
-      appendMessage("assistant", fullResponse);
+      appendMessage("assistant", answer, sources);
       setInputDisabled(false);
 
       // Title generation is owned by handleSubmit (the only caller), which knows
@@ -1457,6 +1414,32 @@ const Chat = ({
     }
   };
 
+  // Retry: re-ask the last user question through the exact same send path a
+  // typed message takes. The repeated user turn is hidden by the consecutive-
+  // duplicate dedup, so on screen this reads as "regenerate the answer".
+  const retryLastTurn = async () => {
+    if (inputDisabled || isStreaming) return;
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const activeThreadId = threadIdRef.current;
+    if (!lastUser || !activeThreadId) return;
+    setInputDisabled(true);
+    setAwaitingSince(Date.now());
+    shouldForceScrollRef.current = true;
+    setMessages((prevMessages) => {
+      const newMessages: MessageProps[] = [
+        ...prevMessages,
+        { role: "user" as const, text: lastUser.text },
+      ];
+      lastMessageCountRef.current = newMessages.length;
+      return newMessages;
+    });
+    try {
+      await sendMessage(lastUser.text, activeThreadId);
+    } finally {
+      setAwaitingSince(null);
+    }
+  };
+
   /* Stream Event Handlers */
 
   // textCreated - create new assistant message
@@ -1592,11 +1575,22 @@ const Chat = ({
     });
   };
 
-  const appendMessage = (role: "user" | "assistant" | "code", text: string) => {
+  const appendMessage = (role: "user" | "assistant" | "code", text: string, sources?: any[]) => {
     setMessages((prevMessages) => {
-      const newMessages = [...prevMessages, { role, text }];
+      const newMessages = [...prevMessages, { role, text, sources }];
       lastMessageCountRef.current = newMessages.length;
       return newMessages;
+    });
+  };
+
+  // Attach the retrieval payload's sources to the message the panel belongs
+  // to (the streamed answer that just finished).
+  const attachSourcesToLastMessage = (sources: any[]) => {
+    if (!sources || sources.length === 0) return;
+    setMessages((prevMessages) => {
+      if (prevMessages.length === 0) return prevMessages;
+      const last = prevMessages[prevMessages.length - 1];
+      return [...prevMessages.slice(0, -1), { ...last, sources }];
     });
   };
 
@@ -1675,16 +1669,19 @@ const Chat = ({
       
       // Parse messages - handle both old format (nested content) and new format (direct content)
       const newMessages = (data.messages || []).map((msg: any) => {
-        let text = msg.content?.[0]?.text?.value || msg.content || '';
+        const text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
-        if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          // Shared renderer: handles link-less (private upload) citations too.
-          text += formatSourcesBlock(sources);
-        }
         return {
           role: msg.role,
           text,
-          annotations: msg.content?.[0]?.text?.annotations || []
+          annotations: msg.content?.[0]?.text?.annotations || [],
+          // Legacy rows may already carry the old "**Sources:**" block inside
+          // the text — attach the structured panel only when they don't, so
+          // sources never render twice.
+          sources:
+            msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')
+              ? sources
+              : undefined,
         };
       });
 
@@ -2352,6 +2349,8 @@ const Chat = ({
         messages={deduplicatedMessages}
         showThinking={showThinking}
         awaitingSince={awaitingSince}
+        canRetry={!inputDisabled && !isStreaming && !isGroupConversation}
+        onRetry={retryLastTurn}
       />
       <form
         onSubmit={handleSubmit}

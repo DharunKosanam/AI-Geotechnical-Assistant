@@ -1,9 +1,15 @@
 "use client";
 
 /**
- * Conversation view. Extracted verbatim from chat.tsx (message components +
- * the .messages region) so the dark-redesign restyle diffs cleanly against a
- * pure move; all conversation state stays owned by chat.tsx.
+ * Conversation view (dark redesign). Turns render as documents, not bubbles:
+ * a mono role label, then the content, on a vertical rail — a hairline tick
+ * per user turn, an accent dot per assistant turn.
+ *
+ * The "Grounded in" sources panel is assembled deterministically from the
+ * retrieval payload attached to the message — never from model output. Fields
+ * the payload doesn't carry (relevance score, per-chunk page numbers, router
+ * mode) are omitted, not guessed. Vision-derived citations keep their
+ * "not verbatim" disclaimer.
  */
 import React, { useState, useEffect } from "react";
 import Markdown from "react-markdown";
@@ -11,22 +17,23 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import styles from "./chat.module.css";
+import { Check, Copy, RotateCcw, ThumbsUp } from "lucide-react";
+import s from "./message-list.module.css";
 
 export type MessageProps = {
   role: "user" | "assistant" | "code";
   text: string;
   annotations?: any[];
+  /* Retrieval payload for this answer, exactly as the backend sent it. */
+  sources?: any[];
 };
 
 const UserMessage = ({ text }: { text: string }) => {
   return (
-    <div className={styles.messageRow} style={{ justifyContent: 'flex-end' }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>You</div>
-        <div className={styles.userMessage}>{text}</div>
-      </div>
-    </div>
+    <article className={`${s.turn} ${s.userTurn}`}>
+      <header className={s.turnLabel}>You</header>
+      <div className={s.userQuestion}>{text}</div>
+    </article>
   );
 };
 
@@ -38,10 +45,12 @@ const THINKING_VERY_SLOW_MS = 45_000;
 
 /**
  * Pending-response indicator — the assistant's turn made visible before any of
- * its text exists. Deliberately mirrors AssistantMessage's row/label/bubble so
- * it occupies exactly the spot the answer will appear in, and is simply
- * replaced by it. Once streaming lands this is the "waiting for first token"
- * state; the streamed text takes over from here.
+ * its text exists. Mirrors the assistant turn's structure (same rail marker,
+ * same label) so the streamed answer replaces it without layout shift.
+ *
+ * The status line is a single generic line by design: the chat stream exposes
+ * no retrieving-vs-generating stages, and inventing them would be fiction.
+ * The escalation below is real (client-side elapsed time).
  */
 export const ThinkingIndicator = ({ startedAt }: { startedAt: number }) => {
   // Escalating reassurance, driven by two timers rather than a per-second tick
@@ -66,35 +75,128 @@ export const ThinkingIndicator = ({ startedAt }: { startedAt: number }) => {
         : "Thinking...";
 
   return (
-    <div className={styles.messageRow} style={{ justifyContent: "flex-start" }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>AI Assistant</div>
-        {/* role=status + aria-live announces the wait to screen readers, which
-            would otherwise get the same silence as a blank screen. */}
-        <div
-          className={`${styles.assistantMessage} ${styles.thinkingBubble}`}
-          role="status"
-          aria-live="polite"
-        >
-          <span className={styles.thinkingDots} aria-hidden="true">
-            <span className={styles.thinkingDot} />
-            <span className={styles.thinkingDot} />
-            <span className={styles.thinkingDot} />
-          </span>
-          <span className={styles.thinkingHint}>{hint}</span>
-        </div>
+    <div className={`${s.turn} ${s.assistantTurn}`}>
+      <header className={`${s.turnLabel} ${s.assistantLabel}`}>Assistant</header>
+      {/* role=status + aria-live announces the wait to screen readers, which
+          would otherwise get the same silence as a blank screen. */}
+      <div className={s.thinkingLine} role="status" aria-live="polite">
+        <span className={s.thinkingDots} aria-hidden="true">
+          <span className={s.thinkingDot} />
+          <span className={s.thinkingDot} />
+          <span className={s.thinkingDot} />
+        </span>
+        <span className={s.thinkingHint}>{hint}</span>
       </div>
     </div>
   );
 };
 
-const AssistantMessage = ({ text, annotations }: { text: string; annotations?: any[] }) => {
-  // Replace citation annotations like 【6:0†source】 with actual filenames
+/* One normalized row for the sources panel. Mirrors the tolerance of the old
+   markdown renderer: source entries may be objects, JSON strings, or plain
+   strings depending on age and path. */
+type NormalizedSource = {
+  title: string;
+  url?: string;
+  meta: string[];
+  vision?: { pages: number[] };
+};
+
+const normalizeSource = (source: any): NormalizedSource | null => {
+  if (typeof source === "string") {
+    try {
+      const parsed = JSON.parse(source);
+      if (parsed && parsed.title) {
+        return { title: parsed.title, url: parsed.url || undefined, meta: [] };
+      }
+    } catch {
+      /* plain string source */
+    }
+    return { title: source, meta: [] };
+  }
+  if (typeof source === "object" && source !== null && source.title) {
+    const meta: string[] = [];
+    if (source.project) meta.push(String(source.project));
+    if (source.version != null) meta.push(`v${source.version}`);
+    if (source.uploader) meta.push(String(source.uploader));
+    return {
+      title: source.canonicalTitle || source.title,
+      // No URL by design for thread/user uploads: they are the user's own
+      // (possibly private) files, so no external link to leak the title to.
+      url: source.url || undefined,
+      meta,
+      vision: source.visionDerived
+        ? { pages: Array.isArray(source.visionPages) ? source.visionPages : [] }
+        : undefined,
+    };
+  }
+  if (source == null) return null;
+  return { title: String(source), meta: [] };
+};
+
+const SourcesPanel = ({ sources }: { sources: any[] }) => {
+  const rows = sources.map(normalizeSource).filter(Boolean) as NormalizedSource[];
+  if (rows.length === 0) return null;
+  return (
+    <section className={s.sourcesPanel} aria-label="Sources this answer is grounded in">
+      <div className={s.sourcesHeader}>
+        <span>Grounded in</span>
+        <span className={s.sourcesCount}>
+          {rows.length} {rows.length === 1 ? "source" : "sources"}
+        </span>
+      </div>
+      {rows.map((row, i) => (
+        <div className={s.sourceRow} key={i}>
+          <span className={s.sourceIndex}>{String(i + 1).padStart(2, "0")}</span>
+          <span className={s.sourceTitle}>
+            {row.url ? (
+              <a href={row.url} target="_blank" rel="noopener noreferrer">
+                {row.title}
+              </a>
+            ) : (
+              row.title
+            )}
+            {row.meta.length > 0 && (
+              <span className={s.sourceMeta}> {row.meta.join(" · ")}</span>
+            )}
+          </span>
+          {row.vision && (
+            <span className={s.sourceVision}>
+              {row.vision.pages.length > 0
+                ? `AI vision · p. ${row.vision.pages.join(", ")} — not verbatim`
+                : "AI vision description — not verbatim"}
+            </span>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+};
+
+type AssistantMessageProps = {
+  text: string;
+  annotations?: any[];
+  sources?: any[];
+  isLast: boolean;
+  canRetry: boolean;
+  onRetry: () => void;
+};
+
+const AssistantMessage = ({
+  text,
+  annotations,
+  sources,
+  isLast,
+  canRetry,
+  onRetry,
+}: AssistantMessageProps) => {
+  const [copied, setCopied] = useState(false);
+
+  // Replace legacy citation annotations like 【6:0†source】 with filenames.
+  // (Only the OpenAI-assistants path produces these; the SSE path carries no
+  // span-level citations, which is why there are no inline chips to render.)
   const replaceCitationsWithFilenames = (text: string, annotations?: any[]) => {
-    // Regex to match citation patterns: 【number:number†source】
     const citationRegex = /【(\d+):(\d+)†([^】]+)】/g;
 
-    // Create a map of citation text to filename
     const citationMap = new Map<string, string>();
     if (annotations && Array.isArray(annotations)) {
       annotations.forEach((annotation: any) => {
@@ -105,224 +207,93 @@ const AssistantMessage = ({ text, annotations }: { text: string; annotations?: a
       });
     }
 
-    // Replace all citations with filename-based references
-    const cleanedText = text.replace(citationRegex, (match) => {
-      // Try to find the filename from annotations
+    return text.replace(citationRegex, (match) => {
       const filename = citationMap.get(match);
-
       if (filename) {
-        // Return styled citation with filename
         return ` _(Source: ${filename})_ `;
-      } else {
-        // Fallback if filename not found
-        return ` _(Source: Referenced File)_ `;
       }
+      return ` _(Source: Referenced File)_ `;
     });
-
-    return cleanedText;
   };
 
   const processedText = replaceCitationsWithFilenames(text, annotations);
 
+  const handleCopy = () => {
+    navigator.clipboard
+      ?.writeText(text)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
+  };
+
   return (
-    <div className={styles.messageRow} style={{ justifyContent: 'flex-start' }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>AI Assistant</div>
-        <div className={styles.assistantMessage}>
-          <Markdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex]}
-            components={{
-              // Style emphasis/italic elements (our citations) with smaller gray text
-              em: ({node, ...props}) => (
-                <em style={{
-                  color: '#6b7280',
-                  fontSize: '0.875em',
-                  fontStyle: 'italic',
-                  fontWeight: '500'
-                }} {...props} />
-              ),
-              // Style paragraphs with spacing
-              p: ({node, ...props}) => (
-                <p style={{
-                  marginTop: '0.75em',
-                  marginBottom: '0.75em',
-                  lineHeight: '1.6'
-                }} {...props} />
-              ),
-              // Style headings with proper spacing and sizing
-              h1: ({node, ...props}) => (
-                <h1 style={{
-                  fontSize: '1.5em',
-                  fontWeight: 'bold',
-                  marginTop: '1em',
-                  marginBottom: '0.5em'
-                }} {...props} />
-              ),
-              h2: ({node, ...props}) => (
-                <h2 style={{
-                  fontSize: '1.3em',
-                  fontWeight: 'bold',
-                  marginTop: '1em',
-                  marginBottom: '0.5em'
-                }} {...props} />
-              ),
-              h3: ({node, ...props}) => (
-                <h3 style={{
-                  fontSize: '1.15em',
-                  fontWeight: 'bold',
-                  marginTop: '1em',
-                  marginBottom: '0.5em'
-                }} {...props} />
-              ),
-              h4: ({node, ...props}) => (
-                <h4 style={{
-                  fontSize: '1.05em',
-                  fontWeight: 'bold',
-                  marginTop: '0.75em',
-                  marginBottom: '0.5em'
-                }} {...props} />
-              ),
-              // Style code blocks nicely
-              code: ({node, inline, ...props}: any) =>
-                inline ? (
-                  <code style={{
-                    backgroundColor: '#f3f4f6',
-                    padding: '0.2em 0.4em',
-                    borderRadius: '3px',
-                    fontSize: '0.875em',
-                    fontFamily: 'monospace'
-                  }} {...props} />
-                ) : (
-                  <code style={{
-                    display: 'block',
-                    backgroundColor: '#1e1e1e',
-                    color: '#d4d4d4',
-                    padding: '1em',
-                    borderRadius: '6px',
-                    overflowX: 'auto',
-                    fontSize: '0.875em',
-                    fontFamily: 'monospace',
-                    marginTop: '0.75em',
-                    marginBottom: '0.75em'
-                  }} {...props} />
-                ),
-              // Style lists with better spacing
-              ul: ({node, ...props}) => (
-                <ul style={{
-                  marginLeft: '1.5em',
-                  marginTop: '0.75em',
-                  marginBottom: '0.75em',
-                  paddingLeft: '0.5em'
-                }} {...props} />
-              ),
-              ol: ({node, ...props}) => (
-                <ol style={{
-                  marginLeft: '1.5em',
-                  marginTop: '0.75em',
-                  marginBottom: '0.75em',
-                  paddingLeft: '0.5em'
-                }} {...props} />
-              ),
-              li: ({node, ...props}) => (
-                <li style={{
-                  marginTop: '0.25em',
-                  marginBottom: '0.25em',
-                  lineHeight: '1.6'
-                }} {...props} />
-              ),
-              // Style strong/bold text
-              strong: ({node, ...props}) => (
-                <strong style={{ fontWeight: '600' }} {...props} />
-              ),
-              // Style tables
-              table: ({node, ...props}) => (
-                <div style={{ overflowX: 'auto', marginTop: '1em', marginBottom: '1em' }}>
-                  <table style={{
-                    borderCollapse: 'collapse',
-                    width: '100%',
-                    border: '1px solid #e5e7eb'
-                  }} {...props} />
-                </div>
-              ),
-              th: ({node, ...props}) => (
-                <th style={{
-                  border: '1px solid #e5e7eb',
-                  padding: '0.5em',
-                  backgroundColor: '#f9fafb',
-                  fontWeight: 'bold'
-                }} {...props} />
-              ),
-              td: ({node, ...props}) => (
-                <td style={{
-                  border: '1px solid #e5e7eb',
-                  padding: '0.5em'
-                }} {...props} />
-              ),
-              // Style blockquotes
-              blockquote: ({node, ...props}) => (
-                <blockquote style={{
-                  borderLeft: '4px solid #e5e7eb',
-                  paddingLeft: '1em',
-                  marginLeft: '0',
-                  marginTop: '0.75em',
-                  marginBottom: '0.75em',
-                  color: '#6b7280',
-                  fontStyle: 'italic'
-                }} {...props} />
-              ),
-              // Open all links in a new tab
-              a: ({node, ...props}) => (
-                <a
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    color: '#2563eb',
-                    textDecoration: 'underline',
-                    cursor: 'pointer',
-                  }}
-                  {...props}
-                />
-              )
-            }}
-          >
-            {processedText}
-          </Markdown>
-        </div>
+    <article className={`${s.turn} ${s.assistantTurn}`}>
+      <header className={`${s.turnLabel} ${s.assistantLabel}`}>Assistant</header>
+      <div className={s.assistantBody}>
+        <Markdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex]}
+          components={{
+            // Element styling lives in message-list.module.css (scoped under
+            // .assistantBody); only behavior overrides remain here.
+            table: ({ node, ...props }) => (
+              <div className={s.tableWrap}>
+                <table {...props} />
+              </div>
+            ),
+            a: ({ node, ...props }) => (
+              <a target="_blank" rel="noopener noreferrer" {...props} />
+            ),
+          }}
+        >
+          {processedText}
+        </Markdown>
       </div>
-    </div>
+      {sources && sources.length > 0 && <SourcesPanel sources={sources} />}
+      <div className={s.turnActions}>
+        <button type="button" className={s.actionBtn} onClick={handleCopy}>
+          {copied ? <Check size={13} strokeWidth={1.5} /> : <Copy size={13} strokeWidth={1.5} />}
+          {copied ? "Copied" : "Copy"}
+        </button>
+        {isLast && (
+          <button
+            type="button"
+            className={s.actionBtn}
+            onClick={onRetry}
+            disabled={!canRetry}
+            title={canRetry ? "Ask this question again" : "Retry is unavailable right now"}
+          >
+            <RotateCcw size={13} strokeWidth={1.5} />
+            Retry
+          </button>
+        )}
+        <span title="Feedback is not available yet">
+          <button type="button" className={s.actionBtn} disabled>
+            <ThumbsUp size={13} strokeWidth={1.5} />
+            Helpful
+          </button>
+        </span>
+      </div>
+    </article>
   );
 };
 
 const CodeMessage = ({ text }: { text: string }) => {
   return (
-    <div className={styles.messageRow} style={{ justifyContent: 'flex-start' }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>Code Output</div>
-        <div className={styles.codeMessage}>
-          {text.split("\n").map((line, index) => (
-            <div key={index}>
-              <span>{`${index + 1}. `}</span>
-              {line}
-            </div>
-          ))}
-        </div>
+    <article className={`${s.turn} ${s.assistantTurn}`}>
+      <header className={`${s.turnLabel} ${s.assistantLabel}`}>Code output</header>
+      <div className={s.codeBlock}>
+        {text.split("\n").map((line, index) => (
+          <div key={index} className={s.codeLine}>
+            <span className={s.codeLineNo}>{index + 1}</span>
+            {line}
+          </div>
+        ))}
       </div>
-    </div>
+    </article>
   );
-};
-
-const Message = ({ role, text, annotations }: MessageProps) => {
-  switch (role) {
-    case "user":
-      return <UserMessage text={text} />;
-    case "assistant":
-      return <AssistantMessage text={text} annotations={annotations} />;
-    case "code":
-      return <CodeMessage text={text} />;
-    default:
-      return null;
-  }
 };
 
 type MessageListProps = {
@@ -333,6 +304,8 @@ type MessageListProps = {
   messages: MessageProps[];
   showThinking: boolean;
   awaitingSince: number | null;
+  canRetry: boolean;
+  onRetry: () => void;
 };
 
 const MessageList = ({
@@ -343,16 +316,44 @@ const MessageList = ({
   messages,
   showThinking,
   awaitingSince,
+  canRetry,
+  onRetry,
 }: MessageListProps) => {
+  const lastAssistantIndex = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") return i;
+    }
+    return -1;
+  })();
+
   return (
-    <div className={styles.messages} ref={containerRef}>
+    <div className={s.messages} ref={containerRef}>
       {showWelcome ? (
         welcome
       ) : (
         <>
-          {messages.map((msg, index) => (
-            <Message key={`${msg.role}-${index}`} role={msg.role} text={msg.text} annotations={msg.annotations} />
-          ))}
+          {messages.map((msg, index) => {
+            switch (msg.role) {
+              case "user":
+                return <UserMessage key={`${msg.role}-${index}`} text={msg.text} />;
+              case "assistant":
+                return (
+                  <AssistantMessage
+                    key={`${msg.role}-${index}`}
+                    text={msg.text}
+                    annotations={msg.annotations}
+                    sources={msg.sources}
+                    isLast={index === lastAssistantIndex && index === messages.length - 1}
+                    canRetry={canRetry}
+                    onRetry={onRetry}
+                  />
+                );
+              case "code":
+                return <CodeMessage key={`${msg.role}-${index}`} text={msg.text} />;
+              default:
+                return null;
+            }
+          })}
           {showThinking && <ThinkingIndicator startedAt={awaitingSince!} />}
           <div ref={endRef} />
         </>

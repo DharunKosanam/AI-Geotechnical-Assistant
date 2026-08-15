@@ -150,12 +150,9 @@ ol {
   padding-left: 20px;
 }
 
+/* Baseline only — components that show code style their own <pre>. */
 pre {
-  margin: -4px -16px;
-  padding: 20px;
   white-space: pre-wrap;
-  background-color: var(--s1);
-  color: var(--t1);
   font-family: var(--font-mono);
 }
 

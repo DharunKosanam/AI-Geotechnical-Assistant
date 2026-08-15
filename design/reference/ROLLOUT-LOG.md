@@ -146,3 +146,111 @@ byte-identical), `Header.tsx` + `header.module.css` (rewritten), new
 **Hex grep on touched files:** sidebar/thread-list/header/account-menu/page
 modules: zero hardcoded colors (all tokens). `chat.module.css` still has 47
 hex values — all in conversation/composer classes owned by Phases 3–4.
+
+---
+
+## Phase 3 — conversation view
+
+**Files touched:** `app/components/message-list.tsx` (extracted verbatim from
+chat.tsx in its own commit, then rewritten), new `message-list.module.css`,
+`chat.tsx` (sources routing + retry), `chat.module.css` (conversation classes
+removed), `globals.css` (global `pre` reduced to a baseline).
+
+**What changed**
+
+- **Turns as documents**: mono uppercase role label (user in `--t3`,
+  Assistant in `--accent-2`), user question at 15px/500, assistant prose at
+  14.5px/1.72, measure capped at 720px + 28px rail gutter. The old
+  bubble/row/label classes (including the four class references that rendered
+  `class="undefined"` since forever) are gone.
+- **Vertical rail**: per-turn 1px `--line` segments join into a continuous
+  rail; a 9px hairline tick marks each user turn, a 5px `--accent` dot each
+  assistant turn.
+- **Markdown**: all 25 inline `style={{}}` overrides deleted; element styling
+  now lives in CSS scoped under `.assistantBody` (list markers `--t3`, strong
+  `--t1`, links `--accent-2`, blockquote hairline, tables with hairline rules
+  in an `overflow-x` wrap). This also fixes the react-markdown v9 `inline`
+  regression: inline code (`--s3` chip) and block code (`<pre>` on `--s1`,
+  mono 12.5px) are now styled by element, not by the dead `inline` prop.
+  KaTeX display math gets its own overflow scroll. The global
+  `pre { background:#e4e4e4; margin:-4px -16px }` bleed is gone.
+- **Sources panel per answer ("Grounded in")**: sources are no longer
+  flattened into the message text as a `**Sources:**` markdown block —
+  `formatSourcesBlock`/`visionMarker` are deleted and each assistant message
+  carries the retrieval payload's `sources` array as structured data
+  (`MessageProps.sources`). All five attachment points converted: chat-SSE
+  `done`, formats-SSE `done`, JSON fallback, history load, group-poll load.
+  The panel renders index (mono, `--oxide`), title (Scholar link only when
+  the payload has a URL — user uploads stay link-less by design), provenance
+  meta (project · version · uploader when present), and the vision
+  disclaimer (`AI vision · p. N — not verbatim`, in `--warn-2`) exactly when
+  `visionDerived` is set. History rows whose stored text already contains the
+  legacy `**Sources:**` block keep it and skip the panel, so nothing renders
+  twice.
+- **Streaming state**: three accent dots + a single generic status line with
+  the existing (real, client-side) time escalation. No fake retrieving/
+  generating stages — the wire has none. The indicator shares the assistant
+  turn's structure so the first token replaces it without layout shift.
+- **Message actions on hover**: Copy (real, copies the raw markdown), Retry
+  (real — re-sends the last user question through the same send path; the
+  duplicate user turn is hidden by the existing consecutive-dedup; the server
+  thread records it as a re-ask, which is exactly what it is), Helpful
+  (disabled + tooltip — no feedback endpoint exists).
+
+**Omitted (payload has no such data) — decisions pre-answered**
+
+- **Relevance bar + score column**: dropped per decision (unbounded
+  cross-encoder logits can't honestly render as a 0–1 bar).
+- **Inline `.ref` citation chips**: the SSE path carries no span-level
+  citation data, so there is nothing honest to anchor inline chips to. The
+  per-answer panel is the citation surface. The legacy OpenAI-annotation path
+  (`【n:m†source】`) still renders as `(Source: filename)` italic text.
+- **Per-source page numbers (non-vision)**: page indices ARE stored at
+  ingestion — `python_backend/app/services/file_processing.py` chunk metadata
+  carries `page_number` ("1-indexed logical page (sheet, slide, or PDF
+  page)"). They are dropped when `python_backend/app/routers/chat.py`
+  (~line 766) builds each `source_entry`. To forward them, aggregate the cited
+  chunks' `chunk["metadata"]["page_number"]` values per source into e.g.
+  `source_entry["pages"] = sorted({...})`; the frontend normalizer in
+  `message-list.tsx` is the single place to then render them. Not added —
+  backend change.
+- **Router mode chip**: omitted. Exact backend diff needed to land it later,
+  in `python_backend/app/routers/chat.py` (the streaming generator's `done`
+  event, ~line 1131):
+
+  ```diff
+           yield _sse(
+               "done",
+               {
+                   "sources": result.sources,
+                   "no_high_confidence_sources": result.no_high_confidence_sources,
+  +                # Router verdict for the UI chip: KB_QUERY | GENERAL |
+  +                # MIXED | THREAD_DOC (None when ROUTER_ENABLED is off).
+  +                "route": getattr(result, "route", None),
+               },
+           )
+  ```
+
+  (plus threading `route` onto the turn result object where the router's
+  verdict is currently consumed, and the JSON `/api/chat` response body for
+  the non-streaming path). Frontend side once it exists: read
+  `payload.route` in the `done` handler in `chat.tsx`, store it on the
+  message, render as spaced uppercase mono in the panel header.
+- **User-turn timestamps** (mockup shows them): messages in frontend state
+  carry no timestamps on any path (SSE tokens, history load), and stamping
+  them client-side at render would show load time, not send time. Omitted.
+
+**Judgment calls**
+
+- Retry renders only on the **last** message when it's an assistant turn, and
+  is disabled in group conversations (a shared thread re-ask from the retry
+  button would surprise the other participants mid-poll).
+- Exported diagram PNGs (white canvas) render as framed figures with a white
+  ground (`background:#fff` on `.assistantBody img` — the one intentional hex
+  in the phase, a light artifact on dark ground, not UI chrome).
+
+**Build:** pass. **Unit tests:** 7/7 pass.
+
+**Hex grep on touched files:** `message-list.module.css` — one intentional
+`#fff` (see above). `message-list.tsx` — none. `chat.module.css` — 14 hex
+remain, all in composer/chip/format classes owned by Phase 4.

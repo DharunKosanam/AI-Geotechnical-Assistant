@@ -1,0 +1,434 @@
+/* Conversation view — turns as documents on a vertical rail.
+   Measure capped at 720px; body 14.5px / 1.72. */
+
+.messages {
+  flex-grow: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 16px;
+  display: flex;
+  flex-direction: column;
+  order: 2;
+  overflow-anchor: none;
+}
+
+/* Pin the conversation to the bottom. .messages flex-grows to fill the height,
+   so a short conversation would otherwise float at the top with a large empty
+   gap below it. margin-top:auto on the first message absorbs that free space
+   (last message sits just above the input) and collapses to 0 once the content
+   overflows — so scrolling still reaches the top. */
+.messages > *:first-child {
+  margin-top: auto;
+}
+
+/* One turn. The rail is drawn per-turn (segments join into a continuous
+   line); the marker sits on top of it. */
+.turn {
+  position: relative;
+  width: 100%;
+  max-width: 748px; /* 720px measure + the 28px rail gutter */
+  margin: 0 auto;
+  padding: 14px 16px 14px 28px;
+}
+
+.turn::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+
+/* User turn marker: a hairline tick crossing the rail. */
+.userTurn::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 21px;
+  width: 9px;
+  height: 1px;
+  background: var(--line-2);
+}
+
+/* Assistant turn marker: an accent dot on the rail. */
+.assistantTurn::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 19px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.turnLabel {
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
+}
+
+.assistantLabel {
+  color: var(--accent-2);
+}
+
+.userQuestion {
+  color: var(--t1);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* ---- Assistant prose ---- */
+
+.assistantBody {
+  color: var(--t1);
+  font-size: 14.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+}
+
+.assistantBody > :first-child {
+  margin-top: 0;
+}
+
+.assistantBody > :last-child {
+  margin-bottom: 0;
+}
+
+.assistantBody p {
+  margin: 0.75em 0;
+}
+
+.assistantBody h1,
+.assistantBody h2,
+.assistantBody h3,
+.assistantBody h4 {
+  font-family: var(--font-cond);
+  letter-spacing: -0.02em;
+  color: var(--t1);
+}
+
+.assistantBody h1 {
+  font-size: 1.45em;
+  font-weight: 700;
+  margin: 1.1em 0 0.45em;
+}
+
+.assistantBody h2 {
+  font-size: 1.25em;
+  font-weight: 600;
+  margin: 1.1em 0 0.4em;
+}
+
+.assistantBody h3 {
+  font-size: 1.1em;
+  font-weight: 600;
+  margin: 1em 0 0.35em;
+}
+
+.assistantBody h4 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 0.9em 0 0.3em;
+}
+
+.assistantBody ul,
+.assistantBody ol {
+  margin: 0.75em 0;
+  padding-left: 1.4em;
+}
+
+.assistantBody li {
+  margin: 0.3em 0;
+}
+
+.assistantBody li::marker {
+  color: var(--t3);
+}
+
+.assistantBody strong {
+  color: var(--t1);
+  font-weight: 600;
+}
+
+.assistantBody em {
+  color: var(--t2);
+}
+
+.assistantBody a {
+  color: var(--accent-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.assistantBody code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--s3);
+  padding: 0.12em 0.35em;
+  border-radius: var(--r1);
+}
+
+.assistantBody pre {
+  margin: 0.75em 0;
+  padding: 12px 14px;
+  background: var(--s1);
+  border-radius: var(--r2);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.assistantBody pre code {
+  display: block;
+  background: transparent;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.assistantBody blockquote {
+  margin: 0.75em 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--line-2);
+  color: var(--t2);
+}
+
+.tableWrap {
+  overflow-x: auto;
+  margin: 0.9em 0;
+}
+
+.assistantBody table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.93em;
+}
+
+.assistantBody th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--t1);
+  border-bottom: 1px solid var(--line-2);
+  padding: 6px 10px;
+}
+
+.assistantBody td {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 10px;
+  vertical-align: top;
+}
+
+/* Diagrams and other exports render on white canvases; keep them legible
+   inside a framed figure on the dark ground. */
+.assistantBody img {
+  max-width: 100%;
+  margin: 8px 0;
+  border-radius: var(--r2);
+  background: #fff;
+}
+
+.assistantBody :global(.katex-display) {
+  overflow-x: auto;
+  padding: 4px 0;
+}
+
+/* ---- Sources panel ("Grounded in") ---- */
+
+.sourcesPanel {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--s1);
+  border-radius: var(--r2);
+}
+
+.sourcesHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
+}
+
+.sourceRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+
+.sourceRow + .sourceRow {
+  border-top: 1px solid var(--line);
+}
+
+.sourceIndex {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--oxide);
+}
+
+.sourceTitle {
+  min-width: 0;
+  color: var(--t1);
+  overflow-wrap: anywhere;
+}
+
+.sourceTitle a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.sourceMeta {
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.sourceVision {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--warn-2);
+  text-align: right;
+}
+
+/* ---- Message actions ---- */
+
+.turnActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+
+.turn:hover .turnActions,
+.turn:focus-within .turnActions {
+  opacity: 1;
+}
+
+.actionBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.actionBtn:hover:not(:disabled) {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+.actionBtn:disabled {
+  cursor: not-allowed;
+}
+
+/* ---- Streaming / pending state ---- */
+
+.thinkingLine {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.thinkingDots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.thinkingDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--accent);
+  animation: thinkingPulse 1.4s ease-in-out infinite;
+}
+
+.thinkingDot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.thinkingDot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.thinkingHint {
+  font-size: 13px;
+  color: var(--t2);
+}
+
+@keyframes thinkingPulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* Respect a reduced-motion preference: keep the indicator, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .thinkingDot {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* ---- Legacy code-interpreter output ---- */
+
+.codeBlock {
+  padding: 12px 14px;
+  background: var(--s1);
+  border-radius: var(--r2);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--t1);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.codeLine {
+  display: flex;
+  gap: 10px;
+}
+
+.codeLineNo {
+  flex-shrink: 0;
+  min-width: 2ch;
+  text-align: right;
+  color: var(--t3);
+  user-select: none;
+}

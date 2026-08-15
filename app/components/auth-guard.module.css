@@ -1,5 +1,5 @@
 /* Minimal full-screen gate shown while the /auth/me check is in flight, and
-   briefly during the redirect to /login. Matches the auth pages' palette. */
+   briefly during the redirect to /login. */
 .gate {
   display: flex;
   flex-direction: column;
@@ -7,14 +7,14 @@
   justify-content: center;
   gap: 14px;
   height: 100vh;
-  background-color: var(--bg-base);
+  background-color: var(--bg);
 }
 
 .spinner {
   width: 26px;
   height: 26px;
-  border: 2.5px solid var(--border-subtle);
-  border-top-color: #8f7458; /* silt stratum */
+  border: 2.5px solid var(--line-2);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }
@@ -23,17 +23,11 @@
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0.08em;
-  color: var(--text-secondary);
+  color: var(--t3);
 }
 
 @keyframes spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spinner {
-    animation-duration: 1.6s;
   }
 }

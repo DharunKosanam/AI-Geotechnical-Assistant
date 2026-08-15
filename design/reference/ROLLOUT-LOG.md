@@ -312,3 +312,100 @@ welcome).
 canvas in `chat.module.css`, diagram PNG thumbnail ground in
 `composer.module.css`) — light artifacts on dark ground, not UI chrome.
 Remaining `color="#4ade80"` hits are all in `kb-upload.tsx` → Phase 5.
+
+---
+
+## Phase 5 — every remaining surface
+
+**Files touched:** `auth.module.css` + `auth-guard.module.css` (rewritten;
+auth page TSX untouched — CSS-only restyle), `kb-upload.module.css`
+(rewritten) + `kb-upload.tsx` (icon color props → token class, alert→toast),
+`workspace/workspace.module.css` (rewritten) + `workspace/page.tsx` (icon
+color prop → class, 3× alert→toast), new `toaster.tsx` + `toaster.module.css`
++ mount in `layout.tsx`, `chat.tsx` (3× alert→toast), `composer.tsx`
+(diagram-error alert→toast), `diagram-editor-modal.tsx` (embed skin
+`ui=atlas` → `ui=dark`).
+
+**What changed**
+
+- **Auth pages** (login / signup / forgot / reset): card on `--s2` with `--e2`
+  + top highlight, condensed heading, mono eyebrow/labels, inputs on `--s1`
+  with accent focus glow, accent primary button (32px), accent links,
+  danger-token error blocks, accent-token success notice. The stratigraphic
+  "borehole log" column is kept as the signature motif, retuned one step
+  darker to sit on `--s2` — five intentional hex values, documented in-file.
+  All four pages share the one stylesheet, so no TSX changed; every state
+  (registered notice, invalid-link, 400/429 branches, loading labels) renders
+  the new language automatically. AuthGuard gate: accent spinner on `--bg`.
+- **Knowledge Base**: `kb-upload.module.css` rewritten on tokens — panels
+  `--s2`, dropzone dashed `--line-2` on `--s1` with accent hover,
+  acknowledgement warnings in warn tokens, fields on `--s1` with accent
+  focus, accent primary / ghost secondary buttons, mono meta and sample-chunk
+  block, danger error box, delete button with danger hover. **The
+  `prefers-color-scheme: light` override block is deleted outright** per
+  decision — the app is single-theme dark. The three `color="#4ade80"` icon
+  props became a `.okIcon` token class.
+- **GeoPilot / workspace**: full token rewrite — `--s1` doc panel with 26px
+  tabs / 30px doc rows / mono history meta, hover-revealed remove (now also
+  `:focus-within`), welcome state with condensed heading and mono `run CPT`
+  chip, bubbles retokenized (`--s3` user / `--s2` assistant). **CPT result
+  card**: `--s2` card with hairline table rules, mono numeric cells, zone
+  chips in mono on `--s3`, the citation/reference line in `--oxide`, "AI
+  draft — for engineer review" badge in warn tokens (mono uppercase), flagged-
+  concerns box in warn tokens, error box in danger tokens, Export as a 28px
+  raised control. Composer row mirrors the chat composer (accent send,
+  hairline card input with accent focus). Per decision: **no confidence
+  indicators, no source spans, no override step** — see the payload proposal
+  below.
+- **Toast layer**: new `toaster.tsx` (event-based `toast()` + `<Toaster/>`
+  mounted once in `layout.tsx`; `--s3` cards bottom-right, `aria-live`,
+  6s auto- or click-dismiss, no dependency). All 8 live `alert()` call sites
+  swapped (chat ×3, composer diagram-error ×1, workspace ×3, kb-upload ×1).
+  Handler logic around them unchanged. The dead `file-viewer.tsx` alerts are
+  untouched (dead file).
+- **Diagram editor chrome**: overlay darkened; embed skin switched
+  `ui=atlas` → `ui=dark`. The postMessage save protocol is skin-independent
+  and unknown `ui` values fall back to the default skin, but this is
+  **unverified in a real browser** (no browser automation per standing rule)
+  — worth one manual open-and-save when you next deploy. The iframe interior
+  is cross-origin and otherwise unstylable; the white canvas stays a framed
+  light artifact by design.
+
+**GeoPilot payload proposal (logged, not built)**
+
+The screen the rollout brief describes needs data the workspace payload does
+not carry. `Layer` (app/workspace/page.tsx) is
+`{layer_index, depth_from, depth_to, thickness, soil_type, zone, qc_avg, ic_avg}`
+and `Interpretation` is `{narrative, concerns[], error?}`. To support the
+review-grade screen, the CPT interpret response would need, per layer:
+
+- `confidence: {qc_avg: float, ic_avg: float, soil_type: float}` — per-field
+  0–1 confidences from the calculator (deterministic fields can carry 1.0;
+  boundary-adjacent Ic classifications are where this earns its keep);
+- `source_span: {row_start: int, row_end: int}` — the raw CPT-file row range
+  each layer was aggregated from (the calculator already knows its
+  depth-window; forwarding row indices lets the UI link a value back to the
+  sounding data);
+- and thread-level `review: {status: "draft"|"accepted"|"overridden", ...}`
+  with an endpoint to persist an engineer's accept/override per layer —
+  today no such endpoint exists, which is why the only human-in-the-loop
+  affordance remains the advisory draft badge and concerns list.
+
+Producers: `python_backend/app/workspace/calculators/cpt.py` (confidence +
+spans) and a new small routes.py endpoint (review state). Until then the card
+deliberately shows only what the payload proves.
+
+**Skipped / left as-is**
+
+- `file-viewer.*`, `warnings.*`, `sidebar-account.*` untouched (dead /
+  unmounted; `sidebar-account.module.css` still carries 2 old hex values —
+  irrelevant while unmounted, flagged for the delete branch).
+- Native `<select>` popup chrome and checkboxes: OS-rendered; `color-scheme:
+  dark` + `accent-color` from Phase 1 are the practical limit.
+
+**Build:** pass. **Unit tests:** 7/7 pass.
+
+**Hex grep (whole live app):** zero inline colors in live TSX. Remaining hex
+in live CSS: the 5 documented strata colors and the 3 documented `#fff`
+light-artifact grounds. No `prefers-color-scheme` blocks, no `lightgrey`, no
+light-palette values anywhere live.

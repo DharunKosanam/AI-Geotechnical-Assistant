@@ -1,10 +1,12 @@
+/* GeoPilot workspace — dark tokens throughout. */
+
 .main {
   display: flex;
   flex-direction: column;
   height: 100vh;
   max-height: 100vh;
   overflow: hidden;
-  background-color: var(--bg-base);
+  background-color: var(--bg);
 }
 
 /* Two columns: fixed document panel + flexible chat area, filling below header. */
@@ -13,8 +15,6 @@
   min-height: 0;
   display: flex;
   flex-direction: row;
-  gap: 16px;
-  padding: 16px;
   overflow: hidden;
 }
 
@@ -24,9 +24,7 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background-color: var(--bg-sidebar);
-  border: 1px solid var(--border-subtle);
-  border-radius: 16px;
+  background-color: var(--s1);
   padding: 12px;
   overflow: hidden;
 }
@@ -35,21 +33,22 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  font-family: var(--font-cond);
   font-size: 14px;
-  font-weight: 650;
-  color: var(--text-primary);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--t1);
   padding: 4px 6px 12px;
 }
 
 /* Documents | History sub-tabs at the top of the left panel. */
 .leftTabs {
   display: flex;
-  gap: 4px;
+  gap: 2px;
   padding: 2px;
   margin-bottom: 10px;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  background-color: var(--s2);
+  border-radius: var(--r2);
 }
 
 .leftTab {
@@ -58,35 +57,38 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 7px 8px;
+  height: 26px;
+  padding: 0 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--r1);
   background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
+  color: var(--t2);
+  font: inherit;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.12s ease, color 0.12s ease;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
 }
 
 .leftTab:hover {
-  color: var(--text-primary);
+  color: var(--t1);
 }
 
 .leftTabActive {
-  background-color: var(--bg-base);
-  color: var(--text-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
 }
 
 /* History rows (runs + threads). */
 .historyGroup {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
   padding: 10px 6px 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
 }
 
 .historyRow {
@@ -94,23 +96,25 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px;
+  height: 34px;
+  padding: 0 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--r1);
   background: transparent;
-  color: var(--text-primary);
+  color: var(--t1);
+  font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.12s ease;
+  transition: background-color 120ms var(--ease);
 }
 
 .historyRow:hover {
-  background-color: var(--bg-surface);
+  background-color: var(--s2);
 }
 
 .historyIcon {
   flex-shrink: 0;
-  color: var(--text-secondary);
+  color: var(--t3);
 }
 
 .historyText {
@@ -127,8 +131,9 @@
 }
 
 .historyMeta {
-  font-size: 11px;
-  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--t3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -140,12 +145,12 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .docEmpty {
-  color: var(--text-secondary);
-  font-size: 13px;
+  color: var(--t3);
+  font-size: 12.5px;
   line-height: 1.5;
   padding: 6px;
   margin: 0;
@@ -155,20 +160,26 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px;
-  border-radius: 8px;
-  color: var(--text-primary);
-  transition: background-color 0.12s ease;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r1);
+  color: var(--t2);
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
 }
 
 .docRow:hover {
-  background-color: var(--bg-surface);
+  background-color: var(--s2);
+  color: var(--t1);
 }
 
 .docIcon {
   display: inline-flex;
   flex-shrink: 0;
-  color: var(--text-secondary);
+  color: var(--t3);
+}
+
+.docErrorIcon {
+  color: var(--danger-2);
 }
 
 .docName {
@@ -188,41 +199,46 @@
   flex-shrink: 0;
   padding: 2px;
   border: none;
+  border-radius: var(--r1);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--t3);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s ease, color 0.12s ease;
+  transition: opacity 120ms var(--ease), color 120ms var(--ease);
 }
 
-.docRow:hover .docRemove {
+.docRow:hover .docRemove,
+.docRow:focus-within .docRemove {
   opacity: 1;
 }
 
 .docRemove:hover {
-  color: var(--text-primary);
+  color: var(--t1);
 }
 
 .newSessionBtn {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
+  height: 28px;
   margin-bottom: 10px;
-  padding: 10px 12px;
-  background-color: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  font-size: 14px;
+  padding: 0 12px;
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  border: none;
+  border-radius: var(--r1);
+  font: inherit;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.15s ease;
+  transition: background-color 120ms var(--ease);
 }
 
 .newSessionBtn:hover {
-  background-color: var(--bg-base);
+  background-color: var(--s4);
 }
 
 /* ============================== Chat area ============================== */
@@ -238,7 +254,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 10px 10px 6px;
+  padding: 10px 16px 6px;
   display: flex;
   flex-direction: column;
 }
@@ -247,28 +263,31 @@
   margin: auto;
   max-width: 460px;
   text-align: center;
-  color: var(--text-secondary);
+  color: var(--t2);
 }
 
 .welcome h2 {
   margin: 12px 0 8px;
+  font-family: var(--font-cond);
   font-size: 20px;
-  font-weight: 650;
-  color: var(--text-primary);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--t1);
 }
 
 .welcome p {
-  font-size: 14px;
+  font-size: 13.5px;
   line-height: 1.6;
   margin: 0;
 }
 
 .welcome code {
   padding: 1px 6px;
-  border-radius: 5px;
-  background-color: var(--bg-sidebar);
-  font-size: 13px;
-  color: var(--text-primary);
+  border-radius: var(--r1);
+  background-color: var(--s3);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--t1);
 }
 
 .messageRow {
@@ -284,20 +303,21 @@
 .userMessage {
   align-self: flex-end;
   max-width: 80%;
-  padding: 8px 16px;
-  border-radius: 15px;
-  color: #fff;
-  background-color: #000;
+  padding: 8px 14px;
+  border-radius: var(--r3);
+  color: var(--t1);
+  background-color: var(--s3);
+  box-shadow: var(--hi);
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
 
 .assistantMessage {
   max-width: 80%;
-  padding: 8px 16px;
-  border-radius: 15px;
-  background-color: #efefef;
-  color: var(--text-primary);
+  padding: 8px 14px;
+  border-radius: var(--r3);
+  background-color: var(--s2);
+  color: var(--t1);
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -306,10 +326,10 @@
 /* Scoped-Q&A answer bubble — assistant reply grounded in the current result. */
 .answerMessage {
   max-width: 80%;
-  padding: 12px 16px;
-  border-radius: 15px;
-  background-color: #efefef;
-  color: var(--text-primary);
+  padding: 12px 14px;
+  border-radius: var(--r3);
+  background-color: var(--s2);
+  color: var(--t1);
   line-height: 1.6;
   overflow-wrap: break-word;
 }
@@ -319,7 +339,7 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
-  color: var(--text-secondary);
+  color: var(--t2);
 }
 
 .answerMessage .narrative:first-child {
@@ -330,9 +350,9 @@
 .resultCard {
   max-width: 92%;
   width: 100%;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: 14px;
+  background-color: var(--s2);
+  border-radius: var(--r3);
+  box-shadow: var(--hi), var(--e1);
   padding: 16px;
 }
 
@@ -342,13 +362,17 @@
   gap: 8px;
   flex-wrap: wrap;
   font-size: 14px;
-  color: var(--text-primary);
+  color: var(--t1);
+}
+
+.resultLead svg {
+  color: var(--accent);
 }
 
 .resultSummary {
   margin: 10px 0 14px;
   font-size: 13px;
-  color: var(--text-secondary);
+  color: var(--t2);
   line-height: 1.55;
 }
 
@@ -365,50 +389,65 @@
 .table th,
 .table td {
   text-align: left;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
 
 .table th {
-  color: var(--text-secondary);
+  color: var(--t2);
   font-weight: 600;
+  border-bottom-color: var(--line-2);
 }
 
 .table td {
-  color: var(--text-primary);
+  color: var(--t1);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.table td:nth-child(4) {
+  font-family: var(--font-sans);
+  font-size: 13px;
 }
 
 .zoneTag {
   margin-left: 8px;
   padding: 1px 7px;
-  border-radius: 999px;
-  background-color: var(--bg-sidebar);
-  color: var(--text-secondary);
-  font-size: 11px;
+  border-radius: var(--r1);
+  background-color: var(--s3);
+  color: var(--t2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
 }
 
 .reference {
   margin-top: 12px;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--oxide);
   line-height: 1.5;
 }
 
 .aiSection {
   margin-top: 16px;
   padding-top: 14px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--line);
 }
 
 .sectionTitle {
   display: flex;
   align-items: center;
   gap: 8px;
+  font-family: var(--font-cond);
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-primary);
+  letter-spacing: -0.02em;
+  color: var(--t1);
   margin: 0;
+}
+
+.sectionTitle svg {
+  color: var(--accent);
 }
 
 .aiHeader {
@@ -421,18 +460,19 @@
 }
 
 .draftBadge {
-  padding: 4px 10px;
-  border-radius: 999px;
-  background-color: #fff7ed;
-  color: #c2410c;
-  border: 1px solid #fed7aa;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: var(--r1);
+  background-color: var(--warn-a);
+  color: var(--warn-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .narrative {
-  color: var(--text-primary);
-  font-size: 14px;
+  color: var(--t1);
+  font-size: 13.5px;
   line-height: 1.65;
   margin: 12px 0 0;
 }
@@ -440,9 +480,8 @@
 .concerns {
   margin-top: 16px;
   padding: 12px 14px;
-  border-radius: 8px;
-  background-color: #fffbeb;
-  border: 1px solid #fde68a;
+  border-radius: var(--r2);
+  background-color: var(--warn-a);
 }
 
 .concernsTitle {
@@ -451,7 +490,7 @@
   gap: 7px;
   font-size: 13px;
   font-weight: 600;
-  color: #92400e;
+  color: var(--warn-2);
   margin-bottom: 6px;
 }
 
@@ -462,7 +501,7 @@
 
 .concerns li {
   font-size: 13px;
-  color: #78350f;
+  color: var(--warn-2);
   line-height: 1.5;
 }
 
@@ -472,9 +511,9 @@
   gap: 8px;
   margin-top: 10px;
   padding: 10px 12px;
-  border-radius: 8px;
-  background-color: #fef2f2;
-  color: #b91c1c;
+  border-radius: var(--r2);
+  background-color: var(--danger-a);
+  color: var(--danger-2);
   font-size: 13px;
 }
 
@@ -482,27 +521,31 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  height: 28px;
   margin-top: 16px;
-  padding: 9px 16px;
+  padding: 0 14px;
   border: none;
-  border-radius: 8px;
-  background-color: var(--text-primary);
-  color: var(--bg-surface);
-  font-size: 13px;
-  font-weight: 600;
+  border-radius: var(--r1);
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
   cursor: pointer;
+  transition: background-color 120ms var(--ease);
 }
 
 .exportBtn:hover {
-  opacity: 0.9;
+  background-color: var(--s4);
 }
 
 /* ============================= Input row ============================== */
-/* Mirrors the main Chat tab's [ + ] [ textarea ] [ Send ] row. */
+/* Mirrors the main Chat tab's composer language. */
 .inputForm {
   flex-shrink: 0;
   width: 100%;
-  padding: 10px 10px 16px;
+  padding: 8px 16px 16px;
 }
 
 .hiddenInput {
@@ -512,7 +555,10 @@
 .inputRow {
   display: flex;
   align-items: flex-end;
+  gap: 8px;
   width: 100%;
+  max-width: 748px;
+  margin: 0 auto;
 }
 
 .plusBtn {
@@ -520,39 +566,50 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 44px;
-  height: 44px;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 4px;
   padding: 0;
   border: none;
-  border-radius: 50%;
-  background-color: #000;
-  color: #fff;
+  border-radius: var(--r1);
+  background-color: transparent;
+  color: var(--t2);
   cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
 }
 
 .plusBtn:hover {
-  background-color: #333;
+  background-color: var(--s3);
+  color: var(--t1);
 }
 
 .input {
   flex-grow: 1;
-  margin: 0 10px;
-  padding: 12px 20px;
-  border-radius: 24px;
-  border: 2px solid var(--border-subtle);
-  background-color: var(--bg-surface);
-  color: var(--text-primary);
-  font-size: 1em;
-  font-family: inherit;
-  resize: vertical;
-  min-height: 44px;
+  min-width: 0;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r3);
+  background-color: var(--s2);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+  resize: none;
+  min-height: 40px;
   max-height: 200px;
   overflow: auto;
+  transition: border-color 140ms var(--ease);
+}
+
+.input::placeholder {
+  color: var(--t3);
 }
 
 .input:focus {
   outline: none;
-  border-color: #000;
+  border-color: var(--accent);
+  box-shadow: var(--hi), 0 0 0 1px var(--accent-a);
 }
 
 .button {
@@ -560,19 +617,28 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  min-width: 84px;
-  height: 44px;
-  padding: 0 24px;
-  background-color: #000;
-  color: #fff;
+  min-width: 64px;
+  height: 32px;
+  margin-bottom: 4px;
+  padding: 0 16px;
+  background-color: var(--accent);
+  color: var(--bg);
   border: none;
-  border-radius: 24px;
-  font-size: 1em;
+  border-radius: var(--r2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.button:hover:not(:disabled) {
+  background-color: var(--accent-2);
 }
 
 .button:disabled {
-  background-color: lightgrey;
+  background-color: var(--s3);
+  color: var(--t3);
   cursor: not-allowed;
 }
 

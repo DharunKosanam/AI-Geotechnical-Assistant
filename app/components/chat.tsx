@@ -10,6 +10,7 @@ import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistant
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
 import Sidebar from "./sidebar";
 import Composer from "./composer";
+import { toast } from "./toaster";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
 import { ChevronRight, MoreHorizontal } from "lucide-react";
 
@@ -2073,7 +2074,7 @@ const Chat = ({
   const uploadDiagram = async (pngDataUri: string, xml: string) => {
     const blob = pngDataUriToBlob(pngDataUri);
     if (!blob || !xml.trim()) {
-      alert("The editor returned an unusable diagram export. Please try saving again.");
+      toast("The editor returned an unusable diagram export. Please try saving again.");
       return;
     }
     const filename = diagramFilename(xml);
@@ -2160,11 +2161,11 @@ const Chat = ({
     for (let i = 0; i < selectedFiles.length; i++) {
       const f = selectedFiles[i];
       if (!isSupportedFile(f.name, uploadTypes.extensions)) {
-        alert(`"${f.name}" is not a supported file type.\n\nSupported: ${uploadTypes.label}`);
+        toast(`"${f.name}" is not a supported file type. Supported: ${uploadTypes.label}`);
         continue;
       }
       if (f.size > MAX_UPLOAD_BYTES) {
-        alert(`"${f.name}" is ${(f.size / 1024 / 1024).toFixed(1)} MB which exceeds the 50 MB limit.`);
+        toast(`"${f.name}" is ${(f.size / 1024 / 1024).toFixed(1)} MB which exceeds the 50 MB limit.`);
         continue;
       }
       valid.push(f);

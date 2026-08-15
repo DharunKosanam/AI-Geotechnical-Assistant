@@ -8,7 +8,10 @@ import styles from "./chat.module.css";
 // own exit prompt track dirty state so users aren't asked about work they
 // already saved.
 const EMBED_ORIGIN = "https://embed.diagrams.net";
-const EMBED_URL = `${EMBED_ORIGIN}/?embed=1&ui=atlas&spin=1&proto=json&modified=unsavedChanges`;
+// ui=dark: the embed's own dark skin, matching the app theme. The postMessage
+// protocol is skin-independent; if diagrams.net ever drops the value it falls
+// back to its default UI, so the save round-trip is unaffected either way.
+const EMBED_URL = `${EMBED_ORIGIN}/?embed=1&ui=dark&spin=1&proto=json&modified=unsavedChanges`;
 
 // If {event:'init'} never arrives (offline, extension blocking the frame, a
 // diagrams.net outage) the modal must not sit as a blank frame forever.

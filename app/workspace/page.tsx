@@ -19,6 +19,7 @@ import Header from "../components/Header";
 import { AuthProvider } from "../lib/auth-context";
 import AuthGuard from "../components/auth-guard";
 import styles from "./workspace.module.css";
+import { toast } from "../components/toaster";
 
 // Documents the calculators can draw from are .CPT soundings today. The set can
 // widen as more calculators are registered.
@@ -207,7 +208,7 @@ function GeoPilot() {
         { id: uid(), role: "assistant", kind: "result", data },
       ]);
     } catch (e: any) {
-      alert(e?.message ?? "Could not open run.");
+      toast(e?.message ?? "Could not open run.");
     }
   };
 
@@ -222,7 +223,7 @@ function GeoPilot() {
       setMessages((thread.messages ?? []).map(fromStored));
       setActiveThreadId(threadId);
     } catch (e: any) {
-      alert(e?.message ?? "Could not open thread.");
+      toast(e?.message ?? "Could not open thread.");
     }
   };
 
@@ -404,7 +405,7 @@ function GeoPilot() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e: any) {
-      alert(e?.message ?? "Export failed.");
+      toast(e?.message ?? "Export failed.");
     }
   };
 
@@ -459,7 +460,7 @@ function GeoPilot() {
                         {doc.status === "uploading" ? (
                           <Loader2 size={14} className={styles.spin} />
                         ) : doc.status === "error" ? (
-                          <AlertTriangle size={14} color="#b91c1c" />
+                          <AlertTriangle size={14} strokeWidth={1.5} className={styles.docErrorIcon} />
                         ) : (
                           <FileText size={14} />
                         )}

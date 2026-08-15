@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { API_ENDPOINTS } from "../config/api";
 import styles from "./kb-upload.module.css";
+import { toast } from "./toaster";
 
 const ACCEPTED = ".pdf,.docx,.txt,.md,.pptx,.xlsx,.csv";
 const DOC_TYPES = ["paper", "report", "thesis", "book", "standard", "slides", "dataset", "other"];
@@ -214,7 +215,7 @@ const KbUpload = () => {
       if (r.ok) loadUploads();
       else {
         const d = await r.json().catch(() => ({}));
-        alert(d.detail || "Could not delete this upload.");
+        toast(d.detail || "Could not delete this upload.");
       }
     } catch {
       /* ignore */
@@ -432,7 +433,7 @@ const KbUpload = () => {
         {phase === "done" && result && (
           <div className={styles.result}>
             <div className={styles.resultHead}>
-              <Check size={18} color="#4ade80" /> Added to the knowledge base
+              <Check size={18} strokeWidth={1.5} className={styles.okIcon} /> Added to the knowledge base
             </div>
             <div className={styles.resultBody}>
               <div>
@@ -499,7 +500,7 @@ const KbUpload = () => {
               {phase === "bulkindexing" ? (
                 <Loader2 size={18} className={styles.spin} />
               ) : (
-                <Check size={18} color="#4ade80" />
+                <Check size={18} strokeWidth={1.5} className={styles.okIcon} />
               )}{" "}
               Indexing {bulkBatch.done ?? 0}/{bulkBatch.total ?? bulkFiles.length}
               {phase === "bulkdone" ? " — done" : "…"}
@@ -517,7 +518,7 @@ const KbUpload = () => {
                       {f.status === "failed" && "failed"}
                     </span>
                   </div>
-                  {f.status === "done" && <Check size={15} color="#4ade80" />}
+                  {f.status === "done" && <Check size={15} strokeWidth={1.5} className={styles.okIcon} />}
                   {f.status === "processing" && <Loader2 size={15} className={styles.spin} />}
                   {(f.status === "skipped" || f.status === "failed") && (
                     <AlertTriangle size={15} className={styles.warnIcon} />

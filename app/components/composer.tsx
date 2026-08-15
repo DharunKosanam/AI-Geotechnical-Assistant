@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import c from "./composer.module.css";
+import { toast } from "./toaster";
 
 const STAGE_LABELS: Record<string, string> = {
   extracting: "Extracting...",
@@ -172,7 +173,7 @@ const Composer = ({
           onClose={() => setShowDiagramEditor(false)}
           onError={(message) => {
             setShowDiagramEditor(false);
-            alert(message);
+            toast(message);
           }}
         />
       )}

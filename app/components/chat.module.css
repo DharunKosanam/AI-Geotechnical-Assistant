@@ -6,19 +6,7 @@
   overflow: hidden; /* 添加这行防止溢出 */
 }
 
-.leftPanel {
-  margin-right: 20px;
-  width: 25%;               /* 占据 25% 的宽度 */
-  height: 100%;             /* 高度占满容器 */
-  background-color: var(--bg-sidebar);
-  border-radius: 16px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;   /* New Chat on top, thread list scrolls, Join pinned below */
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
+/* (sidebar styles moved to sidebar.module.css) */
 
 .chatContainer {
   flex: 1;
@@ -27,6 +15,129 @@
   height: 100%;
   min-width: 0;
   overflow: hidden;
+}
+
+/* Thread sub-header — 40px, only rendered while a thread is open. Highest
+   order in the column-reverse chat container = pinned at the top. */
+.threadHeader {
+  order: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
+  flex-shrink: 0;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.threadHeaderMain {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.threadTitle {
+  color: var(--t1);
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.threadMeta {
+  flex-shrink: 0;
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.threadHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.threadHeaderBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.threadHeaderBtn:hover:not(:disabled) {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+.threadHeaderBtn:disabled {
+  color: var(--t3);
+  cursor: not-allowed;
+}
+
+.labSharedChip {
+  padding: 3px 8px;
+  border-radius: var(--r1);
+  background: var(--accent-a);
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.threadMenuWrap {
+  position: relative;
+}
+
+.menuBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: transparent;
+}
+
+.threadMenu {
+  position: absolute;
+  top: 30px;
+  right: 0;
+  z-index: 50;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: var(--r2);
+  background: var(--s2);
+  box-shadow: var(--e2), var(--hi);
+}
+
+.threadMenuItem {
+  display: block;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t1);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.threadMenuItem:hover {
+  background: var(--s3);
 }
 
 
@@ -588,58 +699,11 @@
   margin-right: 8px;
 }
 
-.newChatBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  flex-shrink: 0;
-  margin: 10px 20px 0;
-  padding: 10px 12px;
-  background-color: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 150ms ease;
-}
-
-.newChatBtn:hover {
-  background-color: var(--bg-base);
-}
-
-/* Quiet ghost button pinned at the bottom of the sidebar. */
-.joinTeamBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  flex-shrink: 0;
-  margin: 0 20px 10px;
-  padding: 8px 12px;
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: color 150ms ease;
-}
-
-.joinTeamBtn:hover {
-  color: var(--text-primary);
-}
-
-/* 添加以下样式 */
+/* Join Team Chat modal */
 .modal {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   justify-content: center;
   align-items: center;
@@ -647,45 +711,76 @@
 }
 
 .modalContent {
-  background: var(--bg-surface);
+  min-width: 320px;
+  max-width: calc(100vw - 32px);
   padding: 20px;
-  border-radius: 8px;
-  min-width: 300px;
+  border-radius: var(--r3);
+  background: var(--s2);
+  box-shadow: var(--e3), var(--hi);
 }
 
 .modalContent h3 {
-  margin-top: 0;
-  margin-bottom: 15px;
+  margin: 0 0 12px;
+  color: var(--t1);
+  font-family: var(--font-cond);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
 .modalContent input {
   width: 100%;
-  padding: 8px;
-  margin-bottom: 15px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  height: 32px;
+  padding: 0 10px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  background: var(--s1);
+  color: var(--t1);
+  font: inherit;
+  font-size: 13px;
+}
+
+.modalContent input::placeholder {
+  color: var(--t3);
 }
 
 .modalButtons {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
 }
 
 .modalButtons button {
-  padding: 8px 16px;
+  height: 28px;
+  padding: 0 14px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--r1);
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
+  transition: background-color 120ms var(--ease);
 }
 
 .modalButtons button:first-child {
-  background: #ddd;
+  background: transparent;
+  color: var(--t2);
+}
+
+.modalButtons button:first-child:hover {
+  background: var(--s3);
+  color: var(--t1);
 }
 
 .modalButtons button:last-child {
-  background: #0070f3;
-  color: white;
+  background: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  font-weight: 500;
+}
+
+.modalButtons button:last-child:hover {
+  background: var(--s4);
 }
 
 /* Welcome Message Styles */

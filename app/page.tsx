@@ -1,5 +1,5 @@
 "use client";
-import React from "react";
+import React, { useState } from "react";
 import Chat from "./components/chat";
 import Header from "./components/Header";
 import styles from "./page.module.css";
@@ -7,15 +7,20 @@ import { AuthProvider } from "./lib/auth-context";
 import AuthGuard from "./components/auth-guard";
 
 const FileSearchPage = () => {
+  // Sidebar collapse lives here so the top-bar toggle and the sidebar's own
+  // toggle drive the same state.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const toggleSidebar = () => setSidebarCollapsed((c) => !c);
+
   return (
     <AuthProvider>
       <AuthGuard>
         <main className={styles.main}>
-          <Header />
+          <Header sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
           <div className={styles.container}>
             <div className={styles.chatContainer}>
               <div className={styles.chat}>
-                <Chat />
+                <Chat sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
               </div>
             </div>
           </div>

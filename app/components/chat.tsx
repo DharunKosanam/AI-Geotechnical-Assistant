@@ -15,7 +15,7 @@ import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/ru
 import Sidebar from "./sidebar";
 import DiagramEditorModal from "./diagram-editor-modal";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
-import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, PenLine } from "lucide-react";
+import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, PenLine, MoreHorizontal } from "lucide-react";
 
 // --- File attachment config ---
 // DEFAULTS: text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately
@@ -535,10 +535,16 @@ type ChatProps = {
   functionCallHandler?: (
     toolCall: RequiredActionFunctionToolCall
   ) => Promise<string>;
+  /* Sidebar collapse lives in page.tsx so the top bar toggle and the
+     sidebar's own toggle stay in sync. Purely presentational. */
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
 };
 
 const Chat = ({
   functionCallHandler = () => Promise.resolve(""),
+  sidebarCollapsed,
+  onToggleSidebar,
 }: ChatProps) => {
   const [userInput, setUserInput] = useState("");
   const [messages, setMessages] = useState<MessageProps[]>([]);
@@ -573,6 +579,11 @@ const Chat = ({
   const threadListRef = useRef<any>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinThreadInput, setJoinThreadInput] = useState('');
+  // Sub-header presentation state: the open thread's display name (fed by the
+  // thread list on select/rename) and the sub-header's ⋯ menu.
+  const [activeThreadTitle, setActiveThreadTitle] = useState<string | null>(null);
+  const [showThreadMenu, setShowThreadMenu] = useState(false);
+  const [threadIdCopied, setThreadIdCopied] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // --- File attachment UI state (replaces the removed right-hand file panel) ---
@@ -2075,6 +2086,7 @@ const Chat = ({
     threadIdRef.current = null;
     setMessages([]);
     setIsGroupConversation(false);
+    setActiveThreadTitle(null);
     setIsNewThread(true);
     setIsDraftThread(false);
     setAwaitingSince(null); // an abandoned turn must not keep a spinner alive
@@ -2085,7 +2097,7 @@ const Chat = ({
     lastMessageCountRef.current = 0;
   };
 
-  const handleThreadSelect = (selectedThreadId: string | null, isGroup: boolean) => {
+  const handleThreadSelect = (selectedThreadId: string | null, isGroup: boolean, name?: string) => {
     // CRITICAL: Stop any active polling IMMEDIATELY before changing state
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -2107,6 +2119,7 @@ const Chat = ({
       threadIdRef.current = "";
       setMessages([]);
       setIsGroupConversation(false);
+      setActiveThreadTitle(null);
       setIsNewThread(false);
       lastMessageCountRef.current = 0;
     } else {
@@ -2121,6 +2134,7 @@ const Chat = ({
       lastMessageCountRef.current = 0;
       setInputDisabled(false);
       setIsGroupConversation(isGroup);
+      setActiveThreadTitle(name ?? null);
       setIsNewThread(false);
       
       // 2. Set thread ID
@@ -2134,7 +2148,7 @@ const Chat = ({
 
   const handleJoinTeam = async () => {
     if (!joinThreadInput.trim()) return;
-    
+
     try {
       setShowJoinModal(false);
       setJoinThreadInput('');
@@ -2143,6 +2157,29 @@ const Chat = ({
     } catch (error) {
       console.error('Error joining team chat:', error);
     }
+  };
+
+  // Escape closes the join modal and the sub-header ⋯ menu.
+  useEffect(() => {
+    if (!showJoinModal && !showThreadMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowJoinModal(false);
+        setShowThreadMenu(false);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [showJoinModal, showThreadMenu]);
+
+  const copyThreadId = () => {
+    if (!threadId) return;
+    navigator.clipboard?.writeText(threadId).catch(() => {});
+    setThreadIdCopied(true);
+    window.setTimeout(() => {
+      setThreadIdCopied(false);
+      setShowThreadMenu(false);
+    }, 1200);
   };
 
   // Patch a single chip by id. Uses functional setState so concurrent uploads
@@ -2548,8 +2585,74 @@ const Chat = ({
         onThreadSelect={handleThreadSelect}
         onNewChat={createNewThread}
         onJoinTeam={() => setShowJoinModal(true)}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={onToggleSidebar}
+        onThreadRenamed={(renamedId, name) => {
+          if (renamedId === threadId) setActiveThreadTitle(name);
+        }}
       />
     <div className={styles.chatContainer}>
+      {threadId && !isDraftThread && (
+        <div className={styles.threadHeader}>
+          <div className={styles.threadHeaderMain}>
+            <span className={styles.threadTitle}>
+              {activeThreadTitle || "Conversation"}
+            </span>
+            <span className={styles.threadMeta}>
+              {deduplicatedMessages.filter((m) => m.role === "user").length}{" "}
+              {deduplicatedMessages.filter((m) => m.role === "user").length === 1
+                ? "turn"
+                : "turns"}
+            </span>
+          </div>
+          <div className={styles.threadHeaderActions}>
+            {isGroupConversation ? (
+              <span className={styles.labSharedChip}>LAB SHARED</span>
+            ) : (
+              <span title="Share this thread from its ⋯ menu in the sidebar">
+                <button type="button" className={styles.threadHeaderBtn} disabled>
+                  Share with lab
+                </button>
+              </span>
+            )}
+            <span title="Export is not available yet">
+              <button type="button" className={styles.threadHeaderBtn} disabled>
+                Export
+              </button>
+            </span>
+            <div className={styles.threadMenuWrap}>
+              <button
+                type="button"
+                className={styles.threadHeaderBtn}
+                aria-label="Thread menu"
+                aria-haspopup="menu"
+                aria-expanded={showThreadMenu}
+                onClick={() => setShowThreadMenu((open) => !open)}
+              >
+                <MoreHorizontal size={14} />
+              </button>
+              {showThreadMenu && (
+                <>
+                  <div
+                    className={styles.menuBackdrop}
+                    onClick={() => setShowThreadMenu(false)}
+                  />
+                  <div className={styles.threadMenu} role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={styles.threadMenuItem}
+                      onClick={copyThreadId}
+                    >
+                      {threadIdCopied ? "Copied" : "Copy thread ID"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       <div className={styles.messages} ref={messagesContainerRef}>
         {/* isDraftThread: a thread minted by an attach but with no message yet —
             the conversation hasn't started, so keep the welcome screen. */}

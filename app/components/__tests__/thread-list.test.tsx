@@ -167,6 +167,8 @@ describe("ThreadList refresh contract", () => {
     const before = historyGets;
 
     const firstRow = container.querySelector('[class*="threadItem"]')!;
+    // Row actions live behind the ⋯ menu since the dark redesign.
+    fireEvent.click(firstRow.querySelector('[class*="rowMenuBtn"]')!);
     fireEvent.click(firstRow.querySelector('[class*="editBtn"]')!);
     const input = container.querySelector(
       '[class*="threadNameInput"]',
@@ -192,6 +194,7 @@ describe("ThreadList refresh contract", () => {
     ).length;
 
     const firstRow = container.querySelector('[class*="threadItem"]')!;
+    fireEvent.click(firstRow.querySelector('[class*="rowMenuBtn"]')!);
     fireEvent.click(firstRow.querySelector('[class*="deleteBtn"]')!);
 
     await waitFor(() => expect(historyGets).toBe(before + 1));
@@ -216,6 +219,7 @@ describe("ThreadList refresh contract", () => {
       await ref.current!.fetchThreads();
     });
     const firstRow = container.querySelector('[class*="threadItem"]')!;
+    fireEvent.click(firstRow.querySelector('[class*="rowMenuBtn"]')!);
     fireEvent.click(firstRow.querySelector('[class*="deleteBtn"]')!);
     await waitFor(() =>
       expect(

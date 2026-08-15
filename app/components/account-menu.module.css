@@ -1,0 +1,126 @@
+.wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t2);
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.avatar:hover,
+.avatar[aria-expanded="true"] {
+  background-color: var(--s4);
+  color: var(--t1);
+}
+
+.initials {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.menu {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  z-index: 200;
+  min-width: 220px;
+  padding: 4px;
+  border-radius: var(--r2);
+  background: var(--s2);
+  box-shadow: var(--e3), var(--hi);
+  outline: none;
+}
+
+.identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.name {
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.email {
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.roleBadge {
+  margin-top: 4px;
+  padding: 2px 6px;
+  border-radius: var(--r1);
+  background: var(--accent-a);
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+
+.itemWrap {
+  display: block;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t1);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.item:hover:not(:disabled) {
+  background: var(--s3);
+}
+
+.item:disabled {
+  color: var(--t3);
+  cursor: not-allowed;
+}
+
+.signOut {
+  color: var(--danger-2);
+}
+
+.signOut:hover:not(:disabled) {
+  background: var(--danger-a);
+}

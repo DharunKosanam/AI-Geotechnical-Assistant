@@ -1,0 +1,584 @@
+/* Composer — a raised --s2 card at the measure width; focus-within lifts it
+   with the accent ring. */
+
+.composerArea {
+  order: 1;
+  flex-shrink: 0;
+  width: 100%;
+  padding: 8px 16px 16px;
+}
+
+.composerInner {
+  width: 100%;
+  max-width: 748px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.composerCard {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 10px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r3);
+  background: var(--s2);
+  box-shadow: var(--hi), var(--e1);
+  transition: border-color 140ms var(--ease), box-shadow 140ms var(--ease);
+}
+
+.composerCard:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--hi), 0 0 0 1px var(--accent-a), var(--e1);
+}
+
+.input {
+  width: 100%;
+  min-height: 40px;
+  max-height: 200px;
+  padding: 6px 8px;
+  border: none;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: var(--t1);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.input::placeholder {
+  color: var(--t3);
+}
+
+.input:focus {
+  outline: none;
+  box-shadow: none; /* the card carries the focus ring */
+}
+
+.controlsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.controlsLeft,
+.controlsRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.iconBtn:hover {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+.scopeBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t3);
+  font: inherit;
+  font-size: 12px;
+  cursor: not-allowed;
+}
+
+.kbdHint {
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .kbdHint {
+    display: none;
+  }
+}
+
+.sendBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--r2);
+  background: var(--accent);
+  color: var(--bg);
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.sendBtn:hover:not(:disabled) {
+  background: var(--accent-2);
+}
+
+.sendBtn:disabled {
+  background: var(--s3);
+  color: var(--t3);
+  cursor: not-allowed;
+}
+
+/* ---- Attach menu ---- */
+
+.attachMenuWrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.attachMenuBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  background: transparent;
+}
+
+.attachMenu {
+  position: absolute;
+  bottom: 34px;
+  left: 0;
+  z-index: 20;
+  min-width: 190px;
+  padding: 4px;
+  border-radius: var(--r2);
+  background: var(--s2);
+  box-shadow: var(--e2), var(--hi);
+}
+
+.attachMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t1);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.attachMenuItem:hover {
+  background: var(--s3);
+}
+
+/* ---- Attachment chips ---- */
+
+.attachmentChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 4px 8px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border-radius: var(--r1);
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  font-size: 12.5px;
+}
+
+.chipIcon {
+  flex-shrink: 0;
+  color: var(--t2);
+}
+
+.chipIconOk {
+  color: var(--accent-2);
+}
+
+.chipIconError {
+  color: var(--danger-2);
+}
+
+.chipThumbLink {
+  flex-shrink: 0;
+  display: inline-flex;
+  line-height: 0;
+}
+
+.chipThumb {
+  max-height: 44px;
+  max-width: 80px;
+  border-radius: var(--r1);
+  background: #fff; /* diagrams export on white; keep them legible on the dark chip */
+  cursor: pointer;
+  object-fit: contain;
+}
+
+.chipText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chipName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Small ingest-stage line under the filename while a chip is uploading. */
+.chipStage {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--t3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--t2);
+  cursor: pointer;
+  line-height: 0;
+  transition: color 120ms var(--ease);
+}
+
+.chipRemove:hover {
+  color: var(--t1);
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chipError {
+  background: var(--danger-a);
+}
+
+/* An errored or partially-indexed chip has something to SAY, so it gets room
+   to say it. */
+.chipWithMessage {
+  max-width: 360px;
+  align-items: flex-start;
+}
+
+.chipErrorText {
+  font-size: 11px;
+  color: var(--danger-2);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.chipWarningText {
+  font-size: 11px;
+  color: var(--warn-2);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Shown above the card while an attachment is still being ingested, so the
+   disabled Send button has a visible reason. */
+.attachmentNotice {
+  padding: 0 4px 8px;
+  font-size: 12px;
+  color: var(--t2);
+}
+
+/* ---- Sources bar (SOURCE_SETS_ENABLED): the thread's documents ---- */
+
+.sourcesBar {
+  padding: 0 4px 8px;
+}
+
+.sourcesToggle {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.sourcesToggle:hover {
+  background: var(--s2);
+  color: var(--t1);
+}
+
+.sourcesPanel {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sourcesEmpty {
+  font-size: 12px;
+  color: var(--t3);
+}
+
+.sourceRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--r1);
+  background-color: var(--s2);
+  color: var(--t1);
+  font-size: 12.5px;
+}
+
+.sourceName {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourceMeta {
+  flex: 1;
+  min-width: 140px;
+  font-size: 11px;
+  color: var(--t3);
+}
+
+.sourceRemoveBtn,
+.sourceConfirmBtn,
+.sourceCancelBtn {
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.sourceRemoveBtn:hover:not(:disabled),
+.sourceCancelBtn:hover:not(:disabled) {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+/* The destructive confirm reads as destructive. */
+.sourceConfirmBtn {
+  border-color: var(--danger);
+  color: var(--danger-2);
+}
+
+.sourceConfirmBtn:hover:not(:disabled) {
+  background: var(--danger-a);
+}
+
+.sourceRemoveBtn:disabled,
+.sourceConfirmBtn:disabled,
+.sourceCancelBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sourceConfirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--warn-2);
+}
+
+/* ---- Format-generation surfaces ---- */
+
+/* Deliberately heavier than the muted notice line: during a multi-minute
+   generation this is the only signal the request is alive. */
+.formatProgressNotice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: var(--r2);
+  background-color: var(--s2);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  font-size: 12.5px;
+}
+
+.formatButtons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 8px;
+}
+
+.formatButtonsLabel {
+  font-size: 12px;
+  color: var(--t3);
+}
+
+/* Tooltip carrier: a disabled button does not reliably fire hover for the
+   native title in every browser, so the wrapper span holds the same title. */
+.formatBtnWrap {
+  display: inline-flex;
+}
+
+.formatBtn {
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--r1);
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms var(--ease);
+}
+
+.formatBtn:hover:not(:disabled) {
+  background-color: var(--s4);
+}
+
+.formatBtn:disabled {
+  background-color: var(--s2);
+  box-shadow: none;
+  color: var(--t3);
+  cursor: not-allowed;
+}
+
+/* ---- Join team chat modal ---- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modalContent {
+  min-width: 320px;
+  max-width: calc(100vw - 32px);
+  padding: 20px;
+  border-radius: var(--r3);
+  background: var(--s2);
+  box-shadow: var(--e3), var(--hi);
+}
+
+.modalContent h3 {
+  margin: 0 0 12px;
+  color: var(--t1);
+  font-family: var(--font-cond);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.modalContent input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  background: var(--s1);
+  color: var(--t1);
+  font: inherit;
+  font-size: 13px;
+}
+
+.modalContent input::placeholder {
+  color: var(--t3);
+}
+
+.modalButtons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modalButtons button {
+  height: 28px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--r1);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.modalButtons button:first-child {
+  background: transparent;
+  color: var(--t2);
+}
+
+.modalButtons button:first-child:hover {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+.modalButtons button:last-child {
+  background: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
+  font-weight: 500;
+}
+
+.modalButtons button:last-child:hover {
+  background: var(--s4);
+}

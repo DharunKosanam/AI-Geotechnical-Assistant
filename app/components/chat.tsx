@@ -11,7 +11,7 @@ import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/ru
 import Sidebar from "./sidebar";
 import Composer from "./composer";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
-import { MoreHorizontal } from "lucide-react";
+import { ChevronRight, MoreHorizontal } from "lucide-react";
 
 // --- File attachment config ---
 // DEFAULTS: text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately
@@ -109,21 +109,25 @@ type AttachedFile = {
 
 const STARTER_CARDS = [
   {
+    verb: "Explain",
     title: "Explain a concept",
     example: "What is MICP and how does it work?",
     attach: false,
   },
   {
+    verb: "Compare",
     title: "Compare methods",
     example: "EICP vs MICP for soil improvement",
     attach: false,
   },
   {
+    verb: "Understand",
     title: "Understand a phenomenon",
     example: "What causes soil liquefaction?",
     attach: false,
   },
   {
+    verb: "Analyze",
     title: "Analyze a document",
     example: "Upload a paper and ask questions about it",
     attach: true,
@@ -135,27 +139,39 @@ type WelcomeMessageProps = {
   onAttachClick: () => void;
 };
 
+/* The mockup's eyebrow shows a live document count and index time — no
+   endpoint exposes either (see ROLLOUT-LOG), so the eyebrow is static. */
 const WelcomeMessage = ({ onPromptSelect, onAttachClick }: WelcomeMessageProps) => {
   return (
     <div className={styles.welcomeContainer}>
       <div className={styles.welcomeMessage}>
+        <p className={styles.welcomeEyebrow}>Geotechnical assistant</p>
         <h1>GeoTech AI Assistant</h1>
-        <p>
+        <p className={styles.welcomeSub}>
           Ask questions grounded in geotechnical research papers, or upload
           your own document to analyze.
         </p>
-        <div className={styles.starterGrid}>
+        <div className={styles.starterList}>
           {STARTER_CARDS.map((card) => (
             <button
               key={card.title}
               type="button"
-              className={styles.starterCard}
+              className={styles.starterRow}
               onClick={() =>
                 card.attach ? onAttachClick() : onPromptSelect(card.example)
               }
             >
-              <span className={styles.starterTitle}>{card.title}</span>
-              <span className={styles.starterExample}>{card.example}</span>
+              <span className={styles.starterVerb}>{card.verb}</span>
+              <span className={styles.starterText}>
+                <span className={styles.starterTitle}>{card.title}</span>
+                <span className={styles.starterExample}>{card.example}</span>
+              </span>
+              <ChevronRight
+                size={14}
+                strokeWidth={1.5}
+                className={styles.starterChevron}
+                aria-hidden="true"
+              />
             </button>
           ))}
         </div>

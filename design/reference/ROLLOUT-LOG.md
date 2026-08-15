@@ -254,3 +254,61 @@ removed), `globals.css` (global `pre` reduced to a baseline).
 **Hex grep on touched files:** `message-list.module.css` — one intentional
 `#fff` (see above). `message-list.tsx` — none. `chat.module.css` — 14 hex
 remain, all in composer/chip/format classes owned by Phase 4.
+
+---
+
+## Phase 4 — empty state and composer
+
+**Files touched:** `app/components/composer.tsx` (extracted verbatim from
+chat.tsx in its own commit, then rewritten), new `composer.module.css`,
+`chat.tsx` (welcome restyle + Composer mount), `chat.module.css` (rewritten
+down to what chat.tsx still owns: shell, sub-header, diagram overlay,
+welcome).
+
+**What changed**
+
+- **Composer**: a raised `--s2` card at the 748px measure; `focus-within`
+  swaps the hairline border for the accent ring. Auto-growing textarea
+  (40→200px, height driven by content, resets when the send path clears the
+  input; the old user-draggable `resize: vertical` is gone). Left: attach `+`
+  (both feature-flag branches and the two-item menu preserved, Escape now
+  dismisses the menu) and the scope toggle. Right: mono keyboard hint
+  (`⏎ send · ⇧⏎ newline`, hidden under 560px) and a 32px accent send button
+  (icon, `aria-label="Send"`). **Send is now disabled when the input is
+  empty** (was: enabled but a no-op).
+- **Attachment chips**: `--s3` chips with token status colors — the
+  `color="#4ade80"` / `color="#f87171"` icon props are gone (accent-2 /
+  danger-2 classes). Stage line in mono. Error/warning text in
+  danger-2/warn-2. Upload-progress spinner unchanged in behavior.
+- **Sources bar / format pills / progress notice** (composer-area features):
+  retokenized, control heights per spec (26px small), same handlers,
+  tooltips and disabled-reason copy preserved verbatim.
+- **Empty state**: mono eyebrow, condensed 26px heading, one line of subtext,
+  starter prompts as hairline-separated rows — mono verb label (accent on
+  hover), title, subtitle, and a chevron that slides in on hover/focus. Same
+  two handlers (prompt select / attach picker).
+- Join modal: buttons now `type="button"` — previously they were default
+  submit buttons inside the form and only worked because `handleSubmit`
+  no-ops on empty input.
+
+**Disabled controls (no backend), rendered with tooltips**
+
+- **Scope toggle** ("Knowledge base", left of the composer): retrieval scope
+  is the backend router's decision; no endpoint exists for a user override.
+  Tooltip says so.
+
+**Skipped / omitted, and why**
+
+- **Empty-state eyebrow live data** (document count + index time): no
+  endpoint exposes either (`/api/kb/status` is `{enabled}` only) — the
+  eyebrow is static text rather than a fake number.
+- **Upload progress percentage on chips** (mockup shows progress): the ingest
+  poll exposes stages (extracting/ocr/chunking/embedding), not percentages —
+  the chip shows the real stage in mono instead of a fake bar.
+
+**Build:** pass. **Unit tests:** 7/7 pass.
+
+**Hex grep on touched files:** two intentional `#fff` remain (diagram iframe
+canvas in `chat.module.css`, diagram PNG thumbnail ground in
+`composer.module.css`) — light artifacts on dark ground, not UI chrome.
+Remaining `color="#4ade80"` hits are all in `kb-upload.tsx` → Phase 5.

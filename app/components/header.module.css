@@ -1,3 +1,5 @@
+/* Top bar — 48px, backdrop blur, centred segmented nav. */
+
 .header {
   position: sticky;
   top: 0;
@@ -5,71 +7,107 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 56px;
+  height: 48px;
   flex-shrink: 0;
-  padding: 0 20px;
-  background-color: var(--bg-surface);
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 0 12px;
+  background-color: rgba(12, 11, 10, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+
+.left,
+.right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.iconBtn:hover {
+  background-color: var(--s3);
+  color: var(--t1);
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-primary);
+  color: var(--t1);
+}
+
+.brand svg {
+  color: var(--accent);
 }
 
 .appName {
-  font-size: 15px;
+  font-family: var(--font-cond);
+  font-size: 14px;
   font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
-/* Chat / GeoPilot segmented control (Claude-style). */
+/* Centred three-mode segmented nav — absolute centre so it holds position
+   regardless of what the left/right clusters contain. */
 .toggle {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
-  border-radius: 999px;
-  background-color: var(--bg-sidebar);
-  border: 1px solid var(--border-subtle);
+  padding: 2px;
+  border-radius: var(--r2);
+  background-color: var(--s2);
 }
 
 .segment {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 30px;
-  padding: 0 14px;
-  border-radius: 999px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--r1);
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-secondary);
+  color: var(--t2);
   text-decoration: none;
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
 }
 
 .segment:hover {
-  color: var(--text-primary);
+  color: var(--t1);
 }
 
 .segmentActive {
-  background-color: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  color: var(--t1);
 }
 
-.avatar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background-color: var(--border-subtle);
-  color: var(--text-secondary);
-  cursor: pointer;
+/* Narrow screens: the segments drop their labels and keep the icons. */
+@media (max-width: 720px) {
+  .segmentLabel {
+    display: none;
+  }
+
+  .segment {
+    padding: 0 10px;
+  }
 }

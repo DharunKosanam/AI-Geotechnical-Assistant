@@ -1,24 +1,13 @@
+/* Chat page shell. Sidebar styles live in sidebar.module.css, conversation
+   styles in message-list.module.css, composer styles in composer.module.css. */
+
 .container {
-  display: flex;            /* 启用 Flexbox 布局 */
-  flex-direction: row;      /* 子元素水平排列 */
-  height: 100%;             /* fill the area below the header */
-  width: 100%;              /* 占满屏幕宽度 */
-  overflow: hidden; /* 添加这行防止溢出 */
-}
-
-.leftPanel {
-  margin-right: 20px;
-  width: 25%;               /* 占据 25% 的宽度 */
-  height: 100%;             /* 高度占满容器 */
-  background-color: var(--bg-sidebar);
-  border-radius: 16px;
-  padding: 10px;
   display: flex;
-  flex-direction: column;   /* New Chat on top, thread list scrolls, Join pinned below */
+  flex-direction: row;
+  height: 100%;
+  width: 100%;
   overflow: hidden;
-  flex-shrink: 0;
 }
-
 
 .chatContainer {
   flex: 1;
@@ -29,137 +18,159 @@
   overflow: hidden;
 }
 
-
-.inputForm {
+/* Thread sub-header — 40px, only rendered while a thread is open. Highest
+   order in the column-reverse chat container = pinned at the top. */
+.threadHeader {
+  order: 3;
   display: flex;
-  align-items: flex-end;
-  width: 100%;
-  padding: 10px;
-  padding-bottom: 40px;
-  order: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
   flex-shrink: 0;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
 }
 
-.input {
-  flex-grow: 1;
-  padding: 16px 24px;
-  margin-right: 10px;
-  margin-left: 10px;
-  border-radius: 60px;
-  border: 2px solid var(--border-subtle);
-  font-size: 1em;
-  background-color: var(--bg-surface);
-}
-
-.input:focus {
-  outline: none !important;
-  border-color: #000;
-  background-color: var(--bg-surface);
-}
-
-.button {
-  padding: 8px 24px;
-  background-color: #000;
-  color: white;
-  border: none;
-  font-size: 1em;
-  border-radius: 60px; /* Removed duplicate border-radius property */
-}
-
-.button:disabled {
-  background-color: lightgrey;
-}
-
-/* Input container holds the attachment chips (top) and the [+] [textarea] [Send] row. */
-.inputContainer {
+.threadHeaderMain {
   display: flex;
-  flex-direction: column;
-  flex: 1;
+  align-items: baseline;
+  gap: 10px;
   min-width: 0;
 }
 
-.inputRow {
-  display: flex;
-  align-items: flex-end;
-  width: 100%;
+.threadTitle {
+  color: var(--t1);
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Circular "+" attach button — mirrors the Send button, on the left of the input. */
-.plusBtn {
+.threadMeta {
+  flex-shrink: 0;
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.threadHeaderActions {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
   flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  padding: 0;
+}
+
+.threadHeaderBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
   border: none;
-  border-radius: 50%;
-  background-color: #000;
-  color: #fff;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  font: inherit;
+  font-size: 12px;
   cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
 }
 
-.plusBtn:hover {
-  background-color: #333;
+.threadHeaderBtn:hover:not(:disabled) {
+  background: var(--s3);
+  color: var(--t1);
 }
 
-/* Two-option attach menu behind the "+" (DIAGRAM_EDITOR_ENABLED only):
-   Upload document / Draw a diagram. Anchored to the button, opens upward. */
-.attachMenuWrap {
+.threadHeaderBtn:disabled {
+  color: var(--t3);
+  cursor: not-allowed;
+}
+
+.labSharedChip {
+  padding: 3px 8px;
+  border-radius: var(--r1);
+  background: var(--accent-a);
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.threadMenuWrap {
   position: relative;
-  flex-shrink: 0;
 }
 
-.attachMenuBackdrop {
+.menuBackdrop {
   position: fixed;
   inset: 0;
-  z-index: 15;
+  z-index: 40;
   background: transparent;
 }
 
-.attachMenu {
+.threadMenu {
   position: absolute;
-  bottom: 52px;
-  left: 0;
-  min-width: 200px;
+  top: 30px;
+  right: 0;
+  z-index: 50;
+  min-width: 160px;
   padding: 4px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--bg-surface);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-  z-index: 20;
+  border-radius: var(--r2);
+  background: var(--s2);
+  box-shadow: var(--e2), var(--hi);
 }
 
-.attachMenuItem {
+.threadMenuItem {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
   width: 100%;
-  padding: 8px 10px;
+  height: 28px;
+  padding: 0 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r1);
   background: transparent;
-  color: var(--text-primary);
-  font-size: 14px;
+  color: var(--t1);
+  font: inherit;
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
+  transition: background-color 120ms var(--ease);
 }
 
-.attachMenuItem:hover {
-  background: rgba(128, 128, 128, 0.15);
+.threadMenuItem:hover {
+  background: var(--s3);
 }
 
-/* Full-screen draw.io editor modal (DIAGRAM_EDITOR_ENABLED). Above .modal's
-   z-index 1000 so it always layers over the join dialog. */
+.threadMenuCount {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--t3);
+}
+
+/* Narrow screens: keep title + LAB SHARED chip + ⋯; the two disabled
+   placeholder buttons yield the space. */
+@media (max-width: 560px) {
+  .threadHeaderBtn:disabled {
+    display: none;
+  }
+}
+
+/* Full-screen draw.io editor modal (DIAGRAM_EDITOR_ENABLED). Above the join
+   dialog's z-index 1000 so it always layers over it. */
 .diagramModalOverlay {
   position: fixed;
   inset: 0;
   display: flex;
-  background: rgba(0, 0, 0, 0.7);
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.75);
   z-index: 1100;
 }
 
+/* The embed ships its own light UI on a white canvas — a framed light
+   artifact on the dark ground, same treatment as exported diagram PNGs. */
 .diagramModalFrame {
   flex: 1;
   width: 100%;
@@ -168,527 +179,8 @@
   background: #fff;
 }
 
-/* ChatGPT-style attachment chips above the textarea. */
-.attachmentChips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 0 10px 8px 10px;
-}
+/* ---- Empty state ---- */
 
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background-color: #2a2a2a;
-  color: #fff;
-  font-size: 13px;
-}
-
-.chipIcon {
-  flex-shrink: 0;
-}
-
-/* Diagram-chip PNG thumbnail (DIAGRAM_EDITOR_ENABLED). New classes only —
-   .chip itself is untouched so document chips render exactly as before. */
-.chipThumbLink {
-  flex-shrink: 0;
-  display: inline-flex;
-  line-height: 0;
-}
-
-.chipThumb {
-  max-height: 44px;
-  max-width: 80px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: #fff; /* diagrams export on white; keep them legible on the dark chip */
-  cursor: pointer;
-  object-fit: contain;
-}
-
-.chipText {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.chipName {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Small ingest-stage line under the filename while a chip is uploading. */
-.chipStage {
-  font-size: 11px;
-  color: #8e8ea0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chipRemove {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: #fff;
-  cursor: pointer;
-  line-height: 0;
-}
-
-.chipRemove:hover {
-  opacity: 0.7;
-}
-
-/* Upload progress indicators for attachment chips. */
-.spinner {
-  color: #8e8ea0; /* secondary text color — keeps the spinner subtle */
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.chipError {
-  background: #3a1f1f;
-}
-
-/* An errored or partially-indexed chip has something to SAY, so it gets room
-   to say it: the reason used to live only in a title tooltip, which meant a
-   failed upload looked like a red filename and nothing else. */
-.chipWithMessage {
-  max-width: 340px;
-  align-items: flex-start;
-}
-
-.chipErrorText {
-  font-size: 11px;
-  color: #f8a5a5;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.chipWarningText {
-  font-size: 11px;
-  color: #e3b341;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-/* Shown under the chips while an attachment is still being ingested, so the
-   disabled Send button has a visible reason. */
-.attachmentNotice {
-  padding: 0 10px 8px 10px;
-  font-size: 12px;
-  color: #8e8ea0;
-}
-
-/* Sources panel (SOURCE_SETS_ENABLED): the thread's documents with status,
-   section count, and provenance, plus per-source removal behind an inline
-   dry-run confirm. Same palette as the attachment chips. */
-.sourcesBar {
-  padding: 0 10px 8px 10px;
-}
-
-.sourcesToggle {
-  font-size: 12px;
-  padding: 3px 10px;
-  border: 1px solid #565869;
-  border-radius: 12px;
-  background: transparent;
-  color: #444;
-  cursor: pointer;
-}
-
-.sourcesToggle:hover {
-  background: #f0f0f0;
-}
-
-.sourcesPanel {
-  margin-top: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.sourcesEmpty {
-  font-size: 12px;
-  color: #8e8ea0;
-}
-
-.sourceRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background-color: #2a2a2a;
-  color: #fff;
-  font-size: 13px;
-}
-
-.sourceName {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sourceMeta {
-  font-size: 11px;
-  color: #8e8ea0;
-  flex: 1;
-  min-width: 140px;
-}
-
-.sourceRemoveBtn,
-.sourceConfirmBtn,
-.sourceCancelBtn {
-  font-size: 11px;
-  padding: 2px 10px;
-  border-radius: 10px;
-  border: 1px solid #565869;
-  background: transparent;
-  color: #fff;
-  cursor: pointer;
-}
-
-.sourceRemoveBtn:hover:not(:disabled),
-.sourceCancelBtn:hover:not(:disabled) {
-  background: #40414f;
-}
-
-/* The destructive confirm reads as destructive. */
-.sourceConfirmBtn {
-  border-color: #f87171;
-  color: #f87171;
-}
-
-.sourceConfirmBtn:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.15);
-}
-
-.sourceRemoveBtn:disabled,
-.sourceConfirmBtn:disabled,
-.sourceCancelBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.sourceConfirm {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: #e3b341;
-}
-
-/* Format-generation progress notice. Deliberately heavier than the muted
-   .attachmentNotice line: during a multi-minute generation this is the only
-   signal the request is alive, and a small grey line reads as a hang. Chip
-   language (dark card on the light page) with the existing spinner. */
-.formatProgressNotice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 10px 8px 10px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background-color: #2a2a2a;
-  color: #fff;
-  font-size: 13px;
-}
-
-/* Source-format generation buttons, shown above the input row when the
-   feature is enabled and the thread has at least one ready document.
-   Design language follows the app's existing controls: enabled mirrors the
-   Send/plus buttons (solid black pill, white label, #333 hover), disabled
-   mirrors the Send button's disabled state (lightgrey fill) so the two
-   states read at a glance. flex-wrap keeps the five pills wrapping cleanly
-   on narrow windows instead of overflowing. */
-.formatButtons {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px 8px 10px;
-}
-
-/* Secondary to the buttons themselves, like .chipStage's helper text. */
-.formatButtonsLabel {
-  font-size: 12px;
-  color: #8e8ea0;
-}
-
-/* Tooltip carrier: a disabled button does not reliably fire hover for the
-   native title in every browser, so the wrapper span holds the same title
-   and keeps the explanation visible in the disabled state. */
-.formatBtnWrap {
-  display: inline-flex;
-}
-
-.formatBtn {
-  font-size: 13px;
-  padding: 5px 14px;
-  border: 1px solid #000;
-  border-radius: 60px;
-  background-color: #000;
-  color: #fff;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.formatBtn:hover:not(:disabled) {
-  background-color: #333;
-  border-color: #333;
-}
-
-.formatBtn:disabled {
-  background-color: lightgrey;
-  border-color: lightgrey;
-  color: #666;
-  cursor: not-allowed;
-}
-
-.messages {
-  flex-grow: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  order: 2;
-  overflow-anchor: none;
-}
-
-/* Pin the conversation to the bottom. .messages flex-grows to fill the height,
-   so a short conversation would otherwise float at the top with a large empty
-   gap below it. margin-top:auto on the first message absorbs that free space
-   (last message sits just above the input) and collapses to 0 once the content
-   overflows — so scrolling still reaches the top. */
-.messages > *:first-child {
-  margin-top: auto;
-}
-
-.userMessage,
-.assistantMessage,
-.codeMessage {
-  margin: 8px 0;
-  padding: 8px 16px;
-  align-self: flex-start;
-  border-radius: 15px;
-  max-width: 80%;
-  overflow-wrap: break-word;
-  word-break: break-word; /* 添加这行 */
-  hyphens: auto; /* 添加这行 */
-}
-
-.assistantMessage img {
-  max-width: 100%;
-  margin: 8px 0px 8px 0px;
-  border-radius: 8px;
-}
-
-.userMessage {
-  align-self: flex-end;
-  color: #fff;
-  background-color: #000;
-  white-space: pre-wrap;
-}
-
-.assistantMessage {
-  background-color: #efefef;
-  white-space: normal;
-  line-height: 1.6;
-}
-
-/* Pending-response bubble. Shares .assistantMessage so it sits exactly where
-   the answer will, then is replaced by it. */
-.thinkingBubble {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.thinkingDots {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.thinkingDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: #6b7280;
-  animation: thinkingPulse 1.4s ease-in-out infinite;
-}
-
-.thinkingDot:nth-child(2) {
-  animation-delay: 0.2s;
-}
-
-.thinkingDot:nth-child(3) {
-  animation-delay: 0.4s;
-}
-
-.thinkingHint {
-  font-size: 13px;
-  color: #6b7280;
-}
-
-@keyframes thinkingPulse {
-  0%,
-  80%,
-  100% {
-    opacity: 0.25;
-    transform: translateY(0);
-  }
-  40% {
-    opacity: 1;
-    transform: translateY(-3px);
-  }
-}
-
-/* Respect a reduced-motion preference: keep the indicator, drop the movement. */
-@media (prefers-reduced-motion: reduce) {
-  .thinkingDot {
-    animation: none;
-    opacity: 0.6;
-  }
-}
-
-.codeMessage {
-  padding: 10px 16px;
-  background-color: #e9e9e9;
-  font-family: monospace;
-  counter-reset: line;
-  white-space: pre-wrap;
-}
-
-.codeMessage > div {
-  margin-top: 4px;
-}
-
-.codeMessage span {
-  color: #b8b8b8;
-  margin-right: 8px;
-}
-
-.newChatBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  flex-shrink: 0;
-  margin: 10px 20px 0;
-  padding: 10px 12px;
-  background-color: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 150ms ease;
-}
-
-.newChatBtn:hover {
-  background-color: var(--bg-base);
-}
-
-/* Quiet ghost button pinned at the bottom of the sidebar. */
-.joinTeamBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  flex-shrink: 0;
-  margin: 0 20px 10px;
-  padding: 8px 12px;
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: color 150ms ease;
-}
-
-.joinTeamBtn:hover {
-  color: var(--text-primary);
-}
-
-/* 添加以下样式 */
-.modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 1000;
-}
-
-.modalContent {
-  background: var(--bg-surface);
-  padding: 20px;
-  border-radius: 8px;
-  min-width: 300px;
-}
-
-.modalContent h3 {
-  margin-top: 0;
-  margin-bottom: 15px;
-}
-
-.modalContent input {
-  width: 100%;
-  padding: 8px;
-  margin-bottom: 15px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-}
-
-.modalButtons {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.modalButtons button {
-  padding: 8px 16px;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.modalButtons button:first-child {
-  background: #ddd;
-}
-
-.modalButtons button:last-child {
-  background: #0070f3;
-  color: white;
-}
-
-/* Welcome Message Styles */
 .welcomeContainer {
   display: flex;
   justify-content: center;
@@ -698,61 +190,110 @@
 }
 
 .welcomeMessage {
-  text-align: center;
-  padding: 40px;
-  max-width: 640px;
+  width: 100%;
+  max-width: 560px;
+  padding: 32px 24px;
+}
+
+.welcomeEyebrow {
+  margin-bottom: 12px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--t3);
 }
 
 .welcomeMessage h1 {
-  font-size: 2em;
-  margin-bottom: 12px;
-  color: var(--text-primary);
-  font-weight: 600;
+  margin-bottom: 8px;
+  font-family: var(--font-cond);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--t1);
 }
 
-.welcomeMessage p {
-  font-size: 1.05em;
-  color: var(--text-secondary);
-  max-width: 480px;
-  margin: 0 auto 32px;
+.welcomeSub {
+  margin-bottom: 28px;
+  font-size: 13.5px;
   line-height: 1.6;
+  color: var(--t2);
 }
 
-/* 2x2 starter prompt grid on the empty-state screen */
-.starterGrid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
-  max-width: 560px;
-  margin: 0 auto;
-}
-
-.starterCard {
+/* Starter prompts: hairline-separated rows. */
+.starterList {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 16px;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.starterRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 4px;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 150ms ease, background-color 150ms ease;
+  transition: background-color 120ms var(--ease);
 }
 
-.starterCard:hover {
-  border-color: #d4d4d4;
-  background-color: var(--bg-base);
+.starterRow:hover {
+  background-color: var(--s1);
+}
+
+.starterVerb {
+  flex-shrink: 0;
+  width: 88px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
+}
+
+.starterRow:hover .starterVerb {
+  color: var(--accent-2);
+}
+
+.starterText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
 }
 
 .starterTitle {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--t1);
 }
 
 .starterExample {
-  font-size: 13px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: var(--t3);
+}
+
+/* Chevron slides in on hover. */
+.starterChevron {
+  flex-shrink: 0;
+  color: var(--t3);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 140ms var(--ease), transform 140ms var(--ease);
+}
+
+.starterRow:hover .starterChevron,
+.starterRow:focus-visible .starterChevron {
+  opacity: 1;
+  transform: translateX(0);
+  color: var(--t1);
 }

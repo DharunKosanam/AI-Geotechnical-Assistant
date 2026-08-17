@@ -3,20 +3,27 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Layers, MessageSquare, Compass, User, Library } from "lucide-react";
+import { Layers, MessageSquare, Compass, Library, PanelLeft } from "lucide-react";
+import AccountMenu from "./account-menu";
 import styles from "./header.module.css";
 
 /**
- * Shared app header.
+ * Shared app top bar (48px, backdrop blur).
  *
- * Adds a Chat / GeoPilot segmented toggle (like Claude's chat/code switch) that
- * routes between the existing chat ("/") and the GeoPilot workspace
- * ("/workspace"). The toggle is only shown when the workspace feature is
- * enabled -- the backend is the single source of truth: we ask
- * GET /api/workspace/status (cookie-authenticated) once on mount. When the flag
- * is off the toggle never renders and the header looks exactly as before.
+ * Left: on the chat page, the sidebar collapse toggle (state lives in
+ * page.tsx so the sidebar's own toggle stays in sync); elsewhere, the brand.
+ * Centre: the three-mode segmented nav. Right: the account popover.
+ *
+ * The segmented nav is only shown when the backend features are enabled --
+ * the backend is the single source of truth: we ask GET /api/workspace/status
+ * and GET /api/kb/status (cookie-authenticated) once on mount.
  */
-const Header = () => {
+type HeaderProps = {
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
+};
+
+const Header = ({ sidebarCollapsed, onToggleSidebar }: HeaderProps) => {
   const pathname = usePathname();
   const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
   const [kbEnabled, setKbEnabled] = useState(false);
@@ -45,9 +52,24 @@ const Header = () => {
 
   return (
     <header className={styles.header}>
-      <div className={styles.brand}>
-        <Layers size={20} />
-        <span className={styles.appName}>GeoTech AI</span>
+      <div className={styles.left}>
+        {onToggleSidebar ? (
+          <button
+            type="button"
+            className={styles.iconBtn}
+            onClick={onToggleSidebar}
+            aria-label={sidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+            aria-pressed={sidebarCollapsed}
+            title={sidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+          >
+            <PanelLeft size={16} strokeWidth={1.5} />
+          </button>
+        ) : (
+          <div className={styles.brand}>
+            <Layers size={16} strokeWidth={1.5} />
+            <span className={styles.appName}>GeoTech AI</span>
+          </div>
+        )}
       </div>
 
       {(workspaceEnabled || kbEnabled) && (
@@ -57,8 +79,8 @@ const Header = () => {
             className={`${styles.segment} ${onChat ? styles.segmentActive : ""}`}
             aria-current={onChat ? "page" : undefined}
           >
-            <MessageSquare size={15} />
-            <span>Chat</span>
+            <MessageSquare size={14} strokeWidth={1.5} />
+            <span className={styles.segmentLabel}>Chat</span>
           </Link>
           {workspaceEnabled && (
             <Link
@@ -66,8 +88,8 @@ const Header = () => {
               className={`${styles.segment} ${onWorkspace ? styles.segmentActive : ""}`}
               aria-current={onWorkspace ? "page" : undefined}
             >
-              <Compass size={15} />
-              <span>GeoPilot</span>
+              <Compass size={14} strokeWidth={1.5} />
+              <span className={styles.segmentLabel}>GeoPilot</span>
             </Link>
           )}
           {kbEnabled && (
@@ -76,17 +98,16 @@ const Header = () => {
               className={`${styles.segment} ${onKb ? styles.segmentActive : ""}`}
               aria-current={onKb ? "page" : undefined}
             >
-              <Library size={15} />
-              <span>Knowledge Base</span>
+              <Library size={14} strokeWidth={1.5} />
+              <span className={styles.segmentLabel}>Knowledge Base</span>
             </Link>
           )}
         </nav>
       )}
 
-      {/* Placeholder for future auth — intentionally a no-op. */}
-      <button type="button" className={styles.avatar} aria-label="Account">
-        <User size={16} />
-      </button>
+      <div className={styles.right}>
+        <AccountMenu />
+      </div>
     </header>
   );
 };

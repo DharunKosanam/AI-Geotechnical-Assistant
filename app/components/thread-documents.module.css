@@ -1,0 +1,290 @@
+/* Thread documents — a persistent side COLUMN on --s1 with a left hairline.
+   Not a modal: no backdrop, no trap in column mode. Distinct on purpose from
+   the in-message "Grounded in" inset (an --s1 block INSIDE the answer with
+   --oxide indices): this is a full-height column beside the conversation
+   with its own header, --s2 row cards, no citation indices, and it is the
+   only place a document can be removed. */
+
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  height: 100%;
+  min-width: 0;
+  background: var(--s1);
+  border-left: 1px solid var(--line-2);
+}
+
+/* Narrow viewports: three columns don't fit — overlay the conversation. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.panelOverlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 810;
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  box-shadow: var(--e3);
+  animation: panelIn 160ms var(--ease);
+}
+
+@keyframes panelIn {
+  from {
+    transform: translateX(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Left-edge drag handle. Invisible hit area, hairline highlight on
+   hover/focus/drag. */
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+}
+
+.resizeHandle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background-color 120ms var(--ease);
+}
+
+.resizeHandle:hover::after,
+.resizeHandle:active::after {
+  background: var(--accent);
+}
+
+.resizeHandle:focus-visible::after {
+  background: var(--accent);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 12px 8px 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.headerText {
+  min-width: 0;
+}
+
+.title {
+  margin: 0 0 4px;
+  font-family: var(--font-cond);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--t1);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--t2);
+}
+
+.closeBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.closeBtn:hover {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 12px 16px;
+}
+
+.note {
+  margin: 8px 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--t3);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: var(--r2);
+  background: var(--s2);
+  box-shadow: var(--hi);
+}
+
+.rowMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Long filenames wrap inside the column instead of pushing it wide; the
+   full name is always in the title attribute. */
+.filename {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--t1);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--t3);
+  overflow-wrap: anywhere;
+}
+
+.metaBad {
+  color: var(--danger-2);
+}
+
+.removeWrap {
+  align-self: flex-start;
+}
+
+.removeBtn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.removeBtn:hover:not(:disabled) {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+.removeBtn:disabled {
+  color: var(--t3);
+  cursor: not-allowed;
+}
+
+/* The dry-run confirm — the only modal region. Reads as destructive, sits
+   inside the row it affects. */
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--r1);
+  background: var(--danger-a);
+}
+
+.confirmText {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--t1);
+}
+
+.confirmText strong {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--danger-2);
+}
+
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cancelBtn,
+.deleteBtn {
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--r1);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.cancelBtn {
+  background: transparent;
+  color: var(--t2);
+}
+
+.cancelBtn:hover:not(:disabled) {
+  background: var(--s3);
+  color: var(--t1);
+}
+
+.deleteBtn {
+  background: var(--danger);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.deleteBtn:hover:not(:disabled) {
+  background: var(--danger-2);
+}
+
+.cancelBtn:disabled,
+.deleteBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

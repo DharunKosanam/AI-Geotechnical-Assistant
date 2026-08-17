@@ -4,19 +4,16 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from "react"
 import useSWR from "swr";
 import styles from "./chat.module.css";
 import { AssistantStream } from "openai/lib/AssistantStream";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import "katex/dist/katex.min.css";
+import MessageList, { MessageProps } from "./message-list";
 // @ts-expect-error - no types for this yet
 import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistants";
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
-import ThreadList from "./thread-list";
-import SidebarAccount from "./sidebar-account";
-import DiagramEditorModal from "./diagram-editor-modal";
+import Sidebar from "./sidebar";
+import Composer from "./composer";
+import ThreadDocuments, { THREAD_DOCS_OPEN_KEY } from "./thread-documents";
+import { toast } from "./toaster";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
-import { Plus, X, File as FileIcon, Loader2, Check, AlertCircle, SquarePen, Users, PenLine } from "lucide-react";
+import { ChevronRight, MoreHorizontal } from "lucide-react";
 
 // --- File attachment config ---
 // DEFAULTS: text-bearing formats only. Images (PNG/JPG/TIFF) are deliberately
@@ -58,15 +55,6 @@ const POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 5 * 60 * 1000; // give up after 5 minutes
 
 // Friendly labels for the optional stage text shown under an uploading chip.
-const STAGE_LABELS: Record<string, string> = {
-  extracting: "Extracting...",
-  ocr: "OCR...",
-  chunking: "Chunking...",
-  embedding: "Embedding...",
-  done: "Done",
-};
-const stageLabel = (stage?: string): string =>
-  (stage && STAGE_LABELS[stage]) || "Processing...";
 
 // Last-resort message when an upload fails WITHOUT a usable `detail` from the
 // backend — i.e. something between the browser and FastAPI broke. Each case
@@ -85,52 +73,27 @@ const httpUploadError = (status: number, filename: string): string => {
   return `Upload was rejected (error ${status}).`;
 };
 
-// Renders the trailing "**Sources:**" markdown block appended to an assistant
-// answer. Shared by the streaming and JSON paths so a message looks identical
-// however it arrived — sources are always appended at the END, because the
-// backend can only finalise the list once the answer is complete (the refusal
-// guard can clear it and citation narrowing trims it to what was actually cited).
-// A citation backed (fully or partly) by AI-vision transcription of scanned
-// pages must say so: that text is model-generated interpretation, never
-// verbatim document content. Empty for ordinary sources.
-const visionMarker = (source: any): string => {
-  if (typeof source !== "object" || source === null || !source.visionDerived) return "";
-  const pages: any[] = Array.isArray(source.visionPages) ? source.visionPages : [];
-  if (pages.length === 0) {
-    // No page numbers = a directly uploaded image: the entire cited content
-    // is a model-generated description, with no verbatim layer at all.
-    return " _(AI vision description of this image - model-generated, not document text)_";
-  }
-  return ` _(AI vision transcription of page${pages.length > 1 ? "s" : ""} ${pages.join(", ")} - not verbatim text)_`;
-};
+// Sources are no longer flattened into the message text: each assistant
+// message carries the retrieval payload's sources array as structured data,
+// and message-list.tsx renders it as the "Grounded in" panel. The panel is
+// assembled deterministically from that payload — never from model output —
+// and vision-derived citations keep their "not verbatim" disclaimer there.
 
-const formatSourcesBlock = (sources: any[]): string => {
-  if (!sources || sources.length === 0) return "";
-  let block = "\n\n**Sources:**\n";
-  sources.forEach((source: any, index: number) => {
-    if (typeof source === "object" && source !== null && source.title && source.url) {
-      block += `${index + 1}. [${source.title}](${source.url})${visionMarker(source)}\n`;
-    } else if (typeof source === "object" && source !== null && source.title) {
-      // No URL by design: thread/user uploads are the user's own files, so
-      // their citations are plain references — no external link to leak the
-      // title to.
-      block += `${index + 1}. ${source.title}${visionMarker(source)}\n`;
-    } else if (typeof source === "string") {
-      try {
-        const parsed = JSON.parse(source);
-        if (parsed.title && parsed.url) {
-          block += `${index + 1}. [${parsed.title}](${parsed.url})\n`;
-        } else {
-          block += `${index + 1}. ${source}\n`;
-        }
-      } catch {
-        block += `${index + 1}. ${source}\n`;
-      }
-    } else {
-      block += `${index + 1}. ${String(source)}\n`;
-    }
-  });
-  return block;
+// Legacy-row detection for the two history-shaped load paths. Primary signal:
+// createdAt vs the panel cutover — neither the current backend nor any
+// frontend since the redesign has ever persisted the appended block, so a row
+// created after the cutover can only carry sources as the structured field.
+// Rows older than the cutover (or with no usable createdAt — very old docs
+// return null) fall back to a TAIL-anchored match: the legacy renderer only
+// ever appended "**Sources:**" + its numbered list at the very end of the
+// text, so a model-written "**Sources:**" heading mid-prose can no longer
+// suppress the panel.
+const SOURCES_PANEL_CUTOVER_MS = Date.parse("2026-08-16T00:00:00Z");
+const LEGACY_SOURCES_TAIL = /(?:^|\n\n)\*\*Sources:\*\*\n(?:\d+\. [^\n]*\n?)+$/;
+const hasLegacySourcesTail = (text: string, createdAt?: string | null): boolean => {
+  const ts = createdAt ? Date.parse(createdAt) : NaN;
+  if (!Number.isNaN(ts) && ts >= SOURCES_PANEL_CUTOVER_MS) return false;
+  return LEGACY_SOURCES_TAIL.test(text);
 };
 
 const getExt = (filename: string): string => {
@@ -163,335 +126,27 @@ type AttachedFile = {
   fileId?: string;
 };
 
-type MessageProps = {
-  role: "user" | "assistant" | "code";
-  text: string;
-  annotations?: any[];
-};
-
-const UserMessage = ({ text }: { text: string }) => {
-  return (
-    <div className={styles.messageRow} style={{ justifyContent: 'flex-end' }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>You</div>
-        <div className={styles.userMessage}>{text}</div>
-      </div>
-    </div>
-  );
-};
-
-// How long to wait before the indicator starts reassuring the user. Under GPU
-// contention an answer can take minutes; silence that long reads as "broken"
-// and users reload, which adds load and makes the next answer slower still.
-const THINKING_SLOW_MS = 15_000;
-const THINKING_VERY_SLOW_MS = 45_000;
-
-/**
- * Pending-response indicator — the assistant's turn made visible before any of
- * its text exists. Deliberately mirrors AssistantMessage's row/label/bubble so
- * it occupies exactly the spot the answer will appear in, and is simply
- * replaced by it. Once streaming lands this is the "waiting for first token"
- * state; the streamed text takes over from here.
- */
-const ThinkingIndicator = ({ startedAt }: { startedAt: number }) => {
-  // Escalating reassurance, driven by two timers rather than a per-second tick
-  // so a long wait costs two re-renders, not 180.
-  const [phase, setPhase] = useState<0 | 1 | 2>(0);
-
-  useEffect(() => {
-    setPhase(0);
-    const elapsed = Date.now() - startedAt;
-    const timers = [
-      setTimeout(() => setPhase(1), Math.max(0, THINKING_SLOW_MS - elapsed)),
-      setTimeout(() => setPhase(2), Math.max(0, THINKING_VERY_SLOW_MS - elapsed)),
-    ];
-    return () => timers.forEach(clearTimeout);
-  }, [startedAt]);
-
-  const hint =
-    phase === 2
-      ? "Still working — complex questions can take a couple of minutes. No need to reload."
-      : phase === 1
-        ? "Searching the knowledge base and drafting an answer..."
-        : "Thinking...";
-
-  return (
-    <div className={styles.messageRow} style={{ justifyContent: "flex-start" }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>AI Assistant</div>
-        {/* role=status + aria-live announces the wait to screen readers, which
-            would otherwise get the same silence as a blank screen. */}
-        <div
-          className={`${styles.assistantMessage} ${styles.thinkingBubble}`}
-          role="status"
-          aria-live="polite"
-        >
-          <span className={styles.thinkingDots} aria-hidden="true">
-            <span className={styles.thinkingDot} />
-            <span className={styles.thinkingDot} />
-            <span className={styles.thinkingDot} />
-          </span>
-          <span className={styles.thinkingHint}>{hint}</span>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const AssistantMessage = ({ text, annotations }: { text: string; annotations?: any[] }) => {
-  // Replace citation annotations like 【6:0†source】 with actual filenames
-  const replaceCitationsWithFilenames = (text: string, annotations?: any[]) => {
-    // Regex to match citation patterns: 【number:number†source】
-    const citationRegex = /【(\d+):(\d+)†([^】]+)】/g;
-    
-    // Create a map of citation text to filename
-    const citationMap = new Map<string, string>();
-    if (annotations && Array.isArray(annotations)) {
-      annotations.forEach((annotation: any) => {
-        if (annotation.type === 'file_citation' && annotation.file_citation) {
-          const filename = annotation.file_citation.filename || 'Unknown File';
-          citationMap.set(annotation.text, filename);
-        }
-      });
-    }
-    
-    // Replace all citations with filename-based references
-    const cleanedText = text.replace(citationRegex, (match) => {
-      // Try to find the filename from annotations
-      const filename = citationMap.get(match);
-      
-      if (filename) {
-        // Return styled citation with filename
-        return ` _(Source: ${filename})_ `;
-      } else {
-        // Fallback if filename not found
-        return ` _(Source: Referenced File)_ `;
-      }
-    });
-
-    return cleanedText;
-  };
-
-  const processedText = replaceCitationsWithFilenames(text, annotations);
-
-  return (
-    <div className={styles.messageRow} style={{ justifyContent: 'flex-start' }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>AI Assistant</div>
-        <div className={styles.assistantMessage}>
-          <Markdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex]}
-            components={{
-              // Style emphasis/italic elements (our citations) with smaller gray text
-              em: ({node, ...props}) => (
-                <em style={{ 
-                  color: '#6b7280', 
-                  fontSize: '0.875em',
-                  fontStyle: 'italic',
-                  fontWeight: '500'
-                }} {...props} />
-              ),
-              // Style paragraphs with spacing
-              p: ({node, ...props}) => (
-                <p style={{ 
-                  marginTop: '0.75em', 
-                  marginBottom: '0.75em',
-                  lineHeight: '1.6'
-                }} {...props} />
-              ),
-              // Style headings with proper spacing and sizing
-              h1: ({node, ...props}) => (
-                <h1 style={{ 
-                  fontSize: '1.5em', 
-                  fontWeight: 'bold', 
-                  marginTop: '1em', 
-                  marginBottom: '0.5em' 
-                }} {...props} />
-              ),
-              h2: ({node, ...props}) => (
-                <h2 style={{ 
-                  fontSize: '1.3em', 
-                  fontWeight: 'bold', 
-                  marginTop: '1em', 
-                  marginBottom: '0.5em' 
-                }} {...props} />
-              ),
-              h3: ({node, ...props}) => (
-                <h3 style={{ 
-                  fontSize: '1.15em', 
-                  fontWeight: 'bold', 
-                  marginTop: '1em', 
-                  marginBottom: '0.5em' 
-                }} {...props} />
-              ),
-              h4: ({node, ...props}) => (
-                <h4 style={{ 
-                  fontSize: '1.05em', 
-                  fontWeight: 'bold', 
-                  marginTop: '0.75em', 
-                  marginBottom: '0.5em' 
-                }} {...props} />
-              ),
-              // Style code blocks nicely
-              code: ({node, inline, ...props}: any) => 
-                inline ? (
-                  <code style={{ 
-                    backgroundColor: '#f3f4f6',
-                    padding: '0.2em 0.4em',
-                    borderRadius: '3px',
-                    fontSize: '0.875em',
-                    fontFamily: 'monospace'
-                  }} {...props} />
-                ) : (
-                  <code style={{ 
-                    display: 'block',
-                    backgroundColor: '#1e1e1e',
-                    color: '#d4d4d4',
-                    padding: '1em',
-                    borderRadius: '6px',
-                    overflowX: 'auto',
-                    fontSize: '0.875em',
-                    fontFamily: 'monospace',
-                    marginTop: '0.75em',
-                    marginBottom: '0.75em'
-                  }} {...props} />
-                ),
-              // Style lists with better spacing
-              ul: ({node, ...props}) => (
-                <ul style={{ 
-                  marginLeft: '1.5em', 
-                  marginTop: '0.75em', 
-                  marginBottom: '0.75em',
-                  paddingLeft: '0.5em'
-                }} {...props} />
-              ),
-              ol: ({node, ...props}) => (
-                <ol style={{ 
-                  marginLeft: '1.5em', 
-                  marginTop: '0.75em', 
-                  marginBottom: '0.75em',
-                  paddingLeft: '0.5em'
-                }} {...props} />
-              ),
-              li: ({node, ...props}) => (
-                <li style={{ 
-                  marginTop: '0.25em', 
-                  marginBottom: '0.25em',
-                  lineHeight: '1.6'
-                }} {...props} />
-              ),
-              // Style strong/bold text
-              strong: ({node, ...props}) => (
-                <strong style={{ fontWeight: '600' }} {...props} />
-              ),
-              // Style tables
-              table: ({node, ...props}) => (
-                <div style={{ overflowX: 'auto', marginTop: '1em', marginBottom: '1em' }}>
-                  <table style={{ 
-                    borderCollapse: 'collapse',
-                    width: '100%',
-                    border: '1px solid #e5e7eb'
-                  }} {...props} />
-                </div>
-              ),
-              th: ({node, ...props}) => (
-                <th style={{ 
-                  border: '1px solid #e5e7eb',
-                  padding: '0.5em',
-                  backgroundColor: '#f9fafb',
-                  fontWeight: 'bold'
-                }} {...props} />
-              ),
-              td: ({node, ...props}) => (
-                <td style={{ 
-                  border: '1px solid #e5e7eb',
-                  padding: '0.5em'
-                }} {...props} />
-              ),
-              // Style blockquotes
-              blockquote: ({node, ...props}) => (
-                <blockquote style={{
-                  borderLeft: '4px solid #e5e7eb',
-                  paddingLeft: '1em',
-                  marginLeft: '0',
-                  marginTop: '0.75em',
-                  marginBottom: '0.75em',
-                  color: '#6b7280',
-                  fontStyle: 'italic'
-                }} {...props} />
-              ),
-              // Open all links in a new tab
-              a: ({node, ...props}) => (
-                <a
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    color: '#2563eb',
-                    textDecoration: 'underline',
-                    cursor: 'pointer',
-                  }}
-                  {...props}
-                />
-              )
-            }}
-          >
-            {processedText}
-          </Markdown>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const CodeMessage = ({ text }: { text: string }) => {
-  return (
-    <div className={styles.messageRow} style={{ justifyContent: 'flex-start' }}>
-      <div className={styles.messageContent}>
-        <div className={styles.messageLabel}>Code Output</div>
-        <div className={styles.codeMessage}>
-          {text.split("\n").map((line, index) => (
-            <div key={index}>
-              <span>{`${index + 1}. `}</span>
-              {line}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const Message = ({ role, text, annotations }: MessageProps) => {
-  switch (role) {
-    case "user":
-      return <UserMessage text={text} />;
-    case "assistant":
-      return <AssistantMessage text={text} annotations={annotations} />;
-    case "code":
-      return <CodeMessage text={text} />;
-    default:
-      return null;
-  }
-};
-
 const STARTER_CARDS = [
   {
+    verb: "Explain",
     title: "Explain a concept",
     example: "What is MICP and how does it work?",
     attach: false,
   },
   {
+    verb: "Compare",
     title: "Compare methods",
     example: "EICP vs MICP for soil improvement",
     attach: false,
   },
   {
+    verb: "Understand",
     title: "Understand a phenomenon",
     example: "What causes soil liquefaction?",
     attach: false,
   },
   {
+    verb: "Analyze",
     title: "Analyze a document",
     example: "Upload a paper and ask questions about it",
     attach: true,
@@ -503,27 +158,39 @@ type WelcomeMessageProps = {
   onAttachClick: () => void;
 };
 
+/* The mockup's eyebrow shows a live document count and index time — no
+   endpoint exposes either (see ROLLOUT-LOG), so the eyebrow is static. */
 const WelcomeMessage = ({ onPromptSelect, onAttachClick }: WelcomeMessageProps) => {
   return (
     <div className={styles.welcomeContainer}>
       <div className={styles.welcomeMessage}>
+        <p className={styles.welcomeEyebrow}>Geotechnical assistant</p>
         <h1>GeoTech AI Assistant</h1>
-        <p>
+        <p className={styles.welcomeSub}>
           Ask questions grounded in geotechnical research papers, or upload
           your own document to analyze.
         </p>
-        <div className={styles.starterGrid}>
+        <div className={styles.starterList}>
           {STARTER_CARDS.map((card) => (
             <button
               key={card.title}
               type="button"
-              className={styles.starterCard}
+              className={styles.starterRow}
               onClick={() =>
                 card.attach ? onAttachClick() : onPromptSelect(card.example)
               }
             >
-              <span className={styles.starterTitle}>{card.title}</span>
-              <span className={styles.starterExample}>{card.example}</span>
+              <span className={styles.starterVerb}>{card.verb}</span>
+              <span className={styles.starterText}>
+                <span className={styles.starterTitle}>{card.title}</span>
+                <span className={styles.starterExample}>{card.example}</span>
+              </span>
+              <ChevronRight
+                size={14}
+                strokeWidth={1.5}
+                className={styles.starterChevron}
+                aria-hidden="true"
+              />
             </button>
           ))}
         </div>
@@ -536,10 +203,16 @@ type ChatProps = {
   functionCallHandler?: (
     toolCall: RequiredActionFunctionToolCall
   ) => Promise<string>;
+  /* Sidebar collapse lives in page.tsx so the top bar toggle and the
+     sidebar's own toggle stay in sync. Purely presentational. */
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
 };
 
 const Chat = ({
   functionCallHandler = () => Promise.resolve(""),
+  sidebarCollapsed,
+  onToggleSidebar,
 }: ChatProps) => {
   const [userInput, setUserInput] = useState("");
   const [messages, setMessages] = useState<MessageProps[]>([]);
@@ -574,6 +247,11 @@ const Chat = ({
   const threadListRef = useRef<any>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinThreadInput, setJoinThreadInput] = useState('');
+  // Sub-header presentation state: the open thread's display name (fed by the
+  // thread list on select/rename) and the sub-header's ⋯ menu.
+  const [activeThreadTitle, setActiveThreadTitle] = useState<string | null>(null);
+  const [showThreadMenu, setShowThreadMenu] = useState(false);
+  const [threadIdCopied, setThreadIdCopied] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // --- File attachment UI state (replaces the removed right-hand file panel) ---
@@ -680,6 +358,21 @@ const Chat = ({
   }
   const [sourceSetsEnabled, setSourceSetsEnabled] = useState(false);
   const [showSources, setShowSources] = useState(false);
+  // Restore / persist the panel's open state (client-only: after mount).
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(THREAD_DOCS_OPEN_KEY) === "1") setShowSources(true);
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THREAD_DOCS_OPEN_KEY, showSources ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [showSources]);
   const [threadSources, setThreadSources] = useState<ThreadSource[] | null>(null);
   // The dry-run preview for the source pending removal; confirm sends the
   // same request with confirm: true.
@@ -721,7 +414,8 @@ const Chat = ({
     [sourceSetsEnabled],
   );
   useEffect(() => {
-    setShowSources(false);
+    // The panel's open state is a layout preference (persisted), so a thread
+    // switch keeps it; only an in-flight removal preview is dropped.
     setRemovePreview(null);
     refreshThreadSources(threadId || null);
   }, [threadId, refreshThreadSources]);
@@ -896,16 +590,21 @@ const Chat = ({
   useEffect(() => {
     if (messageData?.messages && isGroupConversation && threadId) {
       const parsed = messageData.messages.map((msg: any) => {
-        let text = msg.content?.[0]?.text?.value || msg.content || '';
+        const text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
-        if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          // Shared renderer: handles link-less (private upload) citations too.
-          text += formatSourcesBlock(sources);
-        }
         return {
           role: msg.role,
           text,
-          annotations: msg.content?.[0]?.text?.annotations || []
+          annotations: msg.content?.[0]?.text?.annotations || [],
+          // Legacy rows may carry the old appended "**Sources:**" block in
+          // the text — attach the structured panel only when they don't, so
+          // sources never render twice. createdAt cutover decides first; the
+          // tail-anchored match is the fallback (see hasLegacySourcesTail).
+          sources:
+            msg.role === 'assistant' && sources.length > 0 &&
+            !hasLegacySourcesTail(text, msg.createdAt)
+              ? sources
+              : undefined,
         };
       });
       if (parsed.length > lastMessageCountRef.current) {
@@ -1221,10 +920,12 @@ const Chat = ({
             appendToLastMessage(piece);
           }
         } else if (name === "done") {
-          const block = formatSourcesBlock(payload.sources || []);
-          if (block) {
-            if (started) appendToLastMessage(block);
-            else appendMessage("assistant", block.trimStart());
+          // Attach only to a streamed answer. A done with no tokens has no
+          // text to ground — a role label over an empty body with a panel
+          // under it reads as a broken turn, so it is skipped instead.
+          const sources = payload.sources || [];
+          if (sources.length > 0 && started) {
+            attachSourcesToLastMessage(sources);
           }
         } else if (name === "error") {
           const detail = payload.detail || "The assistant failed to answer.";
@@ -1418,10 +1119,9 @@ const Chat = ({
           }
         } else if (name === "done") {
           doneSources = payload.sources || [];
-          const block = formatSourcesBlock(payload.sources || []);
-          if (block) {
-            if (started) appendToLastMessage(block);
-            else appendMessage("assistant", block.trimStart());
+          // Same rule as the chat stream: no streamed text, no panel.
+          if (doneSources.length > 0 && started) {
+            attachSourcesToLastMessage(doneSources);
           }
         } else if (name === "error") {
           const detail = payload.detail || "The document generation failed.";
@@ -1554,13 +1254,10 @@ const Chat = ({
       const answer = data.answer || "";
       const sources = data.sources || [];
 
-      // Build the complete response with clickable source links
-      const fullResponse = answer + formatSourcesBlock(sources);
-
       console.log("✅ Answer extracted:", answer.substring(0, 100) + "...");
       console.log("📚 Sources:", sources);
 
-      appendMessage("assistant", fullResponse);
+      appendMessage("assistant", answer, sources);
       setInputDisabled(false);
 
       // Title generation is owned by handleSubmit (the only caller), which knows
@@ -1763,6 +1460,32 @@ const Chat = ({
     }
   };
 
+  // Retry: re-ask the last user question through the exact same send path a
+  // typed message takes. The repeated user turn is hidden by the consecutive-
+  // duplicate dedup, so on screen this reads as "regenerate the answer".
+  const retryLastTurn = async () => {
+    if (inputDisabled || isStreaming) return;
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const activeThreadId = threadIdRef.current;
+    if (!lastUser || !activeThreadId) return;
+    setInputDisabled(true);
+    setAwaitingSince(Date.now());
+    shouldForceScrollRef.current = true;
+    setMessages((prevMessages) => {
+      const newMessages: MessageProps[] = [
+        ...prevMessages,
+        { role: "user" as const, text: lastUser.text },
+      ];
+      lastMessageCountRef.current = newMessages.length;
+      return newMessages;
+    });
+    try {
+      await sendMessage(lastUser.text, activeThreadId);
+    } finally {
+      setAwaitingSince(null);
+    }
+  };
+
   /* Stream Event Handlers */
 
   // textCreated - create new assistant message
@@ -1898,11 +1621,24 @@ const Chat = ({
     });
   };
 
-  const appendMessage = (role: "user" | "assistant" | "code", text: string) => {
+  const appendMessage = (role: "user" | "assistant" | "code", text: string, sources?: any[]) => {
     setMessages((prevMessages) => {
-      const newMessages = [...prevMessages, { role, text }];
+      const newMessages = [...prevMessages, { role, text, sources }];
       lastMessageCountRef.current = newMessages.length;
       return newMessages;
+    });
+  };
+
+  // Attach the retrieval payload's sources to the message the panel belongs
+  // to (the streamed answer that just finished). Assistant messages only —
+  // sources must never land on a user turn.
+  const attachSourcesToLastMessage = (sources: any[]) => {
+    if (!sources || sources.length === 0) return;
+    setMessages((prevMessages) => {
+      if (prevMessages.length === 0) return prevMessages;
+      const last = prevMessages[prevMessages.length - 1];
+      if (last.role !== "assistant") return prevMessages;
+      return [...prevMessages.slice(0, -1), { ...last, sources }];
     });
   };
 
@@ -1981,16 +1717,21 @@ const Chat = ({
       
       // Parse messages - handle both old format (nested content) and new format (direct content)
       const newMessages = (data.messages || []).map((msg: any) => {
-        let text = msg.content?.[0]?.text?.value || msg.content || '';
+        const text = msg.content?.[0]?.text?.value || msg.content || '';
         const sources = msg.sources || [];
-        if (msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')) {
-          // Shared renderer: handles link-less (private upload) citations too.
-          text += formatSourcesBlock(sources);
-        }
         return {
           role: msg.role,
           text,
-          annotations: msg.content?.[0]?.text?.annotations || []
+          annotations: msg.content?.[0]?.text?.annotations || [],
+          // Legacy rows may carry the old appended "**Sources:**" block in
+          // the text — attach the structured panel only when they don't, so
+          // sources never render twice. createdAt cutover decides first; the
+          // tail-anchored match is the fallback (see hasLegacySourcesTail).
+          sources:
+            msg.role === 'assistant' && sources.length > 0 &&
+            !hasLegacySourcesTail(text, msg.createdAt)
+              ? sources
+              : undefined,
         };
       });
 
@@ -2076,6 +1817,7 @@ const Chat = ({
     threadIdRef.current = null;
     setMessages([]);
     setIsGroupConversation(false);
+    setActiveThreadTitle(null);
     setIsNewThread(true);
     setIsDraftThread(false);
     setAwaitingSince(null); // an abandoned turn must not keep a spinner alive
@@ -2086,7 +1828,7 @@ const Chat = ({
     lastMessageCountRef.current = 0;
   };
 
-  const handleThreadSelect = (selectedThreadId: string | null, isGroup: boolean) => {
+  const handleThreadSelect = (selectedThreadId: string | null, isGroup: boolean, name?: string) => {
     // CRITICAL: Stop any active polling IMMEDIATELY before changing state
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -2108,6 +1850,7 @@ const Chat = ({
       threadIdRef.current = "";
       setMessages([]);
       setIsGroupConversation(false);
+      setActiveThreadTitle(null);
       setIsNewThread(false);
       lastMessageCountRef.current = 0;
     } else {
@@ -2122,6 +1865,7 @@ const Chat = ({
       lastMessageCountRef.current = 0;
       setInputDisabled(false);
       setIsGroupConversation(isGroup);
+      setActiveThreadTitle(name ?? null);
       setIsNewThread(false);
       
       // 2. Set thread ID
@@ -2135,7 +1879,7 @@ const Chat = ({
 
   const handleJoinTeam = async () => {
     if (!joinThreadInput.trim()) return;
-    
+
     try {
       setShowJoinModal(false);
       setJoinThreadInput('');
@@ -2144,6 +1888,29 @@ const Chat = ({
     } catch (error) {
       console.error('Error joining team chat:', error);
     }
+  };
+
+  // Escape closes the join modal and the sub-header ⋯ menu.
+  useEffect(() => {
+    if (!showJoinModal && !showThreadMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowJoinModal(false);
+        setShowThreadMenu(false);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [showJoinModal, showThreadMenu]);
+
+  const copyThreadId = () => {
+    if (!threadId) return;
+    navigator.clipboard?.writeText(threadId).catch(() => {});
+    setThreadIdCopied(true);
+    window.setTimeout(() => {
+      setThreadIdCopied(false);
+      setShowThreadMenu(false);
+    }, 1200);
   };
 
   // Patch a single chip by id. Uses functional setState so concurrent uploads
@@ -2349,7 +2116,7 @@ const Chat = ({
   const uploadDiagram = async (pngDataUri: string, xml: string) => {
     const blob = pngDataUriToBlob(pngDataUri);
     if (!blob || !xml.trim()) {
-      alert("The editor returned an unusable diagram export. Please try saving again.");
+      toast("The editor returned an unusable diagram export. Please try saving again.");
       return;
     }
     const filename = diagramFilename(xml);
@@ -2436,11 +2203,11 @@ const Chat = ({
     for (let i = 0; i < selectedFiles.length; i++) {
       const f = selectedFiles[i];
       if (!isSupportedFile(f.name, uploadTypes.extensions)) {
-        alert(`"${f.name}" is not a supported file type.\n\nSupported: ${uploadTypes.label}`);
+        toast(`"${f.name}" is not a supported file type. Supported: ${uploadTypes.label}`);
         continue;
       }
       if (f.size > MAX_UPLOAD_BYTES) {
-        alert(`"${f.name}" is ${(f.size / 1024 / 1024).toFixed(1)} MB which exceeds the 50 MB limit.`);
+        toast(`"${f.name}" is ${(f.size / 1024 / 1024).toFixed(1)} MB which exceeds the 50 MB limit.`);
         continue;
       }
       valid.push(f);
@@ -2543,387 +2310,171 @@ const Chat = ({
 
   return (
     <div className={styles.container}>
-      <div className={styles.leftPanel}>
-        <button
-          type="button"
-          onClick={createNewThread}
-          className={styles.newChatBtn}
-        >
-          <SquarePen size={16} />
-          New Chat
-        </button>
-        <ThreadList
-          ref={threadListRef}
-          currentThreadId={threadId}
-          onThreadSelect={handleThreadSelect}
-        />
-        <button
-          type="button"
-          onClick={() => setShowJoinModal(true)}
-          className={styles.joinTeamBtn}
-        >
-          <Users size={16} />
-          Join Team Chat
-        </button>
-        <SidebarAccount />
-      </div>
+      <Sidebar
+        threadListRef={threadListRef}
+        currentThreadId={threadId}
+        onThreadSelect={handleThreadSelect}
+        onNewChat={createNewThread}
+        onJoinTeam={() => setShowJoinModal(true)}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={onToggleSidebar}
+        onThreadRenamed={(renamedId, name) => {
+          if (renamedId === threadId) setActiveThreadTitle(name);
+        }}
+        onThreadShared={(sharedId) => {
+          // Same state a re-select of the (now group) thread would set; the
+          // LAB SHARED chip and the group poll follow from it.
+          if (sharedId === threadId) setIsGroupConversation(true);
+        }}
+      />
     <div className={styles.chatContainer}>
-      <div className={styles.messages} ref={messagesContainerRef}>
-        {/* isDraftThread: a thread minted by an attach but with no message yet —
-            the conversation hasn't started, so keep the welcome screen. */}
-        {!threadId || isDraftThread ? (
+      {threadId && !isDraftThread && (
+        <div className={styles.threadHeader}>
+          <div className={styles.threadHeaderMain}>
+            <span className={styles.threadTitle}>
+              {activeThreadTitle || "Conversation"}
+            </span>
+            <span className={styles.threadMeta}>
+              {deduplicatedMessages.filter((m) => m.role === "user").length}{" "}
+              {deduplicatedMessages.filter((m) => m.role === "user").length === 1
+                ? "turn"
+                : "turns"}
+            </span>
+          </div>
+          <div className={styles.threadHeaderActions}>
+            {isGroupConversation ? (
+              <span className={styles.labSharedChip}>LAB SHARED</span>
+            ) : (
+              <span title="Share this thread from its ⋯ menu in the sidebar">
+                <button type="button" className={styles.threadHeaderBtn} disabled>
+                  Share with lab
+                </button>
+              </span>
+            )}
+            <span title="Export is not available yet">
+              <button type="button" className={styles.threadHeaderBtn} disabled>
+                Export
+              </button>
+            </span>
+            <div className={styles.threadMenuWrap}>
+              <button
+                type="button"
+                className={styles.threadHeaderBtn}
+                aria-label="Thread menu"
+                aria-haspopup="menu"
+                aria-expanded={showThreadMenu}
+                onClick={() => setShowThreadMenu((open) => !open)}
+              >
+                <MoreHorizontal size={14} />
+              </button>
+              {showThreadMenu && (
+                <>
+                  <div
+                    className={styles.menuBackdrop}
+                    onClick={() => setShowThreadMenu(false)}
+                  />
+                  <div className={styles.threadMenu} role="menu">
+                    {sourceSetsEnabled && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.threadMenuItem}
+                        onClick={() => {
+                          setShowThreadMenu(false);
+                          setShowSources((o) => !o);
+                        }}
+                        aria-pressed={showSources}
+                      >
+                        {showSources ? "Hide thread documents" : "Thread documents"}
+                        {threadSources && threadSources.length > 0 && (
+                          <span className={styles.threadMenuCount}>{threadSources.length}</span>
+                        )}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className={styles.threadMenuItem}
+                      onClick={copyThreadId}
+                    >
+                      {threadIdCopied ? "Copied" : "Copy thread ID"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* isDraftThread: a thread minted by an attach but with no message yet —
+          the conversation hasn't started, so keep the welcome screen. */}
+      <MessageList
+        containerRef={messagesContainerRef}
+        endRef={messagesEndRef}
+        showWelcome={!threadId || isDraftThread}
+        welcome={
           <WelcomeMessage
             onPromptSelect={handleStarterSelect}
             onAttachClick={() => fileInputRef.current?.click()}
           />
-        ) : (
-          <>
-            {deduplicatedMessages.map((msg, index) => (
-              <Message key={`${msg.role}-${index}`} role={msg.role} text={msg.text} annotations={msg.annotations} />
-            ))}
-            {showThinking && <ThinkingIndicator startedAt={awaitingSince!} />}
-            <div ref={messagesEndRef} />
-          </>
-        )}
-      </div>
-      <form
+        }
+        messages={deduplicatedMessages}
+        showThinking={showThinking}
+        awaitingSince={awaitingSince}
+        canRetry={!inputDisabled && !isStreaming && !isGroupConversation}
+        onRetry={retryLastTurn}
+      />
+      <Composer
         onSubmit={handleSubmit}
-        className={`${styles.inputForm} ${styles.clearfix}`}
-      >
-        {showJoinModal && (
-          <div className={styles.modal}>
-            <div className={styles.modalContent}>
-              <h3>Join Team Chat</h3>
-              <input
-                type="text"
-                value={joinThreadInput}
-                onChange={(e) => setJoinThreadInput(e.target.value)}
-                placeholder="Enter Team Thread ID"
-              />
-              <div className={styles.modalButtons}>
-                <button onClick={() => setShowJoinModal(false)}>Cancel</button>
-                <button onClick={handleJoinTeam}>Join</button>
-              </div>
-            </div>
-          </div>
-        )}
-        {showDiagramEditor && (
-          <DiagramEditorModal
-            onExport={(pngDataUri, xml) => {
-              setShowDiagramEditor(false);
-              uploadDiagram(pngDataUri, xml);
-            }}
-            onClose={() => setShowDiagramEditor(false)}
-            onError={(message) => {
-              setShowDiagramEditor(false);
-              alert(message);
-            }}
-          />
-        )}
-        {/* Hidden file input — kept in the DOM, triggered by the "+" button.
-            Same picker the old "Attach files" button used. */}
-        <input
-          type="file"
-          ref={fileInputRef}
-          className="hidden"
-          accept={uploadTypes.extensions.join(",")}
-          multiple
-          onChange={handleFileAttach}
-        />
-        <div className={styles.inputContainer}>
-          {attachedFiles.length > 0 && (
-            <div className={styles.attachmentChips}>
-              {attachedFiles.map((file) => (
-                <div
-                  key={file.id}
-                  className={`${styles.chip} ${
-                    file.status === "error" ? styles.chipError : ""
-                  } ${
-                    (file.status === "error" && file.error) || file.warning
-                      ? styles.chipWithMessage
-                      : ""
-                  }`}
-                  title={file.status === "error" ? file.error : file.warning}
-                >
-                  {file.status === "uploading" && (
-                    <Loader2
-                      size={16}
-                      className={`${styles.chipIcon} ${styles.spinner}`}
-                    />
-                  )}
-                  {file.status === "ready" && !file.settled && (
-                    <Check size={16} color="#4ade80" className={styles.chipIcon} />
-                  )}
-                  {file.status === "ready" && file.settled && (
-                    <FileIcon size={14} className={styles.chipIcon} />
-                  )}
-                  {file.status === "error" && (
-                    <AlertCircle size={16} color="#f87171" className={styles.chipIcon} />
-                  )}
-                  {/* Diagram chips only: the stored PNG as a thumbnail once
-                      ready, served through the /api/files beforeFiles rewrite.
-                      Click opens the full-size image in a new tab. Purely
-                      additive — document chips (no sourceType) are untouched,
-                      and the pending/ready/failed lifecycle is unchanged. */}
-                  {file.sourceType === "diagram" &&
-                    file.status === "ready" &&
-                    file.fileId && (
-                      <a
-                        className={styles.chipThumbLink}
-                        href={API_ENDPOINTS.fileContent(file.fileId)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={`View ${file.name} full size`}
-                      >
-                        <img
-                          className={styles.chipThumb}
-                          src={API_ENDPOINTS.fileContent(file.fileId)}
-                          alt={`Diagram ${file.name}`}
-                          loading="lazy"
-                        />
-                      </a>
-                    )}
-                  <span className={styles.chipText}>
-                    <span
-                      className={styles.chipName}
-                      title={file.status === "error" ? file.error : file.name}
-                    >
-                      {file.name}
-                    </span>
-                    {file.status === "uploading" && (
-                      <span className={styles.chipStage}>
-                        {stageLabel(file.stage)}
-                      </span>
-                    )}
-                    {/* Say what went wrong IN the chip. A tooltip alone left a
-                        failed upload looking like a red filename with no reason. */}
-                    {file.status === "error" && file.error && (
-                      <span className={styles.chipErrorText}>{file.error}</span>
-                    )}
-                    {/* Indexed, but part of the document was unreadable. */}
-                    {file.status === "ready" && file.warning && (
-                      <span className={styles.chipWarningText}>{file.warning}</span>
-                    )}
-                  </span>
-                  <button
-                    type="button"
-                    className={styles.chipRemove}
-                    onClick={() => removeAttachedFile(file.id)}
-                    aria-label={`Remove ${file.name}`}
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          {isUploading && (
-            <div className={styles.attachmentNotice}>
-              Reading your file — you can keep chatting; until it&apos;s ready, answers will note it hasn&apos;t been searched yet.
-            </div>
-          )}
-          {sourceSetsEnabled && threadId && (
-            <div className={styles.sourcesBar}>
-              <button
-                type="button"
-                className={styles.sourcesToggle}
-                onClick={() => setShowSources((s) => !s)}
-              >
-                {showSources ? "Hide sources" : `Sources (${threadSources?.length ?? 0})`}
-              </button>
-              {showSources && (
-                <div className={styles.sourcesPanel}>
-                  {(threadSources ?? []).length === 0 && (
-                    <div className={styles.sourcesEmpty}>
-                      No sources in this conversation yet. Attach a file to add one.
-                    </div>
-                  )}
-                  {(threadSources ?? []).map((s) => (
-                    <div key={s.filename} className={styles.sourceRow}>
-                      <span className={styles.sourceName} title={s.filename}>
-                        {s.filename}
-                      </span>
-                      <span className={styles.sourceMeta}>
-                        {s.status === "ready"
-                          ? `${s.chunkCount} sections`
-                          : s.status === "pending"
-                            ? "processing..."
-                            : `failed${s.reason ? `: ${s.reason}` : ""}`}
-                        {" - "}
-                        {s.provenance === "vision"
-                          ? "AI vision-derived"
-                          : s.provenance === "mixed"
-                            ? `text + AI vision (pages ${s.visionPages.join(", ")})`
-                            : "verbatim text"}
-                        {s.partiallyIndexed && s.warning ? ` - ${s.warning}` : ""}
-                      </span>
-                      {removePreview?.filename === s.filename ? (
-                        <span className={styles.sourceConfirm}>
-                          Delete {removePreview.chunksToDelete} sections and{" "}
-                          {removePreview.parentDocsToDelete} document record? Other
-                          conversations and the knowledge base are not affected.
-                          <button
-                            type="button"
-                            className={styles.sourceConfirmBtn}
-                            disabled={removeBusy}
-                            onClick={confirmRemoveSource}
-                          >
-                            Delete
-                          </button>
-                          <button
-                            type="button"
-                            className={styles.sourceCancelBtn}
-                            disabled={removeBusy}
-                            onClick={() => setRemovePreview(null)}
-                          >
-                            Cancel
-                          </button>
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          className={styles.sourceRemoveBtn}
-                          disabled={removeBusy || formatBusy || isStreaming}
-                          title={`Remove ${s.filename} from this source set`}
-                          onClick={() => requestRemoveSource(s.filename)}
-                        >
-                          Remove
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          {availableFormats && hasReadyFormatDocs && (
-            <div className={styles.formatButtons}>
-              <span className={styles.formatButtonsLabel}>Generate from sources:</span>
-              {availableFormats.map((f) => {
-                const disabled = formatBusy || isStreaming || inputDisabled || isUploading;
-                // Why disabled matters more than what it does: say which wait
-                // the user is in. The wrapper span carries the tooltip too,
-                // because a disabled button does not reliably hover in every
-                // browser.
-                const tooltip = formatBusy
-                  ? "A document generation is already running — try again shortly."
-                  : isUploading
-                    ? "A document is still processing — available once it's ready."
-                    : disabled
-                      ? "Waiting for the current response to finish."
-                      : `Generate a ${f.label.toLowerCase()} from this conversation's documents — takes a few minutes for a large document`;
-                return (
-                  <span key={f.key} className={styles.formatBtnWrap} title={tooltip}>
-                    <button
-                      type="button"
-                      className={styles.formatBtn}
-                      disabled={disabled}
-                      title={tooltip}
-                      onClick={() => generateFormatDocument(f.key, f.label)}
-                    >
-                      {f.label}
-                    </button>
-                  </span>
-                );
-              })}
-            </div>
-          )}
-          {formatProgress && (
-            <div className={styles.formatProgressNotice}>
-              <Loader2 size={16} className={styles.spinner} />
-              <span>{formatProgress}</span>
-            </div>
-          )}
-          <div className={styles.inputRow}>
-            {diagramEditorEnabled ? (
-              /* Flag ON: "+" opens a two-option menu. The flag-off branch below
-                 is the pre-diagram button, character-identical. */
-              <div className={styles.attachMenuWrap}>
-                <button
-                  type="button"
-                  className={styles.plusBtn}
-                  onClick={() => setShowAttachMenu((open) => !open)}
-                  title={`Attach files (${uploadTypes.label}) or draw a diagram`}
-                  aria-label="Add an attachment"
-                  aria-expanded={showAttachMenu}
-                  aria-haspopup="menu"
-                >
-                  <Plus size={20} />
-                </button>
-                {showAttachMenu && (
-                  <>
-                    {/* Transparent backdrop: any click outside dismisses. */}
-                    <div
-                      className={styles.attachMenuBackdrop}
-                      onClick={() => setShowAttachMenu(false)}
-                    />
-                    <div className={styles.attachMenu} role="menu">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className={styles.attachMenuItem}
-                        onClick={() => {
-                          setShowAttachMenu(false);
-                          fileInputRef.current?.click();
-                        }}
-                      >
-                        <FileIcon size={16} />
-                        Upload document
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className={styles.attachMenuItem}
-                        onClick={() => {
-                          setShowAttachMenu(false);
-                          setShowDiagramEditor(true);
-                        }}
-                      >
-                        <PenLine size={16} />
-                        Draw a diagram
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            ) : (
-              <button
-                type="button"
-                className={styles.plusBtn}
-                onClick={() => fileInputRef.current?.click()}
-                title={`Attach files (${uploadTypes.label})`}
-                aria-label="Attach files"
-              >
-                <Plus size={20} />
-              </button>
-            )}
-            <textarea
-              ref={textareaRef}
-              className={styles.input}
-              value={userInput}
-              onChange={(e) => setUserInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Enter your question (Shift+Enter for new line)"
-              rows={1}
-              style={{
-                resize: 'vertical',
-                minHeight: '40px',
-                maxHeight: '200px',
-                overflow: 'auto',
-              }}
-            />
-            <button
-              type="submit"
-              className={styles.button}
-              disabled={inputDisabled}
-              title={isUploading ? "A document is still processing - you can ask now; the answer will say it was not searched yet." : undefined}
-            >
-              Send
-            </button>
-          </div>
-        </div>
-      </form>
+        showJoinModal={showJoinModal}
+        setShowJoinModal={setShowJoinModal}
+        joinThreadInput={joinThreadInput}
+        setJoinThreadInput={setJoinThreadInput}
+        handleJoinTeam={handleJoinTeam}
+        showDiagramEditor={showDiagramEditor}
+        setShowDiagramEditor={setShowDiagramEditor}
+        uploadDiagram={uploadDiagram}
+        fileInputRef={fileInputRef}
+        uploadTypes={uploadTypes}
+        handleFileAttach={handleFileAttach}
+        attachedFiles={attachedFiles}
+        removeAttachedFile={removeAttachedFile}
+        isUploading={isUploading}
+        formatBusy={formatBusy}
+        isStreaming={isStreaming}
+        availableFormats={availableFormats}
+        hasReadyFormatDocs={hasReadyFormatDocs}
+        generateFormatDocument={generateFormatDocument}
+        formatProgress={formatProgress}
+        diagramEditorEnabled={diagramEditorEnabled}
+        showAttachMenu={showAttachMenu}
+        setShowAttachMenu={setShowAttachMenu}
+        textareaRef={textareaRef}
+        userInput={userInput}
+        setUserInput={setUserInput}
+        handleKeyDown={handleKeyDown}
+        inputDisabled={inputDisabled}
+      />
     </div>
+      {/* Persistent side column (Claude-artifacts pattern): a sibling of the
+          chat column, so opening it narrows the conversation instead of
+          covering it. Overlays only below the three-column breakpoint. */}
+      {sourceSetsEnabled && (
+        <ThreadDocuments
+          open={showSources && !!threadId}
+          onClose={() => {
+            setShowSources(false);
+            setRemovePreview(null);
+          }}
+          sources={threadSources}
+          removePreview={removePreview}
+          removeBusy={removeBusy}
+          removeLocked={formatBusy || isStreaming}
+          requestRemoveSource={requestRemoveSource}
+          confirmRemoveSource={confirmRemoveSource}
+          cancelRemove={() => setRemovePreview(null)}
+        />
+      )}
     </div>
   );
 };

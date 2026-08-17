@@ -1,24 +1,89 @@
+/* ============================================================
+   Dark design language — token layer.
+   Source of truth: design/reference/geotech-ai-v3.html spec.
+   Depth comes from surface value steps (--bg → --s4), not borders.
+   Lines are alpha so they read correctly over any surface.
+   ============================================================ */
+
 :root {
+  /* Surfaces, by elevation */
+  --bg: #0c0b0a; /* app canvas */
+  --s1: #131211; /* sidebar, inset panels */
+  --s2: #1a1918; /* cards, composer, menus */
+  --s3: #232120; /* raised controls, active rows */
+  --s4: #2c2a28; /* hover on raised controls */
+
+  /* Lines — alpha, never hex */
+  --line: rgba(255, 255, 255, 0.06);
+  --line-2: rgba(255, 255, 255, 0.1);
+  --hi: inset 0 1px 0 rgba(255, 255, 255, 0.045); /* top highlight on raised elements */
+
+  /* Text */
+  --t1: #f1eee9;
+  --t2: #a8a199;
+  --t3: #878079; /* tertiary, metadata, placeholders — lifted from the spec's
+                    #6C6660 per review, measured against --s2 (the lightest
+                    surface it carries readable text on, e.g. the composer
+                    placeholder): 4.51:1 on --s2, 4.81 on --s1, 5.05 on --bg */
+
+  /* Accent — assistant, active state, success */
+  --accent: #63ae93;
+  --accent-2: #8fd3ba; /* accent text on dark */
+  --accent-a: rgba(99, 174, 147, 0.14); /* accent fill */
+
+  /* Citations and source references only, never UI chrome */
+  --oxide: #d2954a;
+
+  /* Danger — errors, destructive actions */
+  --danger: #c96a5e;
+  --danger-2: #e59a8f; /* danger text on dark */
+  --danger-a: rgba(201, 106, 94, 0.12); /* danger fill */
+
+  /* Warnings — review flags, acknowledgement gates */
+  --warn: #c9a35e;
+  --warn-2: #e0c48c;
+  --warn-a: rgba(201, 163, 94, 0.1);
+
+  /* Shadows */
+  --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --e2: 0 2px 4px rgba(0, 0, 0, 0.4), 0 12px 28px -10px rgba(0, 0, 0, 0.7);
+  --e3: 0 4px 8px rgba(0, 0, 0, 0.4), 0 24px 48px -16px rgba(0, 0, 0, 0.85);
+
+  /* Radii — only these three */
+  --r1: 6px;
+  --r2: 8px;
+  --r3: 12px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Type — font families injected by next/font in layout.tsx */
+  --font-sans: var(--font-plex-sans), "IBM Plex Sans", system-ui, sans-serif;
+  --font-cond: var(--font-plex-cond), "IBM Plex Sans Condensed", var(--font-sans);
+  --font-mono: var(--font-plex-mono), "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Legacy token aliases — pre-redesign modules consume these.
+     Remapped to the dark scale so var-driven surfaces inherit the theme. */
+  --bg-base: var(--bg);
+  --bg-sidebar: var(--s1);
+  --bg-surface: var(--s2);
+  --text-primary: var(--t1);
+  --text-secondary: var(--t2);
+  --border-subtle: var(--line);
   --max-width: 1100px;
-  --border-radius: 12px;
+  --border-radius: var(--r3);
 
-  /* Layered off-white palette */
-  --bg-base: #fafafa;      /* main app background */
-  --bg-sidebar: #f5f5f5;   /* sidebar, slightly darker */
-  --bg-surface: #ffffff;   /* cards, messages, input - pops against off-white */
-  --text-primary: #1a1a1a;
-  --text-secondary: #737373;
-  --border-subtle: #e5e5e5;
-
-  --font-mono: ui-monospace, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono",
-    "Roboto Mono", "Oxygen Mono", "Ubuntu Monospace", "Source Code Pro",
-    "Fira Mono", "Droid Sans Mono", "Courier New", monospace;
+  accent-color: var(--accent);
 }
 
 * {
   box-sizing: border-box;
   padding: 0;
   margin: 0;
+}
+
+html {
+  color-scheme: dark;
 }
 
 /* Utility: visually remove an element while keeping it in the DOM
@@ -35,8 +100,12 @@ body {
 }
 
 body {
-  color: var(--text-primary);
-  background-color: var(--bg-base);
+  background-color: var(--bg);
+  color: var(--t1);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
@@ -44,32 +113,45 @@ a {
   text-decoration: none;
 }
 
-.warnings {
-  position: absolute;
-  top: 21%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 700px;
-  height: 300px;
-  border-radius: 12px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
+::selection {
+  background: rgba(99, 174, 147, 0.28);
+  color: var(--t1);
 }
 
-.logo {
-  width: 32px;
-  height: 32px;
-  position: absolute;
-  margin: 16px;
-  top: 0;
-  right: 0;
+/* Focus — double ring so it stays visible on every surface.
+   `html …` + !important so the ring beats component box-shadows (raised
+   controls carry --hi, which otherwise wins by cascade order and hides the
+   ring). Text fields are excluded: they carry their own accent border/glow
+   focus treatment and match :focus-visible on mouse focus too. */
+:focus-visible {
+  outline: none;
+}
+html :focus-visible:not(input, textarea, select) {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent) !important;
 }
 
-@media (max-width: 1100px) {
-  .logo {
-    display: none;
-  }
+/* Scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--s4) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--s3);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--s4);
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 ul,
@@ -77,14 +159,29 @@ ol {
   padding-left: 20px;
 }
 
-a {
-  color: blue;
+/* Baseline only — components that show code style their own <pre>. */
+pre {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
 }
 
-pre {
-  margin: -4px -16px;
-  padding: 20px;
-  white-space: pre-wrap;
-  background-color: #e4e4e4;
-  color: black;
+/* Grain overlay — sits above everything, never intercepts input */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  opacity: 0.028;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

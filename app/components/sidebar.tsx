@@ -23,6 +23,7 @@ type SidebarProps = {
   collapsed?: boolean;
   onToggleCollapse?: () => void;
   onThreadRenamed?: (threadId: string, name: string) => void;
+  onThreadShared?: (threadId: string) => void;
 };
 
 const Sidebar = ({
@@ -34,6 +35,7 @@ const Sidebar = ({
   collapsed,
   onToggleCollapse,
   onThreadRenamed,
+  onThreadShared,
 }: SidebarProps) => {
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -125,6 +127,7 @@ const Sidebar = ({
           searchQuery={search}
           filter={filter}
           onThreadRenamed={onThreadRenamed}
+          onThreadShared={onThreadShared}
         />
 
         <div className={s.footer}>

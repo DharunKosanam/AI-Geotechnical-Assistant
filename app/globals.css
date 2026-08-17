@@ -118,10 +118,16 @@ a {
   color: var(--t1);
 }
 
-/* Focus — double ring so it stays visible on every surface */
+/* Focus — double ring so it stays visible on every surface.
+   `html …` + !important so the ring beats component box-shadows (raised
+   controls carry --hi, which otherwise wins by cascade order and hides the
+   ring). Text fields are excluded: they carry their own accent border/glow
+   focus treatment and match :focus-visible on mouse focus too. */
 :focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+html :focus-visible:not(input, textarea, select) {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent) !important;
 }
 
 /* Scrollbars */

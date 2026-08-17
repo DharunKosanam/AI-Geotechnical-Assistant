@@ -18,18 +18,6 @@
   overflow: hidden;
 }
 
-/* Narrow screens: stack the panels so neither is squeezed unusable. */
-@media (max-width: 720px) {
-  .workspace {
-    flex-direction: column;
-  }
-
-  .docPanel {
-    width: 100%;
-    height: 180px;
-    flex-shrink: 0;
-  }
-}
 
 /* ============================ Document panel ============================ */
 .docPanel {
@@ -662,5 +650,19 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Narrow screens: stack the panels so neither is squeezed unusable. Kept at
+   the END of the file so it wins the cascade over the base .docPanel width. */
+@media (max-width: 720px) {
+  .workspace {
+    flex-direction: column;
+  }
+
+  .docPanel {
+    width: 100%;
+    height: 180px;
+    flex-shrink: 0;
   }
 }

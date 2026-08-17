@@ -76,6 +76,9 @@ interface ThreadListProps {
   /* Lets chat.tsx keep the sub-header title fresh when the open thread is
      renamed from the list. */
   onThreadRenamed?: (threadId: string, name: string) => void;
+  /* Fired after a thread is promoted to lab-shared from the row menu, so the
+     open thread's LAB SHARED chip reflects it without a re-select. */
+  onThreadShared?: (threadId: string) => void;
 }
 
 /* Day-group label for the list: Today / Yesterday / short date. */
@@ -96,7 +99,7 @@ const dayLabel = (iso?: string): string => {
 };
 
 const ThreadList = forwardRef<any, ThreadListProps>(
-  ({ currentThreadId, onThreadSelect, searchQuery, filter, onThreadRenamed }, ref) => {
+  ({ currentThreadId, onThreadSelect, searchQuery, filter, onThreadRenamed, onThreadShared }, ref) => {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [newThreadName, setNewThreadName] = useState<string>("");
@@ -311,6 +314,7 @@ const ThreadList = forwardRef<any, ThreadListProps>(
               thread.threadId === threadId ? { ...thread, isGroup: true } : thread
             )
           );
+          onThreadShared?.(threadId);
         }
       } catch (error) {
         console.error('Failed to toggle group status:', error);
@@ -334,11 +338,14 @@ const ThreadList = forwardRef<any, ThreadListProps>(
   }, [threads]);
 
   // Sidebar-owned view filters (mine/lab segmented control + search), then
-  // contiguous day groups (the list is already newest-first).
+  // contiguous day groups (the list is already newest-first). "Mine" is every
+  // thread in this list (they are all the user's own — joined team threads are
+  // never saved here); "Lab shared" is the subset promoted to group threads.
+  // A thread the user just shared must NOT vanish from their default view.
   const groupedThreads = useMemo(() => {
     const q = (searchQuery ?? "").trim().toLowerCase();
     const visible = sortedUniqueThreads
-      .filter((t) => (filter === "lab" ? t.isGroup : filter === "mine" ? !t.isGroup : true))
+      .filter((t) => (filter === "lab" ? t.isGroup : true))
       .filter((t) => !q || (t.name || "").toLowerCase().includes(q));
     const groups: { label: string; threads: Thread[] }[] = [];
     for (const t of visible) {

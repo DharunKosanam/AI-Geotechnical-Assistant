@@ -708,3 +708,13 @@ open state persisted; no longer reset on thread switch; menu item toggles),
   `overflow-wrap: anywhere` with `min-width:0` on the row/column and
   `overflow-x: hidden` on the body; full name in `title=`.
 - Distinctness from "Grounded in" unchanged (see the component header).
+
+### Browser test run (2026-08-17, explicitly authorised) + fixes
+
+Headless-Chromium run of DEPLOY-CHECKLIST.md — full results in
+`UI-TEST-RESULTS-2026-08-17.md`. 90+ checks; 4 product bugs found and fixed
+in the working tree (focus ring on raised controls; LAB SHARED chip after
+row-menu share; shared threads vanishing from "Mine"; GeoPilot 380px doc
+panel width). Everything else passed; the remaining unverified items are
+listed in the results file. Test artefacts (throwaway account, 2 threads)
+listed there for cleanup.

@@ -2321,6 +2321,11 @@ const Chat = ({
         onThreadRenamed={(renamedId, name) => {
           if (renamedId === threadId) setActiveThreadTitle(name);
         }}
+        onThreadShared={(sharedId) => {
+          // Same state a re-select of the (now group) thread would set; the
+          // LAB SHARED chip and the group poll follow from it.
+          if (sharedId === threadId) setIsGroupConversation(true);
+        }}
       />
     <div className={styles.chatContainer}>
       {threadId && !isDraftThread && (

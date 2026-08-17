@@ -52,18 +52,8 @@ type ComposerProps = {
   attachedFiles: any[];
   removeAttachedFile: (id: string) => void;
   isUploading: boolean;
-  sourceSetsEnabled: boolean;
-  threadId: string | null;
-  showSources: boolean;
-  setShowSources: React.Dispatch<React.SetStateAction<boolean>>;
-  threadSources: any[] | null;
-  removePreview: any;
-  setRemovePreview: (v: any) => void;
-  removeBusy: boolean;
   formatBusy: boolean;
   isStreaming: boolean;
-  requestRemoveSource: (filename: string) => void;
-  confirmRemoveSource: () => void;
   availableFormats: { key: string; label: string }[] | null;
   hasReadyFormatDocs: boolean;
   generateFormatDocument: (key: string, label: string) => void;
@@ -94,18 +84,8 @@ const Composer = ({
   attachedFiles,
   removeAttachedFile,
   isUploading,
-  sourceSetsEnabled,
-  threadId,
-  showSources,
-  setShowSources,
-  threadSources,
-  removePreview,
-  setRemovePreview,
-  removeBusy,
   formatBusy,
   isStreaming,
-  requestRemoveSource,
-  confirmRemoveSource,
   availableFormats,
   hasReadyFormatDocs,
   generateFormatDocument,
@@ -218,82 +198,6 @@ const Composer = ({
       />
 
       <div className={c.composerInner}>
-        {sourceSetsEnabled && threadId && (
-          <div className={c.sourcesBar}>
-            <button
-              type="button"
-              className={c.sourcesToggle}
-              onClick={() => setShowSources((s) => !s)}
-              aria-expanded={showSources}
-            >
-              {showSources ? "Hide sources" : `Sources (${threadSources?.length ?? 0})`}
-            </button>
-            {showSources && (
-              <div className={c.sourcesPanel}>
-                {(threadSources ?? []).length === 0 && (
-                  <div className={c.sourcesEmpty}>
-                    No sources in this conversation yet. Attach a file to add one.
-                  </div>
-                )}
-                {(threadSources ?? []).map((s) => (
-                  <div key={s.filename} className={c.sourceRow}>
-                    <span className={c.sourceName} title={s.filename}>
-                      {s.filename}
-                    </span>
-                    <span className={c.sourceMeta}>
-                      {s.status === "ready"
-                        ? `${s.chunkCount} sections`
-                        : s.status === "pending"
-                          ? "processing..."
-                          : `failed${s.reason ? `: ${s.reason}` : ""}`}
-                      {" · "}
-                      {s.provenance === "vision"
-                        ? "AI vision-derived"
-                        : s.provenance === "mixed"
-                          ? `text + AI vision (pages ${s.visionPages.join(", ")})`
-                          : "verbatim text"}
-                      {s.partiallyIndexed && s.warning ? ` · ${s.warning}` : ""}
-                    </span>
-                    {removePreview?.filename === s.filename ? (
-                      <span className={c.sourceConfirm}>
-                        Delete {removePreview.chunksToDelete} sections and{" "}
-                        {removePreview.parentDocsToDelete} document record? Other
-                        conversations and the knowledge base are not affected.
-                        <button
-                          type="button"
-                          className={c.sourceConfirmBtn}
-                          disabled={removeBusy}
-                          onClick={confirmRemoveSource}
-                        >
-                          Delete
-                        </button>
-                        <button
-                          type="button"
-                          className={c.sourceCancelBtn}
-                          disabled={removeBusy}
-                          onClick={() => setRemovePreview(null)}
-                        >
-                          Cancel
-                        </button>
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        className={c.sourceRemoveBtn}
-                        disabled={removeBusy || formatBusy || isStreaming}
-                        title={`Remove ${s.filename} from this source set`}
-                        onClick={() => requestRemoveSource(s.filename)}
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
         {availableFormats && hasReadyFormatDocs && (
           <div className={c.formatButtons}>
             <span className={c.formatButtonsLabel}>Generate from sources:</span>

@@ -30,8 +30,14 @@ export const metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className={`${plexSans.variable} ${plexCond.variable} ${plexMono.variable}`}>
+    /* The font variable classes MUST sit on <html>: globals.css declares
+       --font-sans/--font-cond/--font-mono on :root, and a custom property's
+       var() references resolve at the element that DECLARES it — with the
+       classes on <body>, --font-plex-* didn't exist at :root, --font-sans
+       computed to invalid, and font-family fell through to the browser's
+       serif default. */
+    <html lang="en" className={`${plexSans.variable} ${plexCond.variable} ${plexMono.variable}`}>
+      <body>
         {children}
         <Toaster />
         <div className="grain" aria-hidden="true" />

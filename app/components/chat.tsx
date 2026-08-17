@@ -10,6 +10,7 @@ import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistant
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
 import Sidebar from "./sidebar";
 import Composer from "./composer";
+import ThreadDocuments, { THREAD_DOCS_OPEN_KEY } from "./thread-documents";
 import { toast } from "./toaster";
 import { API_ENDPOINTS, getMessageRequestBody, isPythonBackend } from "../config/api";
 import { ChevronRight, MoreHorizontal } from "lucide-react";
@@ -77,6 +78,23 @@ const httpUploadError = (status: number, filename: string): string => {
 // and message-list.tsx renders it as the "Grounded in" panel. The panel is
 // assembled deterministically from that payload — never from model output —
 // and vision-derived citations keep their "not verbatim" disclaimer there.
+
+// Legacy-row detection for the two history-shaped load paths. Primary signal:
+// createdAt vs the panel cutover — neither the current backend nor any
+// frontend since the redesign has ever persisted the appended block, so a row
+// created after the cutover can only carry sources as the structured field.
+// Rows older than the cutover (or with no usable createdAt — very old docs
+// return null) fall back to a TAIL-anchored match: the legacy renderer only
+// ever appended "**Sources:**" + its numbered list at the very end of the
+// text, so a model-written "**Sources:**" heading mid-prose can no longer
+// suppress the panel.
+const SOURCES_PANEL_CUTOVER_MS = Date.parse("2026-08-16T00:00:00Z");
+const LEGACY_SOURCES_TAIL = /(?:^|\n\n)\*\*Sources:\*\*\n(?:\d+\. [^\n]*\n?)+$/;
+const hasLegacySourcesTail = (text: string, createdAt?: string | null): boolean => {
+  const ts = createdAt ? Date.parse(createdAt) : NaN;
+  if (!Number.isNaN(ts) && ts >= SOURCES_PANEL_CUTOVER_MS) return false;
+  return LEGACY_SOURCES_TAIL.test(text);
+};
 
 const getExt = (filename: string): string => {
   const i = filename.lastIndexOf(".");
@@ -340,6 +358,21 @@ const Chat = ({
   }
   const [sourceSetsEnabled, setSourceSetsEnabled] = useState(false);
   const [showSources, setShowSources] = useState(false);
+  // Restore / persist the panel's open state (client-only: after mount).
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(THREAD_DOCS_OPEN_KEY) === "1") setShowSources(true);
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THREAD_DOCS_OPEN_KEY, showSources ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [showSources]);
   const [threadSources, setThreadSources] = useState<ThreadSource[] | null>(null);
   // The dry-run preview for the source pending removal; confirm sends the
   // same request with confirm: true.
@@ -381,7 +414,8 @@ const Chat = ({
     [sourceSetsEnabled],
   );
   useEffect(() => {
-    setShowSources(false);
+    // The panel's open state is a layout preference (persisted), so a thread
+    // switch keeps it; only an in-flight removal preview is dropped.
     setRemovePreview(null);
     refreshThreadSources(threadId || null);
   }, [threadId, refreshThreadSources]);
@@ -562,11 +596,13 @@ const Chat = ({
           role: msg.role,
           text,
           annotations: msg.content?.[0]?.text?.annotations || [],
-          // Legacy rows may already carry the old "**Sources:**" block inside
+          // Legacy rows may carry the old appended "**Sources:**" block in
           // the text — attach the structured panel only when they don't, so
-          // sources never render twice.
+          // sources never render twice. createdAt cutover decides first; the
+          // tail-anchored match is the fallback (see hasLegacySourcesTail).
           sources:
-            msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')
+            msg.role === 'assistant' && sources.length > 0 &&
+            !hasLegacySourcesTail(text, msg.createdAt)
               ? sources
               : undefined,
         };
@@ -884,10 +920,12 @@ const Chat = ({
             appendToLastMessage(piece);
           }
         } else if (name === "done") {
+          // Attach only to a streamed answer. A done with no tokens has no
+          // text to ground — a role label over an empty body with a panel
+          // under it reads as a broken turn, so it is skipped instead.
           const sources = payload.sources || [];
-          if (sources.length > 0) {
-            if (started) attachSourcesToLastMessage(sources);
-            else appendMessage("assistant", "", sources);
+          if (sources.length > 0 && started) {
+            attachSourcesToLastMessage(sources);
           }
         } else if (name === "error") {
           const detail = payload.detail || "The assistant failed to answer.";
@@ -1081,9 +1119,9 @@ const Chat = ({
           }
         } else if (name === "done") {
           doneSources = payload.sources || [];
-          if (doneSources.length > 0) {
-            if (started) attachSourcesToLastMessage(doneSources);
-            else appendMessage("assistant", "", doneSources);
+          // Same rule as the chat stream: no streamed text, no panel.
+          if (doneSources.length > 0 && started) {
+            attachSourcesToLastMessage(doneSources);
           }
         } else if (name === "error") {
           const detail = payload.detail || "The document generation failed.";
@@ -1592,12 +1630,14 @@ const Chat = ({
   };
 
   // Attach the retrieval payload's sources to the message the panel belongs
-  // to (the streamed answer that just finished).
+  // to (the streamed answer that just finished). Assistant messages only —
+  // sources must never land on a user turn.
   const attachSourcesToLastMessage = (sources: any[]) => {
     if (!sources || sources.length === 0) return;
     setMessages((prevMessages) => {
       if (prevMessages.length === 0) return prevMessages;
       const last = prevMessages[prevMessages.length - 1];
+      if (last.role !== "assistant") return prevMessages;
       return [...prevMessages.slice(0, -1), { ...last, sources }];
     });
   };
@@ -1683,11 +1723,13 @@ const Chat = ({
           role: msg.role,
           text,
           annotations: msg.content?.[0]?.text?.annotations || [],
-          // Legacy rows may already carry the old "**Sources:**" block inside
+          // Legacy rows may carry the old appended "**Sources:**" block in
           // the text — attach the structured panel only when they don't, so
-          // sources never render twice.
+          // sources never render twice. createdAt cutover decides first; the
+          // tail-anchored match is the fallback (see hasLegacySourcesTail).
           sources:
-            msg.role === 'assistant' && sources.length > 0 && !text.includes('**Sources:**')
+            msg.role === 'assistant' && sources.length > 0 &&
+            !hasLegacySourcesTail(text, msg.createdAt)
               ? sources
               : undefined,
         };
@@ -2327,6 +2369,23 @@ const Chat = ({
                     onClick={() => setShowThreadMenu(false)}
                   />
                   <div className={styles.threadMenu} role="menu">
+                    {sourceSetsEnabled && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.threadMenuItem}
+                        onClick={() => {
+                          setShowThreadMenu(false);
+                          setShowSources((o) => !o);
+                        }}
+                        aria-pressed={showSources}
+                      >
+                        {showSources ? "Hide thread documents" : "Thread documents"}
+                        {threadSources && threadSources.length > 0 && (
+                          <span className={styles.threadMenuCount}>{threadSources.length}</span>
+                        )}
+                      </button>
+                    )}
                     <button
                       type="button"
                       role="menuitem"
@@ -2376,18 +2435,8 @@ const Chat = ({
         attachedFiles={attachedFiles}
         removeAttachedFile={removeAttachedFile}
         isUploading={isUploading}
-        sourceSetsEnabled={sourceSetsEnabled}
-        threadId={threadId}
-        showSources={showSources}
-        setShowSources={setShowSources}
-        threadSources={threadSources}
-        removePreview={removePreview}
-        setRemovePreview={setRemovePreview}
-        removeBusy={removeBusy}
         formatBusy={formatBusy}
         isStreaming={isStreaming}
-        requestRemoveSource={requestRemoveSource}
-        confirmRemoveSource={confirmRemoveSource}
         availableFormats={availableFormats}
         hasReadyFormatDocs={hasReadyFormatDocs}
         generateFormatDocument={generateFormatDocument}
@@ -2402,6 +2451,25 @@ const Chat = ({
         inputDisabled={inputDisabled}
       />
     </div>
+      {/* Persistent side column (Claude-artifacts pattern): a sibling of the
+          chat column, so opening it narrows the conversation instead of
+          covering it. Overlays only below the three-column breakpoint. */}
+      {sourceSetsEnabled && (
+        <ThreadDocuments
+          open={showSources && !!threadId}
+          onClose={() => {
+            setShowSources(false);
+            setRemovePreview(null);
+          }}
+          sources={threadSources}
+          removePreview={removePreview}
+          removeBusy={removeBusy}
+          removeLocked={formatBusy || isStreaming}
+          requestRemoveSource={requestRemoveSource}
+          confirmRemoveSource={confirmRemoveSource}
+          cancelRemove={() => setRemovePreview(null)}
+        />
+      )}
     </div>
   );
 };

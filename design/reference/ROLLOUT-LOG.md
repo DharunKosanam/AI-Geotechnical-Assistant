@@ -503,3 +503,208 @@ files; no references to removed CSS classes.
 5. A frontend rebuild + restart on the test instance is needed to see any of
    this: `stop → rm -rf .next → npm run build → start` (build already run
    here; the running instance still serves the old bundle until restarted).
+
+---
+
+## Post-run review fixes (Dharun's pre-deploy checks, 2026-08-15)
+
+- `--t3` raised `#6C6660` → `#878079` per review (second pass): measured
+  against `--s2`, the lightest surface `--t3` carries readable text on (the
+  composer placeholder). Ratios: 4.51:1 on `--s2`, 4.81 on `--s1`, 5.05 on
+  `--bg` — AA everywhere it renders informative text. (The first-pass
+  `#7d766f` measured only 4.39 on `--bg` and was superseded.) Deviation from
+  the spec value, requested explicitly.
+- Sources-panel producer hardening (chat.tsx), per review:
+  - The legacy-block guard no longer text-sniffs the whole message: rows
+    created after the 2026-08-16 cutover always get the panel (`createdAt` is
+    returned by the python history endpoint; no backend or frontend since the
+    redesign persists the appended block), and only older/undated rows fall
+    back to a tail-anchored match, so a model-written "**Sources:**" heading
+    mid-prose can't suppress the panel.
+  - `attachSourcesToLastMessage` attaches only when the last message is an
+    assistant turn.
+  - A `done` event with no streamed tokens no longer appends an empty
+    assistant message with a floating panel (it rendered as a role label over
+    an empty body) — it is skipped on both the chat and formats streams.
+- Verified: legacy threads do NOT double-render sources (the
+  `!text.includes('**Sources:**')` guard suppresses the structured panel on
+  rows whose stored text carries the old baked-in block; the backend never
+  bakes the block into persisted text, so only genuinely old rows have it).
+- Verified: the `【n:m†source】` annotation rewrite survived the
+  `formatSourcesBlock` deletion — it lives in `message-list.tsx` and still
+  runs on every assistant message.
+- Verified: zero `confirm()` calls were converted to toasts in Phase 5 — the
+  only `confirm()` in the tree is dead `file-viewer.tsx:137`, untouched. All
+  nine conversions were post-failure `alert()` notifications.
+
+---
+
+## Deploy-test fixes (first build on the test instance, 2026-08-15)
+
+1. **Conversation column bottom-pinned** — the bubble-era
+   `.messages > *:first-child { margin-top: auto }` bottom-pinning rule had
+   been carried into `message-list.module.css`; removed. Turns are now
+   top-aligned and grow downward; the column stays max-720px and centred
+   (there was no right-anchoring rule — the "right" in the report was the
+   column centring within the pane to the right of the 264px sidebar,
+   compounded by the bottom pinning).
+2. **Serif body text** — the next/font variable classes sat on `<body>` while
+   `--font-sans/--font-cond/--font-mono` are declared on `:root`. A custom
+   property's var() references resolve at the element that declares it, so
+   `--font-plex-*` didn't exist at `:root`, `--font-sans` computed to invalid,
+   and `font-family` fell through to the browser serif default. The three
+   variable classes moved to `<html>`. Verified in the built output:
+   prerendered `<html>` carries all three classes; the built CSS defines
+   `--font-plex-sans` on that class and `body{font-family:var(--font-sans)}`
+   resolves to "IBM Plex Sans" + its size-adjusted fallback. Message bodies
+   inherit it (only code/pre switch to Plex Mono).
+3. **Duplicate sources UI** — the composer's SOURCE_SETS "Sources (n)" toggle
+   + panel removed (JSX, ten props, 109 lines of CSS). ⚠ Caveat flagged at
+   removal time: that panel was NOT reading the per-answer citation payload —
+   it listed the THREAD's uploaded documents (ingest status, section counts)
+   and hosted the only UI for the source-set **Remove** flow
+   (`requestRemoveSource`/`confirmRemoveSource` + dry-run confirm). The
+   backend endpoints and the chat.tsx state/handlers remain wired and
+   untouched (data layer unchanged, presentation removed); until a new home
+   is chosen (thread sub-header ⋯ menu is the natural one), removing a
+   document from a source set has no UI entry point.
+
+---
+
+## Post-deploy tasks (2026-08-15) — Thread documents re-home + branch sweep
+
+### Task 1 — Thread documents drawer
+
+**New:** `app/components/thread-documents.tsx` + `.module.css`. **Edited:**
+`chat.tsx` (⋯ menu item, drawer mount, import), `chat.module.css` (menu
+item layout + count badge).
+
+**Form: right-edge drawer, not an inline panel.** Reasons: (a) the shell's
+column-reverse chat container has no spare vertical real estate — an inline
+panel would either push the composer or eat conversation height; (b) the
+Remove flow is destructive and modal-shaped (preview → confirm) and deserves
+its own focus-trapped surface; (c) a fixed drawer over the conversation is
+the most visually distinct treatment available from the in-message
+"Grounded in" inset, which was the second hard requirement.
+
+**Distinctness (hard requirement 2):** drawer on `--s1` with a `--line-2`
+left rule and `--e3`, condensed "Thread documents" title + explanatory
+subtitle, rows on `--s2` cards, no citation indices, mono status/provenance
+line. "Grounded in" is an `--s1` inset inside the answer with `--oxide`
+indices and a mono "GROUNDED IN" eyebrow. Different container, different
+header language, different position, different information.
+
+**Preview stays mandatory (hard requirement 1):** the only control per row is
+"Remove…" → `requestRemoveSource` (dry-run, `confirm:false`). The destructive
+`confirmRemoveSource` is reachable ONLY from the Delete button inside the
+preview block that the dry-run response produces; Cancel and Escape/close
+clear the preview. No other path calls it. Remove is disabled (with a
+tooltip) while a stream or format generation is running — same locking the
+old panel had.
+
+**Wiring:** identical state/handlers from chat.tsx (`threadSources`,
+`removePreview`, `removeBusy`, `requestRemoveSource`, `confirmRemoveSource`,
+`showSources`/`setShowSources` reused as the open flag). Menu item is
+flag-gated on `sourceSetsEnabled` and shows the doc count in mono. Escape,
+backdrop click, Tab trap, focus-restore to the ⋯ button.
+
+### Task 2 — branch sweep
+
+**Fixed**
+- `message-list.tsx` referenced `s.sourcesCount`, which had no class in the
+  module (would render `class="undefined"` on the "N sources" count) —
+  class added. This was the ONLY dead-class reference on the branch (checked
+  every `alias.class` in every live TSX against its module); the Phase 0
+  `messageRow/messageContent/messageLabel/clearfix` set is confirmed gone.
+- Duplicate `.threadMenuItem` rule in `chat.module.css` merged.
+
+**Flagged (judgment calls, left as-is)**
+- **Spacing grid:** colors, font-family and radii are 100% clean across every
+  live module. Spacing is not: the build uses a de-facto **2px** grid
+  (6/10/14/26/30/34px are common), not the spec's strict multiples of 4. Two
+  of the spec's own control heights (26px small, 30px list rows) are off a
+  4px grid, and 6/10/14px paddings pair naturally with those. Full list is
+  reproducible with the sweep grep in this session; ~130 declarations across
+  12 modules. Snapping them all to 4px is a mechanical pass but changes the
+  feel of every control — wants a decision, not a silent sweep.
+- **Focus rings on text inputs:** buttons/links/menu items everywhere inherit
+  the global `:focus-visible` double ring untouched. Text inputs (auth, KB
+  fields, thread rename, workspace input, composer textarea) deliberately
+  set `outline:none` and use an accent border/glow on `:focus` instead —
+  consistent app-wide, and the composer's ring is carried by the card's
+  `focus-within`. If the double ring is wanted on inputs too, remove those
+  five `:focus` overrides.
+- **`--t3` on `--s3/--s4`:** 4.12 / 3.67 — used there only for disabled
+  labels and hover-revealed icons that brighten on interaction.
+- Thread Delete and GeoPilot New session proceed without confirmation —
+  pre-existing behaviour, unchanged.
+
+**Disabled-with-tooltip audit:** every permanently-disabled control (Share
+with lab, Export, Helpful, scope toggle, Account/Settings/Shortcuts/Invite,
+Remove-while-locked) sits inside a `<span title="…">` wrapper — the reliable
+carrier since disabled buttons don't fire hover for `title` in every browser
+— and each tooltip says why / what to do instead, not just that it's off.
+
+**Empty / loading / error states — restyled vs never seen firing**
+Restyled by construction (CSS reaches them) but NOT observed firing in this
+session (no browser): thread list empty/search-empty/lab-empty; thread
+documents loading/empty/failed-doc; KB every phase (reading, needs-input
+warnings, indexing, done, error box, bulk queued/processing/skipped/failed,
+"Nothing yet."); workspace doc error icon, interpretation error box,
+concerns box, history empty; auth 401 error, generic error, registered
+notice, forgot confirmation, reset invalid-link/400/429/done; AuthGuard gate;
+composer chip error/warning text; toasts; the "Still working…" thinking
+escalation (15 s/45 s). Observed only via build/type-check: all of the above.
+Genuinely never exercised end-to-end anywhere: vision-derived citation row,
+diagram chip thumbnail, format-generation progress notice, group-thread
+poll path. These are why DEPLOY-CHECKLIST.md exists.
+
+**Orphans created by this branch (listed, not deleted):**
+`sidebar-account.tsx/.module.css` (unmounted since Phase 2; module still
+carries 2 legacy hex). Pre-existing dead files untouched: `file-viewer.*`,
+`warnings.*`, `handleSSEStream` in chat.tsx. Nothing else was orphaned by
+the extractions — every lucide import in chat.tsx is used, `showSources`
+was re-purposed as the drawer flag rather than left dangling.
+
+**Checklist:** `design/reference/DEPLOY-CHECKLIST.md` written (8 sections,
+~30 checks, failure-first ordering, written for a non-internals reader).
+
+**Build:** pass. **Unit tests:** 7/7 pass.
+
+### Thread documents → persistent side column (2026-08-15, follow-up)
+
+**Files:** `thread-documents.tsx` + `.module.css` (rewritten), `chat.tsx`
+(mount moved out of `.chatContainer` to a sibling column in `.container`;
+open state persisted; no longer reset on thread switch; menu item toggles),
+`DEPLOY-CHECKLIST.md` §2 rewritten.
+
+- **Column, not modal**: a real flex child after `.chatContainer`, which
+  already has `flex:1; min-width:0` and so narrows automatically. No
+  backdrop, no focus trap, no Escape, `role="complementary"`. Chat and
+  composer untouched and fully usable. Only the ⋯ item ("Thread documents" /
+  "Hide thread documents", `aria-pressed`) and the header × toggle it.
+- **Persistence**: `localStorage` `geotech.threadDocs.open` (`"1"/"0"`) and
+  `geotech.threadDocs.width`; both restored in client-only effects (no
+  hydration mismatch) and written on change. Thread switch keeps the panel;
+  only an in-flight removal preview is dropped.
+- **Resize — done (it was straightforward)**: 6px left-edge handle,
+  pointer-capture drag (drag left = wider), clamped **280–560px and to
+  viewport − 480px** so the chat column keeps room; re-clamped on window
+  resize; keyboard ←/→ in 16px steps (`role="separator"` with aria value
+  attrs); width persisted on pointer-up / key.
+- **Destructive step is the only modal region**: `RemoveConfirm` is
+  `role="alertdialog"`, focus lands on Cancel, Tab cycles Cancel↔Delete,
+  Escape cancels. Other rows' Remove… buttons disable while a preview is
+  showing (one preview at a time). `confirmRemoveSource` reachable only from
+  its Delete.
+- **Breakpoint 1100px** — 264px sidebar + 280px panel min + ~500px usable
+  chat ≈ 1044, rounded up for slack and kept well clear of the 720px
+  sidebar-overlay breakpoint so behaviour changes at most once between phone
+  and desktop. Below it: `position: fixed` right overlay (400px, max
+  100vw−32), backdrop, Escape/backdrop close, no handle. Mode follows a
+  `matchMedia` listener live.
+- **Overflow fix**: `.filename` was `nowrap + ellipsis` inside a flex column
+  lacking `min-width:0`, so long names widened the whole panel. Now
+  `overflow-wrap: anywhere` with `min-width:0` on the row/column and
+  `overflow-x: hidden` on the body; full name in `title=`.
+- Distinctness from "Grounded in" unchanged (see the component header).

@@ -21,7 +21,10 @@
   /* Text */
   --t1: #f1eee9;
   --t2: #a8a199;
-  --t3: #6c6660; /* tertiary, metadata, placeholders */
+  --t3: #878079; /* tertiary, metadata, placeholders — lifted from the spec's
+                    #6C6660 per review, measured against --s2 (the lightest
+                    surface it carries readable text on, e.g. the composer
+                    placeholder): 4.51:1 on --s2, 4.81 on --s1, 5.05 on --bg */
 
   /* Accent — assistant, active state, success */
   --accent: #63ae93;

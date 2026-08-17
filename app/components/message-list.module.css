@@ -13,17 +13,10 @@
   overflow-anchor: none;
 }
 
-/* Pin the conversation to the bottom. .messages flex-grows to fill the height,
-   so a short conversation would otherwise float at the top with a large empty
-   gap below it. margin-top:auto on the first message absorbs that free space
-   (last message sits just above the input) and collapses to 0 once the content
-   overflows — so scrolling still reaches the top. */
-.messages > *:first-child {
-  margin-top: auto;
-}
-
 /* One turn. The rail is drawn per-turn (segments join into a continuous
-   line); the marker sits on top of it. */
+   line); the marker sits on top of it. Turns read top-down: content is
+   top-aligned and grows downward (the old bottom-pinning margin-top:auto
+   from the bubble era is deliberately gone). */
 .turn {
   position: relative;
   width: 100%;
@@ -261,6 +254,11 @@
   font-weight: 500;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  color: var(--t3);
+}
+
+.sourcesCount {
+  font-family: var(--font-mono);
   color: var(--t3);
 }
 

@@ -5,6 +5,8 @@ import useSWR from "swr";
 import styles from "./chat.module.css";
 import { AssistantStream } from "openai/lib/AssistantStream";
 import MessageList, { MessageProps } from "./message-list";
+import { useThreadHighlights } from "./highlights/use-thread-highlights";
+import HighlightsPanel from "./highlights/highlights-panel";
 // @ts-expect-error - no types for this yet
 import { AssistantStreamEvent } from "openai/resources/beta/assistants/assistants";
 import { RequiredActionFunctionToolCall } from "openai/resources/beta/threads/runs/runs";
@@ -265,6 +267,12 @@ const Chat = ({
   // handshake. The field is OMITTED by a flag-off server, and absent/false
   // keeps the plain "+" button — fails closed, like the uploadTypes default.
   const [diagramEditorEnabled, setDiagramEditorEnabled] = useState(false);
+  // Message highlights capability (backend HIGHLIGHTS_ENABLED), same handshake
+  // and same fail-closed contract: field omitted by a flag-off server -> off.
+  const [highlightsEnabled, setHighlightsEnabled] = useState(false);
+  // Thread-wide highlights panel (side column). Mutually exclusive with the
+  // documents panel so the layout never carries two side columns.
+  const [showHighlights, setShowHighlights] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showDiagramEditor, setShowDiagramEditor] = useState(false);
   useEffect(() => {
@@ -278,6 +286,9 @@ const Chat = ({
         }
         if (data.diagramEditor === true) {
           setDiagramEditorEnabled(true);
+        }
+        if (data.highlights === true) {
+          setHighlightsEnabled(true);
         }
       })
       .catch(() => {
@@ -595,6 +606,8 @@ const Chat = ({
         return {
           role: msg.role,
           text,
+          // Server id (present only when HIGHLIGHTS_ENABLED) keys highlights.
+          id: typeof msg.id === "string" ? msg.id : undefined,
           annotations: msg.content?.[0]?.text?.annotations || [],
           // Legacy rows may carry the old appended "**Sources:**" block in
           // the text — attach the structured panel only when they don't, so
@@ -1179,12 +1192,54 @@ const Chat = ({
     }
   };
 
+  // Highlights (HIGHLIGHTS_ENABLED): a message can be highlighted only once it
+  // has its server id, and neither the stream nor the JSON reply carries one
+  // (nothing about those paths changes). So after a turn completes, re-read
+  // the thread's history once and stamp the id onto the local assistant
+  // message whose text equals the persisted content exactly. No match (an
+  // error turn, a stream/DB mismatch) -> no id -> not highlightable until the
+  // thread is reopened. Flag off -> never called.
+  const hydrateMessageIds = async (targetThreadId: string | null) => {
+    if (!highlightsEnabled || !targetThreadId) return;
+    try {
+      const res = await fetch(API_ENDPOINTS.getChatHistory(targetThreadId), {
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const rows: { id: string; role: string; content: string }[] = (data.messages || []).filter(
+        (m: any) => typeof m.id === "string" && typeof m.content === "string",
+      );
+      if (rows.length === 0 || threadIdRef.current !== targetThreadId) return;
+      setMessages((prev) => {
+        const used = new Set(prev.map((m) => m.id).filter(Boolean));
+        let changed = false;
+        const next = prev.map((m) => {
+          if (m.id || m.role !== "assistant") return m;
+          const row = rows.find((r) => r.role === "assistant" && !used.has(r.id) && r.content === m.text);
+          if (!row) return m;
+          used.add(row.id);
+          changed = true;
+          return { ...m, id: row.id };
+        });
+        return changed ? next : prev;
+      });
+    } catch {
+      /* ids stay absent; the message is simply not highlightable yet */
+    }
+  };
+
   const sendMessage = async (text: string, targetThreadId: string | null = null) => {
     const actualThreadId = targetThreadId || threadId;
 
     // Prefer the stream; fall back to the JSON endpoint only when the backend
     // says streaming is off (404), never after tokens have started arriving.
-    if (await sendMessageStreaming(text, actualThreadId)) return;
+    if (await sendMessageStreaming(text, actualThreadId)) {
+      await hydrateMessageIds(actualThreadId);
+      return;
+    }
 
     try {
       // Get API endpoint based on configuration (Python or Next.js)
@@ -1259,6 +1314,7 @@ const Chat = ({
 
       appendMessage("assistant", answer, sources);
       setInputDisabled(false);
+      await hydrateMessageIds(actualThreadId);
 
       // Title generation is owned by handleSubmit (the only caller), which knows
       // whether this is the thread's first turn. Doing it here too fired the
@@ -1722,6 +1778,8 @@ const Chat = ({
         return {
           role: msg.role,
           text,
+          // Server id (present only when HIGHLIGHTS_ENABLED) keys highlights.
+          id: typeof msg.id === "string" ? msg.id : undefined,
           annotations: msg.content?.[0]?.text?.annotations || [],
           // Legacy rows may carry the old appended "**Sources:**" block in
           // the text — attach the structured panel only when they don't, so
@@ -2275,6 +2333,15 @@ const Chat = ({
     setAttachedFiles([]);
   };
 
+  // Highlights for the open thread (HIGHLIGHTS_ENABLED); null when off.
+  const threadHighlights = useThreadHighlights(threadId, highlightsEnabled);
+  // Thread order of message ids (only messages that carry a server id), so
+  // the highlights panel can list by message, then position.
+  const messageIdsInOrder = useMemo(
+    () => messages.map((m) => m.id).filter((x): x is string => typeof x === "string"),
+    [messages],
+  );
+
   const deduplicatedMessages = useMemo(() => {
     const result: MessageProps[] = [];
     for (const msg of messages) {
@@ -2351,11 +2418,6 @@ const Chat = ({
                 </button>
               </span>
             )}
-            <span title="Export is not available yet">
-              <button type="button" className={styles.threadHeaderBtn} disabled>
-                Export
-              </button>
-            </span>
             <div className={styles.threadMenuWrap}>
               <button
                 type="button"
@@ -2381,6 +2443,7 @@ const Chat = ({
                         className={styles.threadMenuItem}
                         onClick={() => {
                           setShowThreadMenu(false);
+                          if (!showSources) setShowHighlights(false);
                           setShowSources((o) => !o);
                         }}
                         aria-pressed={showSources}
@@ -2388,6 +2451,24 @@ const Chat = ({
                         {showSources ? "Hide thread documents" : "Thread documents"}
                         {threadSources && threadSources.length > 0 && (
                           <span className={styles.threadMenuCount}>{threadSources.length}</span>
+                        )}
+                      </button>
+                    )}
+                    {highlightsEnabled && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={styles.threadMenuItem}
+                        onClick={() => {
+                          setShowThreadMenu(false);
+                          if (!showHighlights) setShowSources(false);
+                          setShowHighlights((o) => !o);
+                        }}
+                        aria-pressed={showHighlights}
+                      >
+                        {showHighlights ? "Hide highlights" : "Highlights"}
+                        {threadHighlights && threadHighlights.items.length > 0 && (
+                          <span className={styles.threadMenuCount}>{threadHighlights.items.length}</span>
                         )}
                       </button>
                     )}
@@ -2423,6 +2504,7 @@ const Chat = ({
         awaitingSince={awaitingSince}
         canRetry={!inputDisabled && !isStreaming && !isGroupConversation}
         onRetry={retryLastTurn}
+        highlights={threadHighlights}
       />
       <Composer
         onSubmit={handleSubmit}
@@ -2473,6 +2555,18 @@ const Chat = ({
           requestRemoveSource={requestRemoveSource}
           confirmRemoveSource={confirmRemoveSource}
           cancelRemove={() => setRemovePreview(null)}
+        />
+      )}
+      {/* Highlights panel (HIGHLIGHTS_ENABLED): same side-column pattern. */}
+      {highlightsEnabled && threadId && threadHighlights && (
+        <HighlightsPanel
+          open={showHighlights}
+          onClose={() => setShowHighlights(false)}
+          threadId={threadId}
+          threadTitle={activeThreadTitle || ""}
+          items={threadHighlights.items}
+          messageIds={messageIdsInOrder}
+          onDelete={threadHighlights.actions.remove}
         />
       )}
     </div>

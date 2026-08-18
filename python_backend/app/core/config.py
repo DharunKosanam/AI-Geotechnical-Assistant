@@ -131,6 +131,25 @@ DIAGRAM_EDITOR_ENABLED = os.getenv("DIAGRAM_EDITOR_ENABLED", "false").strip().lo
     "on",
 )
 
+# ---------------------------------------------------------------------------
+# Persistent message highlights + notes feature flag
+# ---------------------------------------------------------------------------
+# Master switch for text highlights/notes on assistant messages. Default OFF:
+# the highlights routes are NOT registered (absent, not 404), the chat history
+# payload carries no per-message "id", and /api/upload/config omits its
+# "highlights" capability field -- every response is byte-identical to before
+# the feature existed. Read at call time (via the config module, e.g.
+# config.HIGHLIGHTS_ENABLED) so it can be toggled in tests without re-import;
+# route registration itself happens once at startup (see
+# app.routers.highlights.register), so toggling the flag needs a restart.
+# Accepts 1/true/yes/on (case-insensitive).
+HIGHLIGHTS_ENABLED = os.getenv("HIGHLIGHTS_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:

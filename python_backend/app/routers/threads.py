@@ -19,7 +19,12 @@ from models import (
 from pydantic import BaseModel
 
 from app.core import config
-from app.core.database import conversations_collection, messages_collection, files_collection
+from app.core.database import (
+    conversations_collection,
+    messages_collection,
+    files_collection,
+    highlights_collection,
+)
 from app.dependencies.auth import get_current_user
 from app.services.llm_service import get_llm
 from app.services.rag_service import effective_ingest_status
@@ -262,6 +267,20 @@ async def delete_thread(
                 f"[CASCADE] Deleted {deleted_thread_documents} thread_upload doc(s) "
                 f"for thread {request.threadId}"
             )
+
+        # Cascade: the thread's message highlights (HIGHLIGHTS_ENABLED). Same
+        # exact {userId, threadId} scope as the messages above, so no other
+        # user's or thread's highlights can match. Not flag-gated on purpose:
+        # highlights created while the flag was on must not be orphaned by a
+        # thread deleted while it is off (delete_many on an empty collection is
+        # a no-op). Not added to the response body, which stays as before.
+        highlight_result = await highlights_collection.delete_many(
+            {"userId": current_user.id, "threadId": request.threadId}
+        )
+        print(
+            f"[CASCADE] Deleted {highlight_result.deleted_count} highlight(s) for "
+            f"thread {request.threadId}"
+        )
 
         # Also delete the thread messages from memory
         if request.threadId in _thread_messages:

@@ -189,6 +189,10 @@ async def upload_config(current_user: User = Depends(get_current_user)):
     # the frontend treats an absent field as off (fails closed).
     if config.DIAGRAM_EDITOR_ENABLED:
         payload["diagramEditor"] = True
+    # Message highlights capability (HIGHLIGHTS_ENABLED). Same contract:
+    # present only when ON, absent (not false) when off.
+    if config.HIGHLIGHTS_ENABLED:
+        payload["highlights"] = True
     return payload
 
 

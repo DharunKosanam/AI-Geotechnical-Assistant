@@ -1,0 +1,212 @@
+/* Highlights panel — same column idiom as thread-documents.module.css. */
+
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  height: 100%;
+  min-width: 0;
+  background: var(--s1);
+  border-left: 1px solid var(--line-2);
+  color: var(--t1);
+  font-family: var(--font-sans);
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.panelOverlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  z-index: 801;
+  box-shadow: var(--e3);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 40px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.headerText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t2);
+}
+
+.count {
+  font-size: 11px;
+  color: var(--t3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r1);
+  border: none;
+  background: transparent;
+  color: var(--t3);
+  cursor: pointer;
+}
+.iconBtn:hover { background: var(--s3); color: var(--t1); }
+
+.exportRow {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.exportBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: var(--r1);
+  border: 1px solid var(--line-2);
+  background: var(--s2);
+  color: var(--t2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.exportBtn:hover { background: var(--s3); color: var(--t1); }
+.exportBtn:disabled { opacity: 0.5; cursor: default; }
+
+.empty {
+  margin: 0;
+  padding: 18px 14px;
+  color: var(--t3);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  border-radius: var(--r2);
+  background: var(--s2);
+  box-shadow: var(--hi);
+}
+
+.rowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 6px 10px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--r2);
+}
+.rowMain:hover { background: var(--s3); }
+.rowMain:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+
+.swatch {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--t3);
+}
+.swatch_yellow { background: rgb(201, 163, 94); }
+.swatch_green  { background: rgb(99, 174, 147); }
+.swatch_blue   { background: rgb(96, 148, 214); }
+.swatch_pink   { background: rgb(214, 112, 160); }
+
+.rowBody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.text {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--t1);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--t2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--t3);
+}
+
+.deleteBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  margin: 8px 6px 0 0;
+  padding: 0 6px;
+  border-radius: var(--r1);
+  border: none;
+  background: transparent;
+  color: var(--t3);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.deleteBtn:hover { background: var(--s3); color: var(--danger-2); }
+.deleteConfirm { background: var(--danger-a); color: var(--danger-2); }
+.deleteBtn:disabled { opacity: 0.5; cursor: default; }

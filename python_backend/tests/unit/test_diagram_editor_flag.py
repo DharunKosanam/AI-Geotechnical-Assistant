@@ -20,6 +20,8 @@ pytestmark = pytest.mark.unit
 async def test_upload_config_flag_off_omits_diagram_field(monkeypatch):
     monkeypatch.setattr(config, "VISION_EXTRACTION_ENABLED", False)
     monkeypatch.setattr(config, "DIAGRAM_EDITOR_ENABLED", False)
+    # Same hermeticity pin for the highlights capability field (host .env).
+    monkeypatch.setattr(config, "HIGHLIGHTS_ENABLED", False)
     out = await files_router.upload_config(current_user=object())
     # Omitted, not false: exact-equality proves no new key leaks out flag-off.
     assert out == {

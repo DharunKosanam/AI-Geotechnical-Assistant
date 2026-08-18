@@ -19,6 +19,8 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { Check, Copy, RotateCcw, ThumbsUp } from "lucide-react";
 import s from "./message-list.module.css";
+import { useMessageHighlights } from "./highlights/use-message-highlights";
+import type { HighlightActions, StoredHighlight, ThreadHighlights } from "./highlights/use-thread-highlights";
 
 export type MessageProps = {
   role: "user" | "assistant" | "code";
@@ -26,7 +28,15 @@ export type MessageProps = {
   annotations?: any[];
   /* Retrieval payload for this answer, exactly as the backend sent it. */
   sources?: any[];
+  /* Server message id. Present only when HIGHLIGHTS_ENABLED and the message
+     is persisted (never mid-stream) -- it is what makes a message highlightable. */
+  id?: string;
 };
+
+/* Highlight layer input for one assistant message (HIGHLIGHTS_ENABLED only). */
+type MessageHighlights = { items: StoredHighlight[]; actions: HighlightActions };
+const NO_HIGHLIGHTS: StoredHighlight[] = [];
+type RehypePluginList = NonNullable<React.ComponentProps<typeof Markdown>["rehypePlugins"]>;
 
 const UserMessage = ({ text }: { text: string }) => {
   return (
@@ -179,6 +189,10 @@ type AssistantMessageProps = {
   isLast: boolean;
   canRetry: boolean;
   onRetry: () => void;
+  /* HIGHLIGHTS_ENABLED only: server id + this message's highlights. Both
+     absent -> the body renders exactly as before the feature. */
+  id?: string;
+  highlights?: MessageHighlights;
 };
 
 const AssistantMessage = ({
@@ -188,6 +202,8 @@ const AssistantMessage = ({
   isLast,
   canRetry,
   onRetry,
+  id,
+  highlights,
 }: AssistantMessageProps) => {
   const [copied, setCopied] = useState(false);
 
@@ -218,6 +234,20 @@ const AssistantMessage = ({
 
   const processedText = replaceCitationsWithFilenames(text, annotations);
 
+  // Highlight layer (HIGHLIGHTS_ENABLED): null unless this message is
+  // persisted (has an id) and the renderer input IS the stored content --
+  // legacy rows whose citations get rewritten above are excluded, since
+  // stored offsets must index the stored text. Null leaves the JSX below
+  // byte-identical to the pre-feature rendering.
+  const hl = useMessageHighlights({
+    enabled: !!highlights && !!id && processedText === text,
+    messageId: id,
+    source: processedText,
+    highlights: highlights?.items ?? NO_HIGHLIGHTS,
+    actions: highlights?.actions ?? null,
+  });
+  const rehypePlugins: RehypePluginList = hl ? [rehypeKatex, hl.rehypePlugin as any] : [rehypeKatex];
+
   const handleCopy = () => {
     navigator.clipboard
       ?.writeText(text)
@@ -231,10 +261,15 @@ const AssistantMessage = ({
   return (
     <article className={`${s.turn} ${s.assistantTurn}`}>
       <header className={`${s.turnLabel} ${s.assistantLabel}`}>Assistant</header>
-      <div className={s.assistantBody}>
+      <div
+        className={s.assistantBody}
+        ref={hl?.bodyRef}
+        onMouseUp={hl?.onMouseUp}
+        onClick={hl?.onClick}
+      >
         <Markdown
           remarkPlugins={[remarkGfm, remarkMath]}
-          rehypePlugins={[rehypeKatex]}
+          rehypePlugins={rehypePlugins}
           components={{
             // Element styling lives in message-list.module.css (scoped under
             // .assistantBody); only behavior overrides remain here.
@@ -251,6 +286,7 @@ const AssistantMessage = ({
           {processedText}
         </Markdown>
       </div>
+      {hl?.popover}
       {sources && sources.length > 0 && <SourcesPanel sources={sources} />}
       <div className={s.turnActions}>
         <button type="button" className={s.actionBtn} onClick={handleCopy}>
@@ -306,6 +342,8 @@ type MessageListProps = {
   awaitingSince: number | null;
   canRetry: boolean;
   onRetry: () => void;
+  /* HIGHLIGHTS_ENABLED only; null/undefined = feature off or no open thread. */
+  highlights?: ThreadHighlights | null;
 };
 
 const MessageList = ({
@@ -318,6 +356,7 @@ const MessageList = ({
   awaitingSince,
   canRetry,
   onRetry,
+  highlights,
 }: MessageListProps) => {
   const lastAssistantIndex = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -346,6 +385,12 @@ const MessageList = ({
                     isLast={index === lastAssistantIndex && index === messages.length - 1}
                     canRetry={canRetry}
                     onRetry={onRetry}
+                    id={msg.id}
+                    highlights={
+                      highlights && msg.id
+                        ? { items: highlights.byMessage.get(msg.id) ?? NO_HIGHLIGHTS, actions: highlights.actions }
+                        : undefined
+                    }
                   />
                 );
               case "code":

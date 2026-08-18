@@ -191,6 +191,17 @@ export const API_ENDPOINTS = {
   kbBulkUpload: () => `${PYTHON_BACKEND_URL}/api/kb/bulk-upload`,
   kbBatchStatus: (batchId: string) => `${PYTHON_BACKEND_URL}/api/kb/batch/${batchId}`,
   kbMyUploads: () => `${PYTHON_BACKEND_URL}/api/kb/my-uploads`,
+
+  // --- Message highlights + notes (HIGHLIGHTS_ENABLED). Same-origin; proxied
+  // to FastAPI by the /api/assistants rewrite. The routes exist only when the
+  // backend flag is on; the frontend learns that from /api/upload/config. ---
+  threadHighlights: (threadId: string) =>
+    `${PYTHON_BACKEND_URL}/api/assistants/threads/${encodeURIComponent(threadId)}/highlights`,
+  threadHighlight: (threadId: string, highlightId: string) =>
+    `${PYTHON_BACKEND_URL}/api/assistants/threads/${encodeURIComponent(threadId)}/highlights/${encodeURIComponent(highlightId)}`,
+  // Thread-wide export (Markdown or Excel) as a file download.
+  threadHighlightsExport: (threadId: string, format: "md" | "xlsx") =>
+    `${PYTHON_BACKEND_URL}/api/assistants/threads/${encodeURIComponent(threadId)}/highlights/export?format=${format}`,
 };
 
 /**

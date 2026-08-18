@@ -78,6 +78,12 @@ async def get_chat_history(thread_id: str, current_user: User = Depends(get_curr
                 "sources": doc.get("sources", []),
                 "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None
             }
+            # Highlights (HIGHLIGHTS_ENABLED) need a stable per-message key.
+            # Present only when ON so a flag-off server's payload is
+            # byte-identical to before the feature; the frontend treats an
+            # absent id as "not highlightable".
+            if config.HIGHLIGHTS_ENABLED:
+                message["id"] = str(doc["_id"])
             messages.append(message)
         
         print(f"[OK] Retrieved {len(messages)} messages for thread {thread_id}")

@@ -1,0 +1,96 @@
+/* Floating highlight panel (see account-menu.module.css for the shared idiom). */
+
+.popover {
+  position: fixed;
+  z-index: 300;
+  width: 260px;
+  padding: 8px;
+  border-radius: var(--r2);
+  background: var(--s2);
+  box-shadow: var(--e3), var(--hi);
+  outline: none;
+  color: var(--t1);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.swatches {
+  display: flex;
+  gap: 8px;
+}
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 120ms var(--ease), border-color 120ms var(--ease);
+}
+.swatch:hover { transform: scale(1.08); }
+.swatch:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.swatchActive { border-color: var(--t1); }
+.swatch:disabled { opacity: 0.5; cursor: default; }
+
+.swatch_yellow { background: rgb(201, 163, 94); }
+.swatch_green  { background: rgb(99, 174, 147); }
+.swatch_blue   { background: rgb(96, 148, 214); }
+.swatch_pink   { background: rgb(214, 112, 160); }
+
+.hint {
+  margin: 8px 0 0;
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.iconBtn,
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--r1);
+  border: 1px solid var(--line-2);
+  background: var(--s3);
+  color: var(--t2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.iconBtn:hover, .btn:hover { background: var(--s4); color: var(--t1); }
+.iconBtn:disabled, .btn:disabled { opacity: 0.5; cursor: default; }
+.btnPrimary { background: var(--accent-a); color: var(--accent-2); border-color: transparent; }
+
+.note {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: var(--r1);
+  border: 1px solid var(--line-2);
+  background: var(--s1);
+  color: var(--t1);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.note::placeholder { color: var(--t3); }
+.note:focus { outline: none; border-color: var(--accent); }
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}

@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from app.core.config import CORS_ORIGINS
 from app.core.database import close_mongo_connection, ensure_indexes
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
-from app.routers import chat, threads, files, auth, health, kb
+from app.routers import chat, threads, files, auth, health, kb, highlights
 from app.workspace.routes import router as workspace_router
 
 # Initialize FastAPI
@@ -50,6 +50,10 @@ app.include_router(kb.router)
 # Engineering Workspace (GeoPilot). Additive and self-gating via
 # WORKSPACE_ENABLED -- including the router does not affect chat/RAG.
 app.include_router(workspace_router)
+# Message highlights + notes. Registered ONLY when HIGHLIGHTS_ENABLED is on --
+# with the flag off the routes are absent (not present-and-404ing), so the
+# route table is identical to before the feature.
+highlights.register(app)
 
 
 @app.get("/")

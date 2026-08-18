@@ -230,6 +230,29 @@
   background: #fff;
 }
 
+/* Highlights (HIGHLIGHTS_ENABLED): <mark class="hl hl-<colour>"> emitted by
+   the rehype plugin around highlighted text. Translucent so the dark theme's
+   text colour stays legible; the popover swatches use the same hues. */
+.assistantBody :global(mark.hl) {
+  color: inherit;
+  border-radius: 2px;
+  padding: 0.05em 0;
+  cursor: pointer;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.assistantBody :global(mark.hl-yellow) { background: rgba(201, 163, 94, 0.38); }
+.assistantBody :global(mark.hl-green)  { background: rgba(99, 174, 147, 0.38); }
+.assistantBody :global(mark.hl-blue)   { background: rgba(96, 148, 214, 0.38); }
+.assistantBody :global(mark.hl-pink)   { background: rgba(214, 112, 160, 0.38); }
+.assistantBody :global(mark.hl:hover)  { filter: brightness(1.15); }
+/* Transient emphasis when jumped to from the highlights panel. */
+.assistantBody :global(mark.hl.hlFlash) { animation: hlFlash 1.6s var(--ease) 1; }
+@keyframes hlFlash {
+  0%, 60% { box-shadow: 0 0 0 3px var(--accent-2); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
 .assistantBody :global(.katex-display) {
   overflow-x: auto;
   padding: 4px 0;

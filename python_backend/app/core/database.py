@@ -31,6 +31,10 @@ workspace_threads_collection = db["workspace_threads"]  # persisted chat threads
 # the KB data itself.
 kb_audit_collection = db["kb_audit"]
 
+# Message highlights + notes (HIGHLIGHTS_ENABLED). Separate collection keyed by
+# (threadId, messageId); messages themselves are never touched.
+highlights_collection = db["highlights"]
+
 
 async def ensure_indexes():
     """Create required indexes. Idempotent -- safe to call on every startup.
@@ -56,6 +60,17 @@ async def ensure_indexes():
     from app.services.password_reset_service import ensure_password_reset_indexes
 
     await ensure_password_reset_indexes()
+
+    # Highlights (HIGHLIGHTS_ENABLED): index for the per-thread list and the
+    # per-message lookups. Flag-gated so a flag-off deployment creates nothing.
+    # Imported here (not at module top) so a flag-off process never even
+    # evaluates it; config is already loaded by this point.
+    from app.core import config as _config
+
+    if _config.HIGHLIGHTS_ENABLED:
+        await highlights_collection.create_index(
+            [("threadId", 1), ("messageId", 1)], name="threadId_1_messageId_1"
+        )
 
 
 async def close_mongo_connection():

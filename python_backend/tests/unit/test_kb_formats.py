@@ -90,24 +90,27 @@ def test_pptx_includes_slides_and_notes():
     assert kf.get_handler("deck.pptx").validate(r)[0] is True
 
 
-def test_xlsx_is_metadata_indexed_not_cell_dump():
+def test_xlsx_is_row_indexed_with_associations():
+    # v3-xlsx: one line per row, columns in order — row associations must be
+    # recoverable from the text alone (the old metadata index flattened them).
     r = kf.extract_kb_document(_xlsx_bytes(), "bh.xlsx")
     text = "\n".join(p[1] for p in r.pages)
-    assert "Boreholes" in text                          # sheet name
-    assert "Depth (m)" in text and "Description" in text  # headers
-    assert "stiff clay" in text                          # text label
-    assert "96" not in text and "110" not in text        # numeric cells NOT dumped
+    assert "## Sheet: Boreholes" in text
+    assert "| Depth (m) | cu (kPa) | Description |" in text   # header row, in order
+    assert "| 1 | 96 | stiff clay |" in text                  # full row, values kept
+    assert "| 2 | 110 | very stiff clay |" in text
     assert r.format_metadata["sheets"] == ["Boreholes"]
+    assert r.format_metadata["headers"]["Boreholes"] == ["Depth (m)", "cu (kPa)", "Description"]
 
 
-def test_csv_is_metadata_indexed():
+def test_csv_is_row_indexed():
     r = kf.extract_kb_document(b"site,depth,soil\nAlpha,1.0,clay\nBeta,2.0,sand\n", "d.csv")
     text = r.pages[0][1]
-    assert "Columns: site | depth | soil" in text
-    assert "clay" in text and "sand" in text
-    assert "1.0" not in text  # numeric cell not dumped
+    assert "| site | depth | soil |" in text
+    assert "| Alpha | 1.0 | clay |" in text    # CSV cells kept verbatim
+    assert "| Beta | 2.0 | sand |" in text
     assert r.format_metadata["columns"] == ["site", "depth", "soil"]
-    assert r.format_metadata["sampled_rows"] == 2
+    assert r.format_metadata["rows"] == 2
 
 
 def test_pdf():

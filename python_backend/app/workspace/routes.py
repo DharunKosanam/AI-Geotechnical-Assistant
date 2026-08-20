@@ -13,12 +13,15 @@ is untouched -- this router is purely additive.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -31,13 +34,23 @@ from pydantic import BaseModel
 
 from app.core import config
 from app.dependencies.auth import get_current_user
-from app.workspace import export, history_store, store
+from app.workspace import (
+    dataset_files,
+    dataset_store,
+    export,
+    history_store,
+    instrument_ingest,
+    store,
+)
 from app.workspace.calculators import registry
+from app.workspace.calculators.base import DatasetInput
 from app.workspace.calculators.cpt_interpretation import interpret_cpt
 from app.workspace.interpretation.ai_interpret import interpret_sounding
 from app.workspace.interpretation.layer_summary import Stratigraphy, summarize
 from app.workspace.interpretation.qa import answer_question
 from app.workspace.router import route_message
+from app.workspace.parsers import registry as parser_registry
+from app.workspace.parsers.base import SNIFF_BYTES
 from app.workspace.parsers.cpt import parse_cpt_text
 from models import User
 
@@ -93,7 +106,19 @@ async def workspace_status(current_user: User = Depends(get_current_user)) -> di
     GeoPilot toggle. NOT gated -- reporting ``enabled: false`` is the whole
     point when the flag is off.
     """
-    return {"enabled": bool(config.WORKSPACE_ENABLED)}
+    payload = {"enabled": bool(config.WORKSPACE_ENABLED)}
+    # Instrument datasets capability (INSTRUMENT_PARSERS_ENABLED). Present ONLY
+    # when on -- a flag-off server returns byte-identical bytes to before the
+    # feature, and the frontend treats an absent field as off (fails closed).
+    if config.WORKSPACE_ENABLED and config.INSTRUMENT_PARSERS_ENABLED:
+        payload["instrument_parsers"] = True
+        exts: list[str] = []
+        for p in parser_registry.all_parsers():
+            for e in p.extensions:
+                if e not in exts:
+                    exts.append(e)
+        payload["instrument_extensions"] = exts
+    return payload
 
 
 @router.post("/cpt/interpret", dependencies=[Depends(require_workspace_enabled)])
@@ -170,6 +195,7 @@ async def interpret_cpt_upload(
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_workspace_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ) -> dict:
@@ -178,8 +204,25 @@ async def upload_workspace_document(
     The file body is decoded to text and kept in the session store; the
     calculator that needs it parses it at run time. Returns the compact
     ``{id, filename, extension, status}`` record the frontend tracks.
+
+    INSTRUMENT_PARSERS_ENABLED: the first 2 KB are sniffed against the
+    registered instrument signatures FIRST. A match takes the parser path
+    (streamed to disk, parsed in a background job into a numeric dataset --
+    never decoded as a document, never embedded) and returns a
+    ``kind: "dataset"`` record. No match -> the bytes already read are
+    re-joined and the document path below runs exactly as before. Flag off ->
+    no sniffing at all: ``raw = await file.read()`` as it always was.
     """
-    raw = await file.read()
+    if config.INSTRUMENT_PARSERS_ENABLED:
+        head = await file.read(SNIFF_BYTES)
+        parser_id = parser_registry.sniff(head)
+        if parser_id is not None:
+            return await instrument_ingest.ingest_upload(
+                file, head, parser_id, current_user.id, background_tasks
+            )
+        raw = head + await file.read()
+    else:
+        raw = await file.read()
     if not raw:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="File is empty"
@@ -309,10 +352,192 @@ async def _handle_non_command(message: str, user_id: str) -> tuple[dict, dict]:
     return reply, {"role": "assistant", "type": "info", "content": reply["text"]}
 
 
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.split(r"[\s_\-]+", text.lower()) if t]
+
+
+def _select_dataset(message: str, docs: list) -> Optional[dict]:
+    """Pick the dataset a message refers to, explicitly and deterministically.
+
+    A dataset matches when the message contains a contiguous run of >= 2 of
+    its filename-stem tokens (tokens split on spaces, '_' and '-': so "pass
+    001", "pass_001", "ch3 pass 001" or the whole filename all name
+    ``..._ch3_pass_001.tsv``), or its whole stem when the stem is one token.
+    The longest match wins; ties and no mention -> the NEWEST parsed dataset
+    of the kind (``docs`` arrive newest first). Never a guess by content."""
+    if not docs:
+        return None
+    msg = _tokens(message)
+    best, best_len = None, 0
+    for doc in docs:
+        name = str(doc.get("filename") or "")
+        stem = re.sub(r"\.[^.]*$", "", name)
+        longest = 0
+        # Match against the stem's tokens AND the full name's tokens (so a
+        # message quoting "pass_002.tsv" matches the trailing "002.tsv" token).
+        for st in (_tokens(stem), _tokens(name)):
+            if not st:
+                continue
+            if len(st) == 1:
+                if st[0] in msg:
+                    longest = max(longest, 1)
+                continue
+            for i in range(len(st)):
+                for j in range(len(st), i + 1, -1):  # longest first, >= 2 tokens
+                    n = j - i
+                    if n <= longest or n < 2:
+                        break
+                    gram = st[i:j]
+                    if any(msg[k:k + n] == gram for k in range(len(msg) - n + 1)):
+                        longest = n
+                        break
+        if longest > best_len:
+            best, best_len = doc, longest
+    return best if best is not None else docs[0]
+
+
+async def _handle_dataset_calculator(
+    message: str, calc, user_id: str
+) -> tuple[dict, dict, Optional[str]]:
+    """A DATASET-bound calculator was selected (INSTRUMENT_PARSERS_ENABLED):
+    pick the dataset, load its arrays off the loop, compute off the loop,
+    interpret (AI draft, best-effort), attach segments to the dataset row,
+    persist the run. Same reply shape as the document path plus ``charts``,
+    ``notices``, ``summary`` (the deterministic block), ``dataset_id`` and
+    ``segments``."""
+    docs = await dataset_store.latest_parsed_of_kind(user_id, calc.required_dataset_kind)
+    doc = _select_dataset(message, docs)
+    if doc is None:
+        reply = {
+            "type": "need_upload",
+            "calculator_id": calc.id,
+            "text": (
+                f"To run {calc.name}, upload a {calc.required_label} into the "
+                f"Datasets panel first (it is parsed automatically), then send your "
+                f"message again."
+            ),
+        }
+        return reply, {"role": "assistant", "type": "need_upload", "content": reply["text"]}, None
+
+    params = registry.parse_params(message, calc)
+    ds_id = str(doc["_id"])
+    filename = doc.get("filename") or "dataset"
+    try:
+        arrays = await asyncio.to_thread(dataset_files.load_arrays, doc.get("npz_path") or "")
+        dataset = DatasetInput(
+            id=ds_id,
+            filename=filename,
+            dataset_kind=doc.get("dataset_kind") or calc.required_dataset_kind,
+            metadata=doc.get("metadata") or {},
+            arrays=arrays,
+        )
+        result = await asyncio.to_thread(calc.compute, dataset, filename, params)
+    except (ValueError, KeyError, OSError) as exc:
+        reply = {
+            "type": "error",
+            "calculator_id": calc.id,
+            "source_file": filename,
+            "text": f"Could not run {calc.name} on {filename}: {exc}",
+        }
+        return reply, {"role": "assistant", "type": "error", "content": reply["text"]}, None
+
+    interpretation = None
+    if calc.interpret is not None:
+        try:
+            interpretation = await calc.interpret(result.raw)
+        except Exception as exc:  # noqa: BLE001 - never lose the deterministic result
+            interpretation = {
+                "narrative": "",
+                "per_layer_notes": [],
+                "flagged_concerns": [],
+                "is_ai_draft": True,
+                "error": f"AI interpretation unavailable: {exc}",
+            }
+
+    # Detected segments/events become children of the dataset row.
+    if result.segments:
+        try:
+            await dataset_store.set_segments(user_id, ds_id, result.segments)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to attach segments to dataset %s", ds_id)
+
+    result_id = store.store_result(
+        user_id,
+        {
+            "calculator_id": calc.id,
+            "calculator_name": calc.name,
+            "source_file": filename,
+            "reference": calc.reference,
+            "layers": [],
+            "metadata": result.metadata,
+            "flagged_concerns": (interpretation or {}).get("flagged_concerns", []),
+        },
+    )
+    export_payload = {
+        "calculator_id": calc.id,
+        "calculator_name": calc.name,
+        "source_file": filename,
+        "reference": calc.reference,
+        "layers": [],
+        "metadata": result.metadata,
+        "tables": result.tables,
+        "summary": result.summary,
+        "charts": result.charts,
+        "notices": result.notices,
+        "dataset_id": ds_id,
+        "dataset_kind": dataset.dataset_kind,
+        "n_segments": len(result.segments),
+        "export_prefix": result.metadata.get("export_prefix"),
+    }
+    run_summary = {
+        "headline": result.summary_text[:200],
+        "dataset_id": ds_id,
+        "dataset_kind": dataset.dataset_kind,
+        "n_segments": len(result.segments),
+        "reference": calc.reference,
+    }
+    run_id = None
+    try:
+        run_id = await history_store.create_run(
+            user_id, calc.id, filename, export_payload, run_summary
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to persist workspace run")
+
+    reply = {
+        "type": "result",
+        "calculator_id": calc.id,
+        "calculator_name": calc.name,
+        "source_file": filename,
+        "reference": calc.reference,
+        "params": params,
+        "summary_text": result.summary_text,
+        "layers": [],
+        "metadata": result.metadata,
+        "summary": result.summary,
+        "charts": result.charts,
+        "notices": result.notices,
+        "dataset_id": ds_id,
+        "dataset_kind": dataset.dataset_kind,
+        "segments": result.segments,
+        "interpretation": interpretation,
+        "result_id": result_id,
+        "run_id": run_id,
+        "exportable": run_id is not None and bool(result.tables),
+    }
+    # Persist the card WITHOUT the segments list (they live on the dataset doc).
+    stored = {k: v for k, v in reply.items() if k != "segments"}
+    assistant_msg = {"role": "assistant", "type": "result", "content": stored}
+    run_title = f"{filename} - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    return reply, assistant_msg, run_title
+
+
 async def _handle_calculator(
     message: str, calc, user_id: str
 ) -> tuple[dict, dict, Optional[str]]:
     """A calculator was selected: check the doc, compute, interpret, persist run."""
+    if calc.required_dataset_kind:
+        return await _handle_dataset_calculator(message, calc, user_id)
     doc = store.latest_document_with_extension(user_id, calc.required_extension)
     if doc is None:
         reply = {
@@ -491,7 +716,10 @@ async def export_result_xlsx(
         )
 
     xlsx_bytes = export.build_workbook(payload)
-    filename = export.export_filename(payload.get("source_file", "sounding"))
+    filename = export.export_filename(
+        payload.get("source_file", "sounding"),
+        prefix=payload.get("export_prefix") or "CPT",
+    )
     return Response(
         content=xlsx_bytes,
         media_type=_XLSX_MEDIA_TYPE,

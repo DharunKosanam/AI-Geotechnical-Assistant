@@ -150,6 +150,101 @@ HIGHLIGHTS_ENABLED = os.getenv("HIGHLIGHTS_ENABLED", "false").strip().lower() in
     "on",
 )
 
+# ---------------------------------------------------------------------------
+# Instrument data parsers (GeoPilot datasets) feature flag
+# ---------------------------------------------------------------------------
+# Master switch for the instrument-file path: sniffing GeoPilot uploads for a
+# registered instrument signature (Luna ODiSI strain TSV, Campbell pressure-cell
+# .dat), parsing them in a background job into a numeric dataset artifact
+# (.npz on disk + pointer doc in Mongo), the dataset endpoints, and the
+# dataset-bound calculators. Default OFF: uploads are not sniffed at all, the
+# dataset routes 404, /api/workspace/status carries no extra field -- every
+# response is byte-identical to before the feature existed. Read at call time
+# (via the config module, e.g. config.INSTRUMENT_PARSERS_ENABLED) so it can be
+# toggled in tests without re-import. Accepts 1/true/yes/on (case-insensitive).
+INSTRUMENT_PARSERS_ENABLED = os.getenv("INSTRUMENT_PARSERS_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Where parsed dataset arrays (.npz) and the retained raw uploads live. Arrays
+# are NEVER stored in Mongo -- Mongo holds only a pointer document. Default is
+# python_backend/data/instrument_datasets (gitignored); override for a data disk.
+INSTRUMENT_DATA_DIR = os.getenv(
+    "INSTRUMENT_DATA_DIR",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "data",
+        "instrument_datasets",
+    ),
+)
+
+# Size ceiling for a SNIFFED instrument upload (the plain GeoPilot document cap
+# stays 5 MB). Instrument files are 22-58 MB today; a 24 h logger day at higher
+# rates can be larger. nginx client_max_body_size must be raised in step.
+INSTRUMENT_MAX_UPLOAD_MB = int(os.getenv("INSTRUMENT_MAX_UPLOAD_MB", "200"))
+
+# Threads used to run parsers off the event loop (a parse is CPU-bound Python).
+# 1 keeps a burst of uploads from competing with query-time work; parses queue.
+INSTRUMENT_PARSE_WORKERS = int(os.getenv("INSTRUMENT_PARSE_WORKERS", "1"))
+
+# A parse job still "queued"/"parsing" after this many seconds without a
+# progress update is reported as failed (interrupted -- e.g. a backend restart
+# mid-parse) so the row offers a retry instead of spinning forever. Read-time
+# derivation only; nothing is mutated on startup.
+INSTRUMENT_PARSE_TIMEOUT_SECONDS = int(os.getenv("INSTRUMENT_PARSE_TIMEOUT_SECONDS", "900"))
+
+# --- Traffic-load event detection (pressure-cell calculator) -----------------
+# The detection method is a NAMED, swappable strategy with its parameters read
+# from config, not inline constants. Default "percentile_mad": per-channel
+# baseline = the INSTRUMENT_EVENT_BASELINE_PERCENTILE-th percentile over
+# INSTRUMENT_EVENT_BASELINE_WINDOW_S blocks (interpolated), noise scale =
+# 1.4826 x MAD of the residual, threshold = INSTRUMENT_EVENT_MAD_MULTIPLIER x
+# noise; samples over threshold on >= INSTRUMENT_EVENT_MIN_CHANNELS channels
+# are active; runs closer than INSTRUMENT_EVENT_MERGE_GAP_S are merged and runs
+# shorter than INSTRUMENT_EVENT_MIN_DURATION_S dropped.
+# *** This default has NOT been approved by the supervising engineer: results
+# carry a PROVISIONAL status until it is. ***
+INSTRUMENT_EVENT_STRATEGY = os.getenv("INSTRUMENT_EVENT_STRATEGY", "percentile_mad").strip()
+INSTRUMENT_EVENT_BASELINE_PERCENTILE = float(os.getenv("INSTRUMENT_EVENT_BASELINE_PERCENTILE", "20"))
+INSTRUMENT_EVENT_BASELINE_WINDOW_S = float(os.getenv("INSTRUMENT_EVENT_BASELINE_WINDOW_S", "300"))
+INSTRUMENT_EVENT_MAD_MULTIPLIER = float(os.getenv("INSTRUMENT_EVENT_MAD_MULTIPLIER", "6"))
+INSTRUMENT_EVENT_MIN_CHANNELS = int(os.getenv("INSTRUMENT_EVENT_MIN_CHANNELS", "1"))
+INSTRUMENT_EVENT_MERGE_GAP_S = float(os.getenv("INSTRUMENT_EVENT_MERGE_GAP_S", "1.0"))
+INSTRUMENT_EVENT_MIN_DURATION_S = float(os.getenv("INSTRUMENT_EVENT_MIN_DURATION_S", "0.3"))
+# Plausibility band for a 24 h road log: outside it the result carries a
+# WARNING notice ("method is wrong; not a result") instead of a bare number.
+INSTRUMENT_EVENT_PLAUSIBLE_MIN = int(os.getenv("INSTRUMENT_EVENT_PLAUSIBLE_MIN", "1"))
+INSTRUMENT_EVENT_PLAUSIBLE_MAX = int(os.getenv("INSTRUMENT_EVENT_PLAUSIBLE_MAX", "5000"))
+
+# --- DFOS pass-strain calculator -----------------------------------------------
+# Two SEPARATE fibre-end exclusions (metres), applied before peak tracking,
+# envelope, speed fit and global peak. They describe different physical
+# phenomena and are never conflated (real pass 001, max |strain| in 0.5 m
+# bands: head 0.08-1.08 m reads ~4-33 microstrain = unbonded lead-in reading
+# near zero; tail 19.94-20.44 m reads up to 21,400 = termination artifact).
+# The stored .npz and the Excel export keep the full untrimmed fibre. Both
+# lengths are engineering choices NOT yet validated by the supervising
+# engineer: results carry a PROVISIONAL notice naming them.
+DFOS_TAIL_EXCLUDE_M = float(os.getenv("DFOS_TAIL_EXCLUDE_M", "0.50"))  # fibre termination artifact
+DFOS_LEADIN_EXCLUDE_M = float(os.getenv("DFOS_LEADIN_EXCLUDE_M", "1.10"))  # unbonded lead-in
+# Speed-fit credibility threshold: below this R2 the calculator reports the
+# implied speed AND direction as "not determinable" (no number anywhere -- a
+# low-confidence value next to a warning still gets copied into reports).
+DFOS_SPEED_MIN_R2 = float(os.getenv("DFOS_SPEED_MIN_R2", "0.70"))
+# Diagnostic band profile (max |strain| per band across the FULL fibre,
+# trimmed regions included): band width and the "high strain" fraction level.
+DFOS_BAND_WIDTH_M = float(os.getenv("DFOS_BAND_WIDTH_M", "0.5"))
+DFOS_BAND_HIGH_STRAIN_MICROSTRAIN = float(os.getenv("DFOS_BAND_HIGH_STRAIN_MICROSTRAIN", "2000"))
+DFOS_SUBTRACT_TARE = os.getenv("DFOS_SUBTRACT_TARE", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
@@ -283,6 +378,14 @@ CHUNKING_VERSION = os.getenv("CHUNKING_VERSION", "v2")
 CHUNK_TARGET_SIZE = int(os.getenv("CHUNK_TARGET_SIZE", "1200"))
 CHUNK_MAX_SIZE = int(os.getenv("CHUNK_MAX_SIZE", "1500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+
+# Row-structured spreadsheet extraction (v3-xlsx). Chunks from XLSX/XLS/CSV get
+# this version tag so they are distinguishable from chunks the old flattened
+# extractor produced; existing chunks are never modified.
+XLSX_CHUNKING_VERSION = os.getenv("XLSX_CHUNKING_VERSION", "v3-xlsx")
+# Per-sheet row cap. When hit, the sheet text ends with an explicit truncation
+# note — data is never dropped silently.
+XLSX_MAX_ROWS_PER_SHEET = int(os.getenv("XLSX_MAX_ROWS_PER_SHEET", "5000"))
 
 # Cross-encoder reranking (after vector search, before LLM prompt assembly)
 RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"

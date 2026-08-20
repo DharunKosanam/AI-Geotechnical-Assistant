@@ -35,6 +35,13 @@ kb_audit_collection = db["kb_audit"]
 # (threadId, messageId); messages themselves are never touched.
 highlights_collection = db["highlights"]
 
+# GeoPilot instrument datasets (INSTRUMENT_PARSERS_ENABLED). Pointer documents
+# ONLY (parser id, kind, metadata, shapes, file paths, warnings, job state) --
+# the numeric arrays live on disk as .npz and are never written to Mongo.
+# Separate from files/workspace_runs so the RAG and history data are untouched.
+workspace_datasets_collection = db["workspace_datasets"]  # dataset artifacts
+workspace_parse_jobs_collection = db["workspace_parse_jobs"]  # parse job state
+
 
 async def ensure_indexes():
     """Create required indexes. Idempotent -- safe to call on every startup.
@@ -70,6 +77,16 @@ async def ensure_indexes():
     if _config.HIGHLIGHTS_ENABLED:
         await highlights_collection.create_index(
             [("threadId", 1), ("messageId", 1)], name="threadId_1_messageId_1"
+        )
+
+    # Instrument datasets (INSTRUMENT_PARSERS_ENABLED): per-user newest-first
+    # listing + job lookups. Flag-gated: a flag-off deployment creates nothing.
+    if _config.INSTRUMENT_PARSERS_ENABLED:
+        await workspace_datasets_collection.create_index(
+            [("user_id", 1), ("created_at", -1)], name="user_id_1_created_at_-1"
+        )
+        await workspace_parse_jobs_collection.create_index(
+            [("dataset_id", 1)], name="dataset_id_1"
         )
 
 

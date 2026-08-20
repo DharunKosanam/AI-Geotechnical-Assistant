@@ -7,7 +7,10 @@ against an uploaded document. Each plugin declares:
   * ``trigger_phrases`` — lowercase strings that route a chat message to it
     (explicit intent matching only; NO auto-detection from document contents).
   * ``required_extension`` / ``required_label`` — the document kind it needs
-    from the session pool (e.g. a ``.cpt`` sounding).
+    from the session pool (e.g. a ``.cpt`` sounding); OR
+    ``required_dataset_kind`` — the parsed instrument DATASET kind it needs
+    (e.g. ``"strain_distributed"``), bound to the kind, never to a file
+    extension or parser id.
   * ``optional_params`` — parameters the user MAY supply inline in the message
     (e.g. groundwater level, unit weight); absent -> the calculator falls back
     to its own defaults.
@@ -30,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class ParamSpec:
@@ -44,6 +49,23 @@ class ParamSpec:
     label: str
     unit: str
     aliases: Tuple[str, ...]
+
+
+@dataclass
+class DatasetInput:
+    """A parsed instrument dataset handed to a DATASET-BOUND calculator.
+
+    Produced by the workspace route from a dataset artifact (pointer document
+    + the arrays loaded from its ``.npz``). ``dataset_kind`` is what the
+    calculator declared in ``required_dataset_kind``; ``arrays`` / ``metadata``
+    are exactly what the parser emitted (see ``app.workspace.parsers.base``).
+    """
+
+    id: str
+    filename: str
+    dataset_kind: str
+    metadata: Dict[str, Any]
+    arrays: Dict[str, np.ndarray]
 
 
 @dataclass
@@ -92,6 +114,19 @@ class ComputeResult:
     summary_text: str = ""
     # Opaque object handed to ``interpret`` (e.g. the CptInterpretationResult).
     raw: Any = None
+    # --- Optional, additive (dataset-bound calculators; default empty so the
+    # CPT plugin and the exporter are untouched) ---------------------------
+    # Chart payloads for the result card, ALREADY DOWNSAMPLED server-side to
+    # ~2,000 points per series (never the full arrays): each
+    # ``{"id", "title", "x_label", "y_label", "series": [{"name", "x", "y"}]}``.
+    charts: List[Dict[str, Any]] = field(default_factory=list)
+    # Segments/events detected in the source dataset, attached to the dataset
+    # row as children: ``{"index", "label", "start", "end", ...}``.
+    segments: List[Dict[str, Any]] = field(default_factory=list)
+    # Status notices that MUST be rendered visibly in the deterministic block
+    # (e.g. a method pending engineering validation): ``{"level", "text"}``
+    # with level in {"info", "provisional", "warning"}.
+    notices: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -109,9 +144,17 @@ class Calculator:
     required_label: str
     optional_params: Tuple[ParamSpec, ...]
     # Pure deterministic compute: (document_text, source_filename, params) -> result.
-    compute: Callable[[str, str, Dict[str, Any]], ComputeResult]
+    # For a DATASET-BOUND calculator (``required_dataset_kind`` set) the first
+    # argument is a :class:`DatasetInput` instead of the document text.
+    compute: Callable[[Any, str, Dict[str, Any]], ComputeResult]
     # Optional AI interpretation of the deterministic result (async, LLM-backed).
     interpret: Optional[Callable[[Any], Awaitable[Optional[Dict[str, Any]]]]] = None
+    # Dataset-bound calculators (INSTRUMENT_PARSERS_ENABLED) bind to a parser's
+    # ``dataset_kind`` -- NOT to a file extension or parser id -- so a new
+    # instrument is a parser registration, not a calculator rewrite. When set,
+    # ``required_extension`` / ``required_label`` describe the dataset for the
+    # need-upload reply and the route hands ``compute`` a DatasetInput.
+    required_dataset_kind: Optional[str] = None
 
     def trigger_hint(self) -> str:
         """The canonical trigger phrase to advertise to the user."""

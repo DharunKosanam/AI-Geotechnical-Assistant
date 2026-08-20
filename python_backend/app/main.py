@@ -10,6 +10,7 @@ from app.core.database import close_mongo_connection, ensure_indexes
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import chat, threads, files, auth, health, kb, highlights
 from app.workspace.routes import router as workspace_router
+from app.workspace import dataset_routes as workspace_dataset_routes
 
 # Initialize FastAPI
 app = FastAPI(
@@ -54,6 +55,9 @@ app.include_router(workspace_router)
 # with the flag off the routes are absent (not present-and-404ing), so the
 # route table is identical to before the feature.
 highlights.register(app)
+# GeoPilot instrument datasets. Same contract as highlights: the routes are
+# included ONLY when INSTRUMENT_PARSERS_ENABLED is on; off = absent.
+workspace_dataset_routes.register(app)
 
 
 @app.get("/")

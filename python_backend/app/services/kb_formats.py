@@ -15,9 +15,11 @@ Accepted for the KB: PDF, DOCX, TXT, MD, PPTX, XLSX, CSV. Images are REJECTED
 (the KB is a text corpus; OCR'd images belong on the per-thread path), as is any
 other format — both with a message listing what is accepted.
 
-Spreadsheets are METADATA-INDEXED for findability: sheet names, header rows and
-text labels only, never the full numeric grid — bulk numbers pollute the vector
-space and numeric analysis belongs in GeoPilot.
+Spreadsheets are ROW-INDEXED (v3-xlsx): every non-empty row becomes one line
+with its columns in order, sheet name + header repeated per block, capped at
+XLSX_MAX_ROWS_PER_SHEET rows per sheet. The earlier metadata-only index
+(headers + deduplicated labels) destroyed row associations — "who booked the
+interrogator" was unanswerable even when retrieval found the right chunk.
 """
 from __future__ import annotations
 
@@ -218,104 +220,30 @@ def _extract_pptx(content: bytes, filename: str) -> HandlerResult:
     )
 
 
-# Cap how much of a spreadsheet we scan for labels: findability needs structure,
-# not the whole grid.
-_SHEET_SCAN_ROWS = 1000
-_MAX_LABELS_PER_SHEET = 60
-
-
-def _is_label(value: Any) -> bool:
-    """A text-ish cell worth indexing (a heading/label), not a bare number."""
-    if not isinstance(value, str):
-        return False
-    s = value.strip()
-    if len(s) < 2:
-        return False
-    # Skip cells that are just a formatted number ("12.5", "-3").
-    try:
-        float(s.replace(",", ""))
-        return False
-    except ValueError:
-        return True
-
-
 def _extract_xlsx(content: bytes, filename: str) -> HandlerResult:
-    try:
-        import openpyxl  # type: ignore
-    except ImportError as e:  # pragma: no cover
-        raise RuntimeError("openpyxl is not installed (pip install openpyxl)") from e
+    # Row-structured extraction (v3-xlsx), shared with the live upload path.
+    # Replaces the old Headers:/Labels: metadata index, which flattened every
+    # sheet into one deduplicated cell list and made row associations ("who
+    # booked what, when") unrecoverable at retrieval time.
+    from app.services.file_processing import extract_xlsx_sheets
 
-    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
-    pages: List[Page] = []
-    headers_by_sheet: Dict[str, List[str]] = {}
-    sheet_names: List[str] = []
-    try:
-        for idx, sheet_name in enumerate(wb.sheetnames, 1):
-            ws = wb[sheet_name]
-            header: List[str] = []
-            labels: List[str] = []
-            seen: set = set()
-            for ri, row in enumerate(ws.iter_rows(values_only=True), 1):
-                if ri > _SHEET_SCAN_ROWS:
-                    break
-                if row is None:
-                    continue
-                if not header:
-                    cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
-                    if cells:
-                        header = cells
-                        continue
-                for c in row:
-                    if _is_label(c) and c.strip() not in seen and len(labels) < _MAX_LABELS_PER_SHEET:
-                        seen.add(c.strip())
-                        labels.append(c.strip())
-            lines = [f"## Sheet: {sheet_name}"]
-            if header:
-                lines.append("Headers: " + " | ".join(header))
-                headers_by_sheet[sheet_name] = header
-            if labels:
-                lines.append("Labels: " + " | ".join(labels))
-            # Keep a sheet only if it carried a header or labels beyond its name.
-            if len(lines) > 1:
-                sheet_names.append(sheet_name)
-                pages.append((idx, "\n".join(lines).strip(), False))
-    finally:
-        wb.close()
-
+    pages, meta = extract_xlsx_sheets(content, filename)
     return HandlerResult(
         pages=pages,
         source_format="xlsx",
-        format_metadata={"sheets": sheet_names, "headers": headers_by_sheet},
+        format_metadata=meta,
     )
 
 
 def _extract_csv(content: bytes, filename: str) -> HandlerResult:
-    try:
-        import pandas as pd  # type: ignore
-    except ImportError as e:  # pragma: no cover
-        raise RuntimeError("pandas is not installed (pip install pandas)") from e
+    # Same row-structured path as .xlsx (see _extract_xlsx).
+    from app.services.file_processing import extract_csv_rows
 
-    # Sample rows for labels; column names come from the header regardless.
-    df = pd.read_csv(io.BytesIO(content), nrows=_SHEET_SCAN_ROWS, dtype=str, keep_default_na=False)
-    columns = [str(c).strip() for c in df.columns]
-    labels: List[str] = []
-    seen = set()
-    for col in df.columns:
-        for v in df[col].tolist():
-            if _is_label(v) and v.strip() not in seen and len(labels) < _MAX_LABELS_PER_SHEET:
-                seen.add(v.strip())
-                labels.append(v.strip())
-    lines = [f"## CSV: {os.path.basename(filename)}"]
-    if columns:
-        lines.append("Columns: " + " | ".join(columns))
-    if labels:
-        lines.append("Labels: " + " | ".join(labels))
-    text = "\n".join(lines).strip()
-    pages: List[Page] = [(1, text, False)] if len(lines) > 1 else []
+    pages, meta = extract_csv_rows(content, filename)
     return HandlerResult(
         pages=pages,
         source_format="csv",
-        format_metadata={"columns": columns, "sampled_rows": int(len(df))},
+        format_metadata=meta,
     )
 
 

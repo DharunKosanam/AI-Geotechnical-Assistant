@@ -379,6 +379,14 @@ CHUNK_TARGET_SIZE = int(os.getenv("CHUNK_TARGET_SIZE", "1200"))
 CHUNK_MAX_SIZE = int(os.getenv("CHUNK_MAX_SIZE", "1500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 
+# Row-structured spreadsheet extraction (v3-xlsx). Chunks from XLSX/XLS/CSV get
+# this version tag so they are distinguishable from chunks the old flattened
+# extractor produced; existing chunks are never modified.
+XLSX_CHUNKING_VERSION = os.getenv("XLSX_CHUNKING_VERSION", "v3-xlsx")
+# Per-sheet row cap. When hit, the sheet text ends with an explicit truncation
+# note — data is never dropped silently.
+XLSX_MAX_ROWS_PER_SHEET = int(os.getenv("XLSX_MAX_ROWS_PER_SHEET", "5000"))
+
 # Cross-encoder reranking (after vector search, before LLM prompt assembly)
 RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")

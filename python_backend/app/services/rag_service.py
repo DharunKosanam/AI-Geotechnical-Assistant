@@ -37,6 +37,7 @@ from app.core import config  # module import for call-time flags (INGEST_OFFLOAD
 from app.core.config import (
     USER_ID,
     CHUNKING_VERSION,
+    XLSX_CHUNKING_VERSION,
     CHUNK_TARGET_SIZE,
     CHUNK_MAX_SIZE,
     CHUNK_OVERLAP,
@@ -1865,6 +1866,14 @@ def _ingest_image_via_vision(
     return [doc], 1, len(text), warning
 
 
+def _chunking_version_for(file_type: str) -> str:
+    """Spreadsheet chunks (row-structured extraction) are tagged v3-xlsx so
+    they are distinguishable from chunks the old flattened extractor produced;
+    everything else keeps the global CHUNKING_VERSION. Retrieval never filters
+    on this field — it is provenance only."""
+    return XLSX_CHUNKING_VERSION if file_type in (".xlsx", ".xls", ".csv") else CHUNKING_VERSION
+
+
 def _ingest_compute(
     filename: str,
     file_content: bytes,
@@ -2001,6 +2010,7 @@ def _ingest_compute(
 
     # 4. Build documents — propagate fileType + per-page OCR flag
     print("  4. Creating document objects...")
+    chunking_version = _chunking_version_for(file_type)
     documents: List[Dict[str, Any]] = []
     for c, embedding in zip(chunk_records, embeddings):
         page_start = c["page_start"]
@@ -2015,7 +2025,7 @@ def _ingest_compute(
             "category": category,
             "chunkIndex": c["chunk_index"],
             "totalChunks": len(chunk_records),
-            "chunkingVersion": CHUNKING_VERSION,
+            "chunkingVersion": chunking_version,
             "pageStart": page_start,
             "sectionHeader": c["section_header"],
             "metadata": {
@@ -2024,7 +2034,7 @@ def _ingest_compute(
                 "totalChunks": len(chunk_records),
                 "originalFilename": filename,
                 "category": category,
-                "chunkingVersion": CHUNKING_VERSION,
+                "chunkingVersion": chunking_version,
                 "pageStart": page_start,
                 "sectionHeader": c["section_header"],
                 "fileType": file_type,
@@ -2206,7 +2216,7 @@ async def ingest_document(
         "chunks_created": chunks_created,
         "total_characters": total_chars,
         "documents_inserted": inserted_count,
-        "chunking_version": CHUNKING_VERSION,
+        "chunking_version": _chunking_version_for(file_type),
         "status": "success",
         # None unless part of the document could not be read (see _ingest_compute).
         "warning": warning,

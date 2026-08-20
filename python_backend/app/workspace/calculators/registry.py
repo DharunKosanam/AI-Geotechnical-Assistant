@@ -15,22 +15,35 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core import config
 from app.workspace.calculators.base import Calculator, ParamSpec
 from app.workspace.calculators.cpt import CPT_CALCULATOR
+from app.workspace.calculators.dfos_pass_strain import DFOS_CALCULATOR
+from app.workspace.calculators.traffic_load_monitoring import TRAFFIC_CALCULATOR
 
-# Installed calculators. The CPT interpretation is the first (and, for now,
-# only) registered test. Add new plugins to this tuple to expose them.
-CALCULATORS: Tuple[Calculator, ...] = (CPT_CALCULATOR,)
+# Installed calculators, in matching order. The CPT interpretation is the
+# original document-bound test; the instrument calculators are DATASET-bound
+# (``required_dataset_kind`` set) and are only INSTALLED while
+# INSTRUMENT_PARSERS_ENABLED is on (read at call time): with the flag off the
+# installed tuple, the "I can run" text and the LLM router catalog are exactly
+# the pre-feature ones.
+CALCULATORS: Tuple[Calculator, ...] = (CPT_CALCULATOR, DFOS_CALCULATOR, TRAFFIC_CALCULATOR)
+
+
+def _installed() -> Tuple[Calculator, ...]:
+    if config.INSTRUMENT_PARSERS_ENABLED:
+        return CALCULATORS
+    return tuple(c for c in CALCULATORS if c.required_dataset_kind is None)
 
 
 def all_calculators() -> Tuple[Calculator, ...]:
     """Every installed calculator, in registration order."""
-    return CALCULATORS
+    return _installed()
 
 
 def get_calculator(calc_id: str) -> Optional[Calculator]:
     """Look up a calculator by its stable id, or None."""
-    for calc in CALCULATORS:
+    for calc in _installed():
         if calc.id == calc_id:
             return calc
     return None
@@ -44,7 +57,7 @@ def match_calculator(message: str) -> Optional[Calculator]:
     nothing matches (the caller then lists available tests).
     """
     low = message.lower()
-    for calc in CALCULATORS:
+    for calc in _installed():
         if any(phrase in low for phrase in calc.trigger_phrases):
             return calc
     return None
@@ -90,9 +103,10 @@ def available_tests_text() -> str:
     Used to reply when a message matches no trigger, e.g.:
     "I can run: CPT interpretation - say 'run CPT'."
     """
-    if not CALCULATORS:
+    installed = _installed()
+    if not installed:
         return "No calculators are currently available."
     parts: List[str] = []
-    for calc in CALCULATORS:
+    for calc in installed:
         parts.append(f"{calc.name} - say '{calc.trigger_hint()}'")
     return "I can run: " + "; ".join(parts) + "."

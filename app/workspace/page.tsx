@@ -8,6 +8,7 @@ import {
   Sparkles,
   Plus,
   AlertTriangle,
+  Database,
   Download,
   FlaskConical,
   History,
@@ -20,6 +21,15 @@ import { AuthProvider } from "../lib/auth-context";
 import AuthGuard from "../components/auth-guard";
 import styles from "./workspace.module.css";
 import { toast } from "../components/toaster";
+import { DatasetRow } from "./components/dataset-rows";
+import { DatasetMessage } from "./components/dataset-cards";
+import { LineChart, type ChartPayload } from "./components/strain-chart";
+import {
+  ACTIVE_STATES,
+  type DatasetRecord,
+  type ParseJob,
+  type Segment,
+} from "./instruments";
 
 // Documents the calculators can draw from are .CPT soundings today. The set can
 // widen as more calculators are registered.
@@ -66,6 +76,14 @@ type ResultPayload = {
   result_id?: string;
   run_id?: string | null;
   exportable: boolean;
+  // Dataset-bound calculators (INSTRUMENT_PARSERS_ENABLED) -- all optional so
+  // CPT results and re-opened history runs are unaffected.
+  summary?: Record<string, unknown>;
+  charts?: ChartPayload[];
+  notices?: { level: string; text: string }[];
+  dataset_id?: string;
+  dataset_kind?: string;
+  segments?: Segment[];
 };
 
 // History (durable, per-user).
@@ -80,6 +98,8 @@ type RunSummary = {
     gwl?: number;
     area_ratio?: number;
     reference?: string;
+    headline?: string;
+    dataset_kind?: string;
   };
 };
 
@@ -104,7 +124,11 @@ type ChatMessage =
   | { id: string; role: "user"; text: string }
   | { id: string; role: "assistant"; kind: "text"; text: string }
   | { id: string; role: "assistant"; kind: "answer"; text: string; isDraft: boolean }
-  | { id: string; role: "assistant"; kind: "result"; data: ResultPayload };
+  | { id: string; role: "assistant"; kind: "result"; data: ResultPayload }
+  // Instrument dataset upload (INSTRUMENT_PARSERS_ENABLED): ONE message per
+  // dataset, rendered from the live dataset record so it updates in place
+  // (progress -> summary card / error) instead of appending per poll.
+  | { id: string; role: "assistant"; kind: "dataset"; datasetId: string };
 
 const uid = (): string =>
   typeof crypto !== "undefined" && crypto.randomUUID
@@ -142,6 +166,14 @@ function fromStored(m: StoredMessage): ChatMessage {
 function GeoPilot() {
   const [docs, setDocs] = useState<SessionDoc[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  // Instrument datasets (INSTRUMENT_PARSERS_ENABLED). The backend is the single
+  // source of truth: /api/workspace/status carries `instrument_parsers: true`
+  // ONLY when the flag is on; absent = off, and this page renders exactly as
+  // before (flat document list, .cpt-only picker, no Datasets group).
+  const [instrumentEnabled, setInstrumentEnabled] = useState(false);
+  const [instrumentExtensions, setInstrumentExtensions] = useState<string[]>([]);
+  const [datasets, setDatasets] = useState<DatasetRecord[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
 
@@ -179,6 +211,121 @@ function GeoPilot() {
     loadHistory();
   }, []);
 
+  // --- Instrument datasets --------------------------------------------------
+  const loadDatasets = async () => {
+    try {
+      const res = await fetch("/api/workspace/datasets", { credentials: "include" });
+      if (res.ok) setDatasets(((await res.json()).datasets ?? []) as DatasetRecord[]);
+    } catch {
+      /* best-effort; the list stays as-is */
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/workspace/status", { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((d: any) => {
+        if (!active) return;
+        const on = d?.instrument_parsers === true;
+        setInstrumentEnabled(on);
+        setInstrumentExtensions(
+          on && Array.isArray(d?.instrument_extensions) ? d.instrument_extensions : [],
+        );
+        if (on) loadDatasets();
+      })
+      .catch(() => {
+        if (active) setInstrumentEnabled(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Poll the parse job of every queued/parsing dataset once a second; when a
+  // job reaches a terminal state, refetch that dataset (full metadata) so the
+  // row and its thread message update in place.
+  const activeIds = datasets
+    .filter((d) => ACTIVE_STATES.includes(d.status))
+    .map((d) => d.id)
+    .join(",");
+  useEffect(() => {
+    if (!instrumentEnabled || !activeIds) return;
+    let cancelled = false;
+    const tick = async () => {
+      const current = datasets.filter((d) => ACTIVE_STATES.includes(d.status));
+      await Promise.all(
+        current.map(async (d) => {
+          if (!d.job_id) return;
+          try {
+            const res = await fetch(`/api/workspace/datasets/jobs/${d.job_id}`, {
+              credentials: "include",
+            });
+            if (!res.ok || cancelled) return;
+            const job = (await res.json()) as ParseJob;
+            if (ACTIVE_STATES.includes(job.state)) {
+              setDatasets((prev) =>
+                prev.map((x) =>
+                  x.id === d.id ? { ...x, status: job.state, progress: job.progress } : x,
+                ),
+              );
+              return;
+            }
+            const full = await fetch(`/api/workspace/datasets/${d.id}`, {
+              credentials: "include",
+            });
+            if (cancelled) return;
+            if (full.ok) {
+              const rec = (await full.json()) as DatasetRecord;
+              setDatasets((prev) => prev.map((x) => (x.id === d.id ? rec : x)));
+            } else {
+              setDatasets((prev) =>
+                prev.map((x) =>
+                  x.id === d.id
+                    ? { ...x, status: job.state, progress: job.progress, error: job.error }
+                    : x,
+                ),
+              );
+            }
+          } catch {
+            /* transient; next tick retries */
+          }
+        }),
+      );
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instrumentEnabled, activeIds]);
+
+  const removeDataset = (ds: DatasetRecord) => {
+    setDatasets((prev) => prev.filter((d) => d.id !== ds.id));
+    setMessages((prev) =>
+      prev.filter((m) => !(m.role === "assistant" && m.kind === "dataset" && m.datasetId === ds.id)),
+    );
+    fetch(`/api/workspace/datasets/${ds.id}`, { method: "DELETE", credentials: "include" }).catch(
+      () => {},
+    );
+  };
+
+  const retryDataset = async (ds: DatasetRecord) => {
+    try {
+      const res = await fetch(`/api/workspace/datasets/${ds.id}/retry`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `Retry failed (HTTP ${res.status}).`);
+      setDatasets((prev) => prev.map((d) => (d.id === ds.id ? (data as DatasetRecord) : d)));
+    } catch (e: any) {
+      toast(e?.message ?? "Retry failed.");
+    }
+  };
+
   // Re-open a past run as a fresh result card (its Export button re-fetches by id).
   const openRun = async (runId: string) => {
     try {
@@ -195,13 +342,21 @@ function GeoPilot() {
         source_file: ro.source_file ?? run.source_filename,
         reference: ro.reference ?? "",
         params: {},
-        summary_text: `Re-opened run — ${(ro.layers?.length ?? 0)} layer(s).`,
+        summary_text: ro.dataset_id
+          ? `Re-opened run — ${run.summary?.headline ?? ro.calculator_name ?? "dataset result"}`
+          : `Re-opened run — ${(ro.layers?.length ?? 0)} layer(s).`,
         layers: ro.layers ?? [],
         metadata: ro.metadata ?? {},
         interpretation: null,
         run_id: run.id,
         // Export only when the persisted run actually declares a table.
         exportable: (ro.tables?.length ?? 0) > 0,
+        // Dataset-bound runs persist their deterministic block + charts.
+        summary: ro.summary,
+        charts: ro.charts,
+        notices: ro.notices,
+        dataset_id: ro.dataset_id,
+        dataset_kind: ro.dataset_kind,
       };
       setMessages((prev) => [
         ...prev,
@@ -255,17 +410,52 @@ function GeoPilot() {
     const form = new FormData();
     form.append("file", file);
     try {
-      const res = await fetch("/api/workspace/documents", {
-        method: "POST",
-        body: form,
-        credentials: "include",
-      });
+      // With the instrument capability on, uploads go through the streaming
+      // Route Handler (instrument files are 22-58 MB; the rewrite caps bodies at
+      // 10 MB). It forwards to the SAME backend handler. Flag off: unchanged.
+      const res = await fetch(
+        instrumentEnabled ? "/api/workspace/upload" : "/api/workspace/documents",
+        {
+          method: "POST",
+          body: form,
+          credentials: "include",
+        },
+      );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(
           (data && (data.detail as string)) ||
             `Upload failed (HTTP ${res.status}).`,
         );
+      }
+      if (instrumentEnabled && data && data.kind === "dataset") {
+        // The backend sniffed an instrument file: it is a DATASET (numeric,
+        // computed on), not a document. Move it out of the document list into
+        // the Datasets group and start its one in-place thread message.
+        const rec: DatasetRecord = {
+          id: data.dataset_id || data.id,
+          kind: "dataset",
+          filename: data.filename,
+          size_bytes: data.size_bytes,
+          parser_id: data.parser_id,
+          dataset_kind: data.dataset_kind,
+          label: data.label,
+          badge: data.badge || data.label,
+          status: data.status || "queued",
+          progress: data.progress || 0,
+          error: null,
+          job_id: data.job_id,
+          metadata: {},
+          warnings: [],
+          segments: [],
+        };
+        setDocs((prev) => prev.filter((d) => d.id !== tempId));
+        setDatasets((prev) => [rec, ...prev.filter((d) => d.id !== rec.id)]);
+        setMessages((prev) => [
+          ...prev,
+          { id: uid(), role: "assistant", kind: "dataset", datasetId: rec.id },
+        ]);
+        return;
       }
       // Swap the temp row for the server record (real id, ready status).
       setDocs((prev) =>
@@ -350,6 +540,15 @@ function GeoPilot() {
           ...prev,
           { id: uid(), role: "assistant", kind: "result", data },
         ]);
+        // A dataset-bound run may have detected segments/events: they become
+        // children of that dataset's row in the panel.
+        if (data.dataset_id && Array.isArray(data.segments)) {
+          setDatasets((prev) =>
+            prev.map((d) =>
+              d.id === data.dataset_id ? { ...d, segments: data.segments } : d,
+            ),
+          );
+        }
       } else if (data.type === "answer") {
         setMessages((prev) => [
           ...prev,
@@ -449,6 +648,12 @@ function GeoPilot() {
           {leftTab === "documents" ? (
             <>
               <div className={styles.docList}>
+                {instrumentEnabled && (
+                  <div className={styles.panelGroup}>
+                    <FileText size={12} strokeWidth={1.5} /> Documents
+                    <span className={styles.panelGroupCount}>{docs.length || ""}</span>
+                  </div>
+                )}
                 {docs.length === 0 ? (
                   <p className={styles.docEmpty}>
                     No documents yet. Upload a .CPT sounding to get started.
@@ -482,6 +687,29 @@ function GeoPilot() {
                     </div>
                   ))
                 )}
+                {instrumentEnabled && (
+                  <>
+                    <div className={styles.panelGroup}>
+                      <Database size={12} strokeWidth={1.5} /> Datasets
+                      <span className={styles.panelGroupCount}>{datasets.length || ""}</span>
+                    </div>
+                    {datasets.length === 0 ? (
+                      <p className={styles.docEmpty}>
+                        No datasets yet. Upload an instrument file (ODiSI .tsv, Campbell
+                        .dat) — it is parsed into a numeric dataset, not embedded.
+                      </p>
+                    ) : (
+                      datasets.map((ds) => (
+                        <DatasetRow
+                          key={ds.id}
+                          ds={ds}
+                          onRemove={removeDataset}
+                          onRetry={retryDataset}
+                        />
+                      ))
+                    )}
+                  </>
+                )}
               </div>
             </>
           ) : (
@@ -507,7 +735,10 @@ function GeoPilot() {
                       <span className={styles.historyText}>
                         <span className={styles.historyName}>{r.source_filename}</span>
                         <span className={styles.historyMeta}>
-                          {fmtDate(r.created_at)} · {r.summary?.layer_count ?? 0} layers
+                          {fmtDate(r.created_at)} ·{" "}
+                          {r.summary?.headline
+                            ? r.summary.headline
+                            : `${r.summary?.layer_count ?? 0} layers`}
                         </span>
                       </span>
                     </button>
@@ -549,6 +780,13 @@ function GeoPilot() {
                   <code>run CPT</code> to interpret it. Add parameters inline,
                   e.g. <code>run CPT, groundwater 2m, unit weight 18</code>.
                 </p>
+                {instrumentEnabled && (
+                  <p>
+                    Instrument files (ODiSI strain <code>.tsv</code>, Campbell
+                    pressure <code>.dat</code>) are parsed into datasets; a
+                    calculator only runs when you ask for it.
+                  </p>
+                )}
               </div>
             ) : (
               messages.map((m) => {
@@ -576,6 +814,15 @@ function GeoPilot() {
                     </div>
                   );
                 }
+                if (m.kind === "dataset") {
+                  const ds = datasets.find((d) => d.id === m.datasetId);
+                  if (!ds) return null;
+                  return (
+                    <div key={m.id} className={styles.messageRow}>
+                      <DatasetMessage ds={ds} />
+                    </div>
+                  );
+                }
                 return (
                   <div key={m.id} className={styles.messageRow}>
                     <div className={styles.assistantMessage}>{m.text}</div>
@@ -590,7 +837,11 @@ function GeoPilot() {
               type="file"
               ref={fileInputRef}
               className={styles.hiddenInput}
-              accept={FILE_ACCEPT}
+              accept={
+                instrumentEnabled && instrumentExtensions.length > 0
+                  ? [FILE_ACCEPT, ...instrumentExtensions].join(",")
+                  : FILE_ACCEPT
+              }
               multiple
               onChange={handleFiles}
             />
@@ -648,6 +899,23 @@ function AnswerMessage({ text, isDraft }: { text: string; isDraft: boolean }) {
   );
 }
 
+// Deterministic-block rows for a dataset-bound result: the calculator's
+// exportable ``summary`` (the same key/values that go to the Excel Summary
+// sheet), minus the reference which is rendered on its own line.
+function detRows(summary: Record<string, unknown> | undefined): [string, string][] {
+  if (!summary) return [];
+  const rows: [string, string][] = [];
+  for (const [label, value] of Object.entries(summary)) {
+    if (label === "Method / Standard reference") continue;
+    let text: string;
+    if (value == null) text = "—";
+    else if (typeof value === "number") text = Number.isInteger(value) ? value.toLocaleString() : value.toFixed(3);
+    else text = String(value);
+    rows.push([label, text]);
+  }
+  return rows;
+}
+
 function ResultCard({
   data,
   onExport,
@@ -656,6 +924,11 @@ function ResultCard({
   onExport: (runId: string, sourceFile: string) => void;
 }) {
   const interp = data.interpretation;
+  const isDataset = Boolean(data.dataset_id) || (data.layers.length === 0 && Boolean(data.summary));
+  // Dataset results: the AI draft is collapsed behind an explicit review
+  // affordance. CPT results keep today's expanded section.
+  const [showDraft, setShowDraft] = useState(false);
+  const notices = data.notices ?? [];
   return (
     <div className={styles.resultCard}>
       <div className={styles.resultLead}>
@@ -666,6 +939,48 @@ function ResultCard({
         <p className={styles.resultSummary}>{data.summary_text}</p>
       )}
 
+      {isDataset && (
+        <>
+          {/* Status notices render INSIDE the deterministic block, visibly --
+              e.g. a threshold method pending engineering validation. */}
+          {notices.map((n, i) => (
+            <div
+              key={i}
+              className={`${styles.notice} ${
+                n.level === "provisional"
+                  ? styles.noticeProvisional
+                  : n.level === "warning"
+                    ? styles.noticeWarning
+                    : styles.noticeInfo
+              }`}
+              role={n.level === "info" ? undefined : "note"}
+            >
+              <AlertTriangle size={14} />
+              {n.level === "provisional" && <span className={styles.noticeTag}>Provisional</span>}
+              <span>{n.text}</span>
+            </div>
+          ))}
+          <div className={styles.detBlock}>
+            {detRows(data.summary).map(([label, value]) => (
+              <div key={label} className={styles.detRow}>
+                <span className={styles.detLabel}>{label}</span>
+                <span className={styles.detValue} title={value}>
+                  {value}
+                </span>
+              </div>
+            ))}
+          </div>
+          {(data.charts ?? []).length > 0 && (
+            <div className={styles.charts}>
+              {(data.charts ?? []).map((c) => (
+                <LineChart key={c.id} chart={c} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {!isDataset && (
       <div className={styles.tableWrap}>
         <table className={styles.table}>
           <thead>
@@ -697,12 +1012,25 @@ function ResultCard({
           </tbody>
         </table>
       </div>
+      )}
 
       <div className={styles.reference}>Reference: {data.reference}</div>
 
+      {/* Dataset results: AI draft collapsed behind an explicit affordance. */}
+      {isDataset && interp && !showDraft && (
+        <button
+          type="button"
+          className={styles.aiToggle}
+          onClick={() => setShowDraft(true)}
+          aria-expanded={false}
+        >
+          <Sparkles size={14} /> Show AI draft interpretation — for engineer review
+        </button>
+      )}
+
       {/* AI interpretation — a separate, clearly-labelled section. Omitted for
           re-opened runs (deterministic result only, no stored AI text). */}
-      {interp && (
+      {interp && (!isDataset || showDraft) && (
         <div className={styles.aiSection}>
           <div className={styles.aiHeader}>
             <h4 className={styles.sectionTitle}>

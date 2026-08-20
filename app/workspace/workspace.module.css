@@ -653,6 +653,549 @@
   }
 }
 
+/* ===================== Datasets (INSTRUMENT_PARSERS_ENABLED) ============= */
+/* Panel groups: "Documents" (embedded/searchable) vs "Datasets" (numeric,
+   computed on). Reuses the History group-label treatment. Only rendered when
+   the backend advertises the instrument capability. */
+.panelGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
+}
+
+.panelGroup:first-child {
+  padding-top: 2px;
+}
+
+.panelGroupCount {
+  margin-left: auto;
+  color: var(--t3);
+}
+
+.dsItem {
+  display: flex;
+  flex-direction: column;
+}
+
+.dsItem .docRow {
+  height: auto;
+  min-height: 30px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  padding-left: 2px;
+  align-items: center;
+}
+
+.dsExpand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--t3);
+  cursor: pointer;
+}
+
+.dsExpand:disabled {
+  cursor: default;
+}
+
+.dsExpand:hover:not(:disabled) {
+  color: var(--t1);
+}
+
+.dsExpandSpacer {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+}
+
+.dsText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dsBadge {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--t3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsBadgeInline {
+  padding: 1px 7px;
+  border-radius: var(--r1);
+  background-color: var(--s3);
+  color: var(--t2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.dsProgressLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dsProgressTrack {
+  flex: 1;
+  min-width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background-color: var(--s3);
+  overflow: hidden;
+}
+
+.dsProgressFill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background-color: var(--accent);
+  transition: width 240ms var(--ease);
+}
+
+.dsProgressPct {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--t2);
+  white-space: nowrap;
+}
+
+.dsError {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--danger-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.dsRetry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 2px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--warn-2);
+  cursor: pointer;
+  transition: color 120ms var(--ease), background-color 120ms var(--ease);
+}
+
+.dsRetry:hover {
+  background-color: var(--s3);
+  color: var(--t1);
+}
+
+/* Segment children under an expanded dataset row. */
+.dsSegments {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0 0 0 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.dsSegment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--r1);
+  color: var(--t2);
+  font-size: 12px;
+}
+
+.dsSegment:hover {
+  background-color: var(--s2);
+  color: var(--t1);
+}
+
+.dsSegmentLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsSegmentMeta {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--t3);
+}
+
+/* Thread: parse progress line (one message, updated in place). */
+.parseProgress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 80%;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--r3);
+  background-color: var(--s2);
+  color: var(--t2);
+}
+
+.parseProgress svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.parseProgressText {
+  flex-shrink: 0;
+  color: var(--t1);
+  font-size: 13px;
+}
+
+.parseFailed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: var(--r3);
+  background-color: var(--danger-a);
+  color: var(--danger-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Thread: parse-summary card. Same surface language as the result card. */
+.parseCard {
+  max-width: 92%;
+  width: 100%;
+  background-color: var(--s2);
+  border-radius: var(--r3);
+  box-shadow: var(--hi), var(--e1);
+  padding: 16px;
+}
+
+.parseKind {
+  margin: 6px 0 12px;
+  font-size: 12.5px;
+  color: var(--t2);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--r2);
+  background-color: var(--s3);
+  box-shadow: var(--hi);
+  min-width: 0;
+}
+
+.tileLabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tileValue {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  color: var(--t1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parseWarnings {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: var(--r2);
+  background-color: var(--warn-a);
+}
+
+.parseWarnings ul {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.parseWarnings li {
+  font-size: 12.5px;
+  color: var(--warn-2);
+  line-height: 1.5;
+}
+
+.parseNoCalc {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--t2);
+}
+
+.parseNoCalc code {
+  padding: 1px 6px;
+  border-radius: var(--r1);
+  background-color: var(--s3);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--t1);
+}
+
+/* ============ Dataset result card: deterministic block + charts ============ */
+.detBlock {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px 14px;
+}
+
+.detRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.detLabel {
+  font-size: 12px;
+  color: var(--t2);
+  min-width: 0;
+}
+
+.detValue {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--t1);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--r2);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.notice svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.noticeInfo {
+  background-color: var(--s3);
+  color: var(--t2);
+}
+
+.noticeProvisional {
+  background-color: var(--warn-a);
+  color: var(--warn-2);
+  border: 1px solid var(--warn);
+}
+
+.noticeWarning {
+  background-color: var(--danger-a);
+  color: var(--danger-2);
+}
+
+.noticeTag {
+  padding: 2px 7px;
+  border-radius: var(--r1);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background-color: var(--warn);
+  color: var(--bg);
+  flex-shrink: 0;
+}
+
+.charts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.chart {
+  margin: 0;
+  padding: 10px 12px 8px;
+  border-radius: var(--r2);
+  background-color: var(--s1);
+}
+
+.chartTitle {
+  font-family: var(--font-cond);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--t1);
+  margin-bottom: 4px;
+}
+
+.chartSvg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.chartGrid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.chartAxis {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.chartZero {
+  stroke: var(--t3);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.chartTick {
+  fill: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.chartLabel {
+  fill: var(--t2);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.chartBand {
+  fill: var(--warn-a);
+  stroke: var(--warn);
+  stroke-width: 0.5;
+  stroke-dasharray: 2 2;
+}
+
+.chartBandLabel {
+  fill: var(--warn-2);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.chartMarker {
+  fill: var(--warn);
+  stroke: var(--bg);
+  stroke-width: 1;
+}
+
+.chartMarkerLabel {
+  fill: var(--warn-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.chartLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--t2);
+}
+
+.chartLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chartSwatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.chartEmpty {
+  padding: 10px 12px;
+  border-radius: var(--r2);
+  background-color: var(--s1);
+  color: var(--t3);
+  font-size: 12.5px;
+}
+
+/* AI draft: collapsed behind an explicit review affordance. */
+.aiToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  margin-top: 14px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  background-color: transparent;
+  color: var(--t1);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.aiToggle:hover {
+  background-color: var(--s3);
+}
+
+.aiToggle svg {
+  color: var(--accent);
+}
+
 /* Narrow screens: stack the panels so neither is squeezed unusable. Kept at
    the END of the file so it wins the cascade over the base .docPanel width. */
 @media (max-width: 720px) {

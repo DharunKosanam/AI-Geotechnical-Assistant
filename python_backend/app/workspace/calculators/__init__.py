@@ -4,7 +4,7 @@ Exposes the low-level CPT math (unchanged) plus the pluggable calculator
 registry that routes chat messages to a deterministic test.
 """
 
-from app.workspace.calculators.base import Calculator, ComputeResult, ParamSpec
+from app.workspace.calculators.base import Calculator, ComputeResult, DatasetInput, ParamSpec
 from app.workspace.calculators.cpt_interpretation import (
     CptInterpretationResult,
     DepthResult,
@@ -24,6 +24,7 @@ __all__ = [
     "interpret_cpt",
     "Calculator",
     "ComputeResult",
+    "DatasetInput",
     "ParamSpec",
     "all_calculators",
     "available_tests_text",

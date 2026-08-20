@@ -33,16 +33,20 @@ _MAX_WIDTH = 42
 _SHEET_FORBIDDEN = re.compile(r"[:\\/?*\[\]]")
 
 
-def export_filename(source_file: str, now: "datetime | None" = None) -> str:
+def export_filename(
+    source_file: str, now: "datetime | None" = None, prefix: str = "CPT"
+) -> str:
     """Download filename like ``CPT_<sourcefilename>_<YYYYMMDD>.xlsx``.
 
     The source stem is sanitised to a safe ASCII token so the header value is
-    always a valid, predictable filename.
+    always a valid, predictable filename. ``prefix`` defaults to ``CPT`` (the
+    original behaviour); dataset-bound calculators pass their own (e.g. DFOS).
     """
     now = now or datetime.now()
     stem = re.sub(r"\.[^.]*$", "", source_file or "sounding")  # drop extension
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_") or "sounding"
-    return f"CPT_{stem}_{now.strftime('%Y%m%d')}.xlsx"
+    prefix = re.sub(r"[^A-Za-z0-9]+", "", prefix or "") or "CPT"
+    return f"{prefix}_{stem}_{now.strftime('%Y%m%d')}.xlsx"
 
 
 def _safe_sheet_name(name: str, used: set) -> str:
@@ -79,13 +83,18 @@ def _write_table_sheet(ws, table: Dict[str, Any]) -> None:
     ws.freeze_panes = "A2"  # keep the header row visible while scrolling
 
     widths = [len(h) for h in headers]
+    # Track the row number locally: ``ws.max_row`` scans every cell on each
+    # call, which made this loop quadratic (a 7,800-row instrument table took
+    # 30 s). Same cells, same formats -- pinned by the golden-file parity test.
+    row_no = 1
     for row in table.get("rows", []) or []:
         ws.append(list(row))
+        row_no += 1
         for col_idx, col in enumerate(columns, start=1):
             value = row[col_idx - 1] if col_idx - 1 < len(row) else None
             fmt = col.get("format")
             if fmt and _is_number(value):
-                ws.cell(row=ws.max_row, column=col_idx).number_format = fmt
+                ws.cell(row=row_no, column=col_idx).number_format = fmt
             widths[col_idx - 1] = max(widths[col_idx - 1], len(str(value)))
     _autosize(ws, widths)
 

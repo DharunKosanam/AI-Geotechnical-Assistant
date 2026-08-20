@@ -43,3 +43,8 @@ __pycache__/
 venv/
 python_backend/venv/
 *.so
+
+# Instrument fixtures (ODiSI TSV / Campbell .dat, 22-58 MB each) + synthetic stand-ins
+python_backend/tests/fixtures/
+# Parsed instrument dataset artifacts (.npz + raw uploads), see INSTRUMENT_DATA_DIR
+python_backend/data/instrument_datasets/

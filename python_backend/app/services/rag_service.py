@@ -20,6 +20,7 @@ RETRIEVAL:
     user-first ordering.
 """
 import hashlib
+import logging
 import re
 import asyncio
 import threading
@@ -841,11 +842,21 @@ def _rrf_merge(
     return merged[:limit]
 
 
+logger = logging.getLogger(__name__)
+
+# chunkingVersion values whose text is row-structured table markup rather than
+# prose. The prose-trained cross-encoder scores these deeply negative even when
+# they answer the question exactly, so the KB path may grant them a separate,
+# more permissive threshold (KB_RERANK_SCORE_THRESHOLD_STRUCTURED).
+STRUCTURED_CHUNKING_VERSIONS = frozenset({"v3-xlsx"})
+
+
 def _apply_rerank_threshold(
     ranked: List[Dict[str, Any]],
     threshold: float = RERANK_SCORE_THRESHOLD,
     top_k: int = RERANK_TOP_K,
     low_conf_context: int = LOW_CONF_CONTEXT_CHUNKS,
+    structured_threshold: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Drop reranked chunks the cross-encoder scored as irrelevant.
@@ -855,6 +866,12 @@ def _apply_rerank_threshold(
     ms-marco-MiniLM scores go negative for "not relevant", so sub-threshold
     chunks are retrieval noise that must not be shown to the user as sources.
 
+    ``structured_threshold`` (KB path only — thread callers leave it None):
+    when set, chunks whose ``chunkingVersion`` is in
+    STRUCTURED_CHUNKING_VERSIONS are judged against IT instead of ``threshold``.
+    With it equal to ``threshold`` (the config default) the outcome is
+    byte-identical to before the parameter existed.
+
     Returns ``(chunks, no_high_confidence)``:
       * Some chunk clears the threshold -> those chunks, each tagged
         ``low_confidence = False``; ``no_high_confidence = False``.
@@ -863,8 +880,21 @@ def _apply_rerank_threshold(
         an answer; ``no_high_confidence = True``. Callers must exclude
         low-confidence chunks from the displayed sources.
     """
+
+    def _threshold_for(c: Dict[str, Any]) -> float:
+        if (structured_threshold is not None
+                and c.get("chunkingVersion") in STRUCTURED_CHUNKING_VERSIONS):
+            return structured_threshold
+        return threshold
+
     top = ranked[:top_k]
-    high_conf = [c for c in top if c.get("rerank_score", 0.0) >= threshold]
+    for c in top:
+        logger.debug(
+            "[RERANK] %s cv=%s score=%+.3f applied_threshold=%+.3f",
+            c.get("filename"), c.get("chunkingVersion"),
+            c.get("rerank_score", 0.0), _threshold_for(c),
+        )
+    high_conf = [c for c in top if c.get("rerank_score", 0.0) >= _threshold_for(c)]
 
     if high_conf:
         for c in high_conf:
@@ -960,7 +990,13 @@ async def query_vector_store(
             # Drop sub-threshold (noise) chunks. When nothing clears the bar the
             # helper returns the top 1-2 chunks tagged low_confidence=True so the
             # LLM still gets context; chat.py hides those from the sources list.
-            kept, _no_high_conf = _apply_rerank_threshold(combined)
+            # Structured (v3-xlsx) chunks get their own configurable threshold
+            # (read at call time so it can be set per-process); with the default
+            # it equals the flat threshold and nothing changes.
+            kept, _no_high_conf = _apply_rerank_threshold(
+                combined,
+                structured_threshold=config.KB_RERANK_SCORE_THRESHOLD_STRUCTURED,
+            )
             for c in kept[:3]:
                 print(f"   {c['rerank_score']:+.3f} | {c['filename']} (vec {c['score']:.3f})")
             return kept

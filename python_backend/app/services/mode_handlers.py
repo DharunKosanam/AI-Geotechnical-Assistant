@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from app.services.intent_router import GENERAL
 from app.services.llm_service import TokenEmitter, generate_answer_with_groq
-from app.services.prompt_config import THREAD_DOC_FALLBACK_PROMPT
+from app.services.prompt_config import THREAD_DOC_FALLBACK_PROMPT, kb_fallback_prompt
 
 
 @dataclass
@@ -84,4 +84,35 @@ async def handle_thread_doc_fallback(
         system_prompt=THREAD_DOC_FALLBACK_PROMPT,
         emit=emit,
     )
+    return ModeResult(answer=answer, sources=[], no_high_confidence_sources=False)
+
+
+async def handle_kb_fallback(
+    query: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    *,
+    found_titles: List[str],
+    emit: Optional[TokenEmitter] = None,
+) -> ModeResult:
+    """KB_QUERY confidence fallback: retrieval FOUND documents but no chunk
+    cleared the reranker threshold for this question.
+
+    Answers WITHOUT citations (like GENERAL) but with a system prompt that
+    tells the truth about the search: documents were found — named via
+    ``found_titles`` — and simply did not match confidently. It forbids the
+    model from claiming it has no access to files (GENERAL's "There are NO
+    reference documents" wording is FALSE on this path and produced exactly
+    that claim). Callers with an EMPTY title list must use handle_general
+    instead — nothing was found, so GENERAL's wording is accurate there.
+    """
+    answer = await generate_answer_with_groq(
+        query=query,
+        context="",  # low-confidence chunks are deliberately NOT quoted
+        history=history,
+        mode=GENERAL,  # -> GENERAL's no-context assembly (no "[No documents]" line)
+        system_prompt=kb_fallback_prompt(found_titles),
+        emit=emit,
+    )
+    # no_high_confidence_sources stays False to match what this path returned
+    # via handle_general before — only the WORDING changes, not the payload.
     return ModeResult(answer=answer, sources=[], no_high_confidence_sources=False)

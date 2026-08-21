@@ -161,6 +161,60 @@ CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide dire
 
 
 # ---------------------------------------------------------------------------
+# KB retrieval-confidence fallback (KB_QUERY only): retrieval FOUND documents
+# but no chunk cleared the reranker threshold. GENERAL's "There are NO
+# reference documents" would be FALSE on this path — told that, the model
+# answers "I don't have access to your files" to a question naming a file the
+# KB holds (the lab-inventory incident). This prompt tells the truth instead:
+# documents WERE found, the match was not confident, and it names them. Built
+# by a function because the found titles are interpolated per turn. Direct
+# GENERAL (no documents found at all) keeps GENERAL_PROMPT verbatim. Kept OUT
+# of SYSTEM_PROMPTS (not a router mode); callers pass it via
+# generate_answer_with_groq(system_prompt=...).
+# ---------------------------------------------------------------------------
+_KB_FALLBACK_MAX_TITLES = 5
+
+KB_FALLBACK_PROMPT_TEMPLATE = """You are an expert AI assistant specializing in geotechnical engineering, answering from a lab's shared document knowledge base.
+
+The user's question WAS searched against the knowledge base, and potentially relevant document(s) WERE found — {titles} — but no passage in them matched this question confidently enough to quote as a grounded, citable answer.
+
+Guidelines:
+- NEVER say or imply that you have no access to files or documents, or that no documents exist, or that nothing was uploaded. Documents WERE found; the match was simply not confident enough.
+- Say plainly that the knowledge base was searched, and name the document(s) listed above as what was found, so the user knows where to look or can rephrase their question to target them.
+- Do NOT quote, summarize, or invent contents of those documents — you were not given their text with enough confidence to use it.
+- Then, if it is helpful, answer from your own general knowledge, clearly framed as general information rather than as something taken from those documents.
+- Do NOT fabricate document contents or citations.
+- Be concise but helpful.
+- Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points.
+- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
+- Write ALL inline math with consistent $...$ delimiters (e.g. $D_{50}$, $\\sigma'$). Never write bare subscripts like D_{50} or "D 50" outside of $...$.
+- Do NOT add a "Sources" or "References" section at the end of your response.
+
+CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
+
+
+def kb_fallback_prompt(found_titles) -> str:
+    """The KB confidence-fallback prompt with the found document titles
+    interpolated. Titles are deduplicated in order and capped at
+    ``_KB_FALLBACK_MAX_TITLES`` so a wide low-confidence net cannot bloat the
+    system prompt. Callers must only use this when at least one title exists
+    (an empty retrieval is a genuine GENERAL turn)."""
+    seen = []
+    for t in found_titles or []:
+        t = str(t or "").strip()
+        if t and t not in seen:
+            seen.append(t)
+    shown = seen[:_KB_FALLBACK_MAX_TITLES]
+    extra = len(seen) - len(shown)
+    listed = ", ".join(f'"{t}"' for t in shown) or '"(untitled document)"'
+    if extra > 0:
+        listed += f" and {extra} more"
+    # str.replace, NOT str.format: the template's math examples contain literal
+    # braces ($D_{50}$) that format() would treat as fields.
+    return KB_FALLBACK_PROMPT_TEMPLATE.replace("{titles}", listed)
+
+
+# ---------------------------------------------------------------------------
 # Source-grounded output formats (SOURCE_FORMATS_ENABLED). NOT router modes --
 # kept OUT of SYSTEM_PROMPTS so the keys==VALID_MODES guard holds. Each format
 # shares one grounding skeleton (strictly the provided context, per-source

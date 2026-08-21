@@ -44,7 +44,7 @@ from app.services.intent_router import (
     MIXED,
     THREAD_DOC,
 )
-from app.services.mode_handlers import handle_general, handle_thread_doc_fallback
+from app.services.mode_handlers import handle_general, handle_kb_fallback, handle_thread_doc_fallback
 from app.services.prompt_config import FORMAT_PROMPTS
 from app.services.source_formats import generate_format_document
 from pydantic import BaseModel
@@ -916,13 +916,35 @@ async def _run_chat_turn(
                         payload.query, conversation_history, emit=emit
                     )
                 else:
-                    print(
-                        "[ROUTER] KB retrieval returned no chunk above the reranker "
-                        "threshold - falling through to GENERAL (no citations)"
-                    )
-                    general_result = await handle_general(
-                        payload.query, conversation_history, emit=emit
-                    )
+                    # Documents WERE found (just below the reranker threshold):
+                    # answer with the honest KB fallback that names them and
+                    # never claims "no file access". An EMPTY retrieval means
+                    # nothing was found at all — GENERAL's wording is accurate
+                    # there and is kept exactly as before.
+                    found_titles: list[str] = []
+                    for c in chunks:
+                        t = (c.get("canonicalTitle")
+                             or get_clean_title(c.get("filename", ""))["title"])
+                        if t and t not in found_titles:
+                            found_titles.append(t)
+                    if found_titles:
+                        print(
+                            "[ROUTER] KB retrieval returned no chunk above the reranker "
+                            f"threshold - honest KB fallback naming {len(found_titles)} "
+                            f"found document(s): {', '.join(found_titles)}"
+                        )
+                        general_result = await handle_kb_fallback(
+                            payload.query, conversation_history,
+                            found_titles=found_titles, emit=emit,
+                        )
+                    else:
+                        print(
+                            "[ROUTER] KB retrieval returned no chunk above the reranker "
+                            "threshold - falling through to GENERAL (no citations)"
+                        )
+                        general_result = await handle_general(
+                            payload.query, conversation_history, emit=emit
+                        )
                 clean_answer = general_result.answer
                 sources = general_result.sources
                 no_high_confidence_sources = general_result.no_high_confidence_sources

@@ -117,6 +117,25 @@ ROUTER_SYSTEM_PROMPT = (
 )
 
 
+def _system_prompt() -> str:
+    """The classifier system prompt, resolved at CALL time.
+
+    With web ingestion on (WEB_INGEST_ENABLED), the KB also holds captured
+    university information pages (travel/conference funding, awards), and a
+    question about those topics must reach retrieval — the base prompt's
+    "lab documents / research papers" framing routes them to GENERAL, which
+    would answer funding questions ungrounded and uncited. With the flag off
+    the prompt is byte-identical to before this feature existed."""
+    if not config.WEB_INGEST_ENABLED:
+        return ROUTER_SYSTEM_PROMPT
+    return ROUTER_SYSTEM_PROMPT + (
+        "\n5. The knowledge base ALSO contains captured university information "
+        "pages (for example UVic travel and conference funding, award "
+        "eligibility, application deadlines). A question about funding, "
+        "awards, deadlines or university procedures is KB_QUERY."
+    )
+
+
 def _history_block(history: Optional[List[Dict[str, str]]], max_turns: int = 4) -> str:
     """Render the last ``max_turns`` conversation turns for the classifier.
 
@@ -224,7 +243,7 @@ async def classify(
         resp = await client.chat(
             model=config.OLLAMA_MODEL,
             messages=[
-                {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+                {"role": "system", "content": _system_prompt()},
                 {"role": "user", "content": user_prompt},
             ],
             think=False,

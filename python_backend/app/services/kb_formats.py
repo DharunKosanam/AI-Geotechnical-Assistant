@@ -273,6 +273,44 @@ def is_accepted(filename: str) -> bool:
     return _ext(filename) in HANDLERS
 
 
+# ---------------------------------------------------------------------------
+# Web pages (WEB_INGEST_ENABLED) — the KB's web "format handler". Lives here
+# so it shares the HandlerResult/validate contract with every file handler,
+# but it is NOT in the extension-keyed HANDLERS dict: a pasted URL is not a
+# filename, extraction happens in web_fetch/web_extract, and this must never
+# make ACCEPTED_EXTENSIONS or the upload endpoints accept a ".web" file.
+# ---------------------------------------------------------------------------
+WEB_SOURCE_FORMAT = "web"
+
+
+def build_web_document(
+    text: str,
+    title: str,
+    format_metadata: "Dict[str, Any] | None" = None,
+) -> HandlerResult:
+    """Normalise an extracted web page into the shape every KB handler emits:
+    one extraction unit the v2 chunker splits by headings. When the extracted
+    body does not start with a heading (some themes keep the H1 in stripped
+    chrome), the page title is prepended as the H1 so chunks carry the page
+    identity in their section headers."""
+    body = (text or "").strip()
+    title = (title or "").strip()
+    if body and title and not body.startswith("#"):
+        body = f"# {title}\n\n{body}"
+    pages: List[Page] = [(1, body, False)] if body else []
+    return HandlerResult(
+        pages=pages,
+        source_format=WEB_SOURCE_FORMAT,
+        format_metadata=format_metadata or {},
+    )
+
+
+# Same gate a text-bearing KB document gets, at the KB_MIN_CONTENT_CHARS
+# default (200): a near-empty page (JS shell, redirect stub) must be rejected
+# loudly, not indexed as a husk.
+validate_web_document = _validate_min_chars(200)
+
+
 def extract_kb_document(content: bytes, filename: str) -> HandlerResult:
     """Extract via the registered handler, or raise UnsupportedFormatError with a
     message that lists what IS accepted. Images get a tailored rejection."""

@@ -677,6 +677,44 @@ KB_SELF_DELETE_WINDOW_HOURS = int(os.getenv("KB_SELF_DELETE_WINDOW_HOURS", "24")
 KB_BULK_MAX_FILES = int(os.getenv("KB_BULK_MAX_FILES", "50"))
 KB_BULK_PACING_SECONDS = float(os.getenv("KB_BULK_PACING_SECONDS", "0.5"))
 
+# ---------------------------------------------------------------------------
+# Web link ingestion (KB web sources) feature flag + fetch limits
+# ---------------------------------------------------------------------------
+# Master switch for ingesting web pages into the KB by pasted URL: the
+# /api/kb/web/* endpoints are registered ONLY when this is on (highlights
+# pattern — off means absent, not present-and-404ing), and /api/kb/status
+# gains "webIngest": true only when on. Default OFF: byte-identical to before
+# the feature existed. Read at call time (config.WEB_INGEST_ENABLED) so tests
+# can toggle it without re-import.
+WEB_INGEST_ENABLED = os.getenv("WEB_INGEST_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Domains a pasted URL may ultimately resolve to (comma-separated). A host
+# matches an entry when it EQUALS it or is a subdomain of it ("www.uvic.ca"
+# matches "uvic.ca"); nothing else matches — "uvic.ca.evil.com" does NOT.
+# NOTE: the CUPE 4163 site lives at 4163.cupe.ca (a cupe.ca subdomain), NOT
+# cupe4163.ca (that is only their e-mail domain). Seeding "4163.cupe.ca"
+# allows only that local's site, never all of cupe.ca. The allowlist applies
+# to any host that would SERVE content; a non-allowlisted host (e.g. a
+# share.google short link) may only ever redirect. The private/loopback/
+# link-local address block in web_fetch applies at every hop regardless.
+WEB_INGEST_ALLOWED_DOMAINS = [
+    d.strip().lower().lstrip(".")
+    for d in os.getenv("WEB_INGEST_ALLOWED_DOMAINS", "uvic.ca,4163.cupe.ca").split(",")
+    if d.strip()
+]
+
+# Per-fetch bounds: total request timeout, response size cap, and how many
+# redirect hops to follow before giving up (share.google -> destination is 1-2
+# hops; 5 covers http->https + apex->www chains with room to spare).
+WEB_INGEST_TIMEOUT_SECONDS = float(os.getenv("WEB_INGEST_TIMEOUT_SECONDS", "15"))
+WEB_INGEST_MAX_BYTES = int(os.getenv("WEB_INGEST_MAX_BYTES", str(10 * 1024 * 1024)))
+WEB_INGEST_MAX_REDIRECTS = int(os.getenv("WEB_INGEST_MAX_REDIRECTS", "5"))
+
 # CORS Origins. NOTE: no "*" wildcard here. The frontend sends credentials (the
 # httpOnly access_token cookie), and the CORS spec forbids pairing
 # Access-Control-Allow-Credentials: true with a "*" origin -- browsers reject

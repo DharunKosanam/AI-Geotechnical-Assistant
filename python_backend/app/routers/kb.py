@@ -558,7 +558,12 @@ async def kb_bulk_upload(
 @router.get("/status")
 async def kb_status():
     """Ungated: lets the frontend decide whether to show the KB nav + panel."""
-    return {"enabled": config.KB_UPLOAD_ENABLED}
+    out = {"enabled": config.KB_UPLOAD_ENABLED}
+    # Key PRESENT only when web ingestion is on (highlights /api/upload/config
+    # pattern), so the flag-off response stays byte-identical.
+    if config.WEB_INGEST_ENABLED:
+        out["webIngest"] = True
+    return out
 
 
 @router.get("/batch/{batch_id}")
@@ -588,13 +593,14 @@ async def kb_my_uploads(current_user: User = Depends(get_current_user)):
     cur = files_collection.find(
         {"docType": "kb_batch", "uploaderId": str(current_user.id)},
         {"batchId": 1, "status": 1, "canonicalTitle": 1, "version": 1, "projectTag": 1,
-         "filename": 1, "chunkCount": 1, "sourceFormat": 1, "createdAt": 1},
+         "filename": 1, "chunkCount": 1, "sourceFormat": 1, "createdAt": 1,
+         "canonicalUrl": 1, "fetchedAt": 1},
     ).sort("createdAt", -1).limit(50)
     items = []
     async for d in cur:
         created = d.get("createdAt")
         age_h = ((datetime.now() - created).total_seconds() / 3600) if created else 1e9
-        items.append({
+        item = {
             "batchId": d.get("batchId"),
             "status": d.get("status"),
             "canonicalTitle": d.get("canonicalTitle"),
@@ -605,7 +611,15 @@ async def kb_my_uploads(current_user: User = Depends(get_current_user)):
             "sourceFormat": d.get("sourceFormat"),
             "createdAt": created.isoformat() if created else None,
             "deletable": age_h <= config.KB_SELF_DELETE_WINDOW_HOURS,
-        })
+        }
+        # Web documents carry their link + fetch date for the panel's web
+        # indicator. Keys PRESENT only on web batches, so every file batch's
+        # payload is byte-identical to before.
+        if d.get("canonicalUrl"):
+            item["canonicalUrl"] = d.get("canonicalUrl")
+            fa = d.get("fetchedAt")
+            item["fetchedAt"] = fa.isoformat() if hasattr(fa, "isoformat") else fa
+        items.append(item)
     return {"uploads": items}
 
 
@@ -628,7 +642,7 @@ async def kb_admin_uploads(
     items: List[Dict[str, Any]] = []
     async for d in files_collection.find(q).sort("createdAt", -1).limit(200):
         created = d.get("createdAt")
-        items.append({
+        item = {
             "batchId": d.get("batchId"),
             "uploaderId": d.get("uploaderId"),
             "uploaderName": d.get("uploaderName"),
@@ -639,7 +653,13 @@ async def kb_admin_uploads(
             "status": d.get("status"),
             "sourceFormat": d.get("sourceFormat"),
             "createdAt": created.isoformat() if created else None,
-        })
+        }
+        # Same conditional web fields as /my-uploads (see comment there).
+        if d.get("canonicalUrl"):
+            item["canonicalUrl"] = d.get("canonicalUrl")
+            fa = d.get("fetchedAt")
+            item["fetchedAt"] = fa.isoformat() if hasattr(fa, "isoformat") else fa
+        items.append(item)
     return {"uploads": items}
 
 

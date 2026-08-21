@@ -753,6 +753,29 @@ async def _run_chat_turn(
                         )
                         if chunk.get("pageStart") is not None:
                             vp.add(chunk["pageStart"])
+                # Web-sourced chunks (KB web ingestion): their filename IS the
+                # canonical URL (the retrieval projection carries no web fields
+                # and retrieval is off-limits), so the fetch date comes from
+                # the kb_batch provenance docs in ONE query. sort=fetchedAt so
+                # after a refresh the LATEST batch's date wins. An empty
+                # candidate set means zero extra queries — a turn with no web
+                # chunk (and any flag-off deployment) is byte-identical.
+                web_fetch_dates: dict[str, str] = {}
+                web_candidates = {
+                    str(chunk.get("filename"))
+                    for chunk in chunks
+                    if not chunk.get("low_confidence")
+                    and str(chunk.get("filename", "")).startswith(("http://", "https://"))
+                }
+                if web_candidates:
+                    async for wdoc in files_collection.find(
+                        {"docType": "kb_batch", "canonicalUrl": {"$in": sorted(web_candidates)}},
+                        {"canonicalUrl": 1, "fetchedAt": 1},
+                    ).sort("fetchedAt", 1):
+                        fa = wdoc.get("fetchedAt")
+                        web_fetch_dates[wdoc["canonicalUrl"]] = (
+                            fa.isoformat() if hasattr(fa, "isoformat") else fa
+                        )
                 seen_titles: set[str] = set()
                 sources: list[dict] = []
                 for chunk in chunks:
@@ -788,6 +811,18 @@ async def _run_chat_turn(
                         "project": chunk.get("projectTag"),
                         "version": chunk.get("version"),
                     }
+                    # Web page citation: link the LIVE page and stamp the fetch
+                    # date — assembled deterministically from retrieval results
+                    # + stored provenance, never from model prose. Only web
+                    # chunks get these keys (and the url/title overrides);
+                    # every other source entry is byte-identical to before.
+                    web_fn = str(chunk.get("filename", ""))
+                    if web_fn in web_fetch_dates:
+                        source_entry["title"] = chunk.get("canonicalTitle") or info["title"]
+                        source_entry["url"] = web_fn
+                        source_entry["sourceFormat"] = "web"
+                        source_entry["fileType"] = "web"
+                        source_entry["fetchedAt"] = web_fetch_dates[web_fn]
                     # Vision provenance on the citation itself. Added ONLY when
                     # vision content contributes, so sources for ordinary
                     # documents are byte-identical to before. Membership (not
@@ -940,9 +975,17 @@ async def _run_chat_turn(
                 if mode == KB_QUERY and sources:
                     high_conf_chunks = [c for c in chunks if not c.get("low_confidence")]
                     cited_chunks = filter_sources_by_citations(clean_answer, high_conf_chunks)
-                    cited_titles = {
-                        get_clean_title(c["filename"])["title"] for c in cited_chunks
-                    }
+                    cited_titles = set()
+                    for c in cited_chunks:
+                        cited_titles.add(get_clean_title(c["filename"])["title"])
+                        # A web chunk's DISPLAYED title is its canonicalTitle
+                        # (the filename is a URL, so the filename-derived title
+                        # never matches the entry built in Step 2b). Add it so
+                        # web sources survive this narrowing; for every other
+                        # chunk the set is exactly as before.
+                        if (str(c.get("filename", "")).startswith(("http://", "https://"))
+                                and c.get("canonicalTitle")):
+                            cited_titles.add(c["canonicalTitle"])
                     sources = [s for s in sources if s["title"] in cited_titles]
 
             # Phase 4: multi-document THREAD_DOC turns state their retrieval

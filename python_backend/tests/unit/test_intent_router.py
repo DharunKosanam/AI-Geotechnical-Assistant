@@ -250,3 +250,18 @@ _LIVE = os.getenv("RUN_LIVE_ROUTER") == "1"
 async def test_live_classification_golden(message, attachments, expected):
     mode = await ir.classify(message, thread_has_attachments=attachments)
     assert mode == expected
+
+
+# --- WEB_INGEST_ENABLED prompt gate (web link ingestion) ----------------------
+def test_system_prompt_unchanged_when_web_ingest_off(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "WEB_INGEST_ENABLED", False)
+    assert ir._system_prompt() == ir.ROUTER_SYSTEM_PROMPT
+
+
+def test_system_prompt_mentions_funding_when_web_ingest_on(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "WEB_INGEST_ENABLED", True)
+    p = ir._system_prompt()
+    assert p.startswith(ir.ROUTER_SYSTEM_PROMPT)   # strictly additive
+    assert "funding" in p and "KB_QUERY" in p

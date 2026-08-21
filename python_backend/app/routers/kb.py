@@ -87,21 +87,36 @@ def _embed_first_chunk(text: str) -> List[float]:
 
 
 async def _supersede_plan(project_tag: str, canonical_title: str) -> Dict[str, Any]:
-    """DRY-RUN: what a re-upload of the same (project, canonical title) would
-    supersede. Returns the filter, the current max version, and how many existing
-    chunks match — WITHOUT deleting anything (Phase 4 gate)."""
+    """DRY-RUN: what a re-upload with this canonical title would supersede.
+
+    Keyed on canonicalTitle ALONE — deliberately independent of projectTag:
+    keying on (projectTag, canonicalTitle) let the same document re-uploaded
+    under a different tag silently create a SECOND live copy instead of
+    replacing the first (the lab-inventory duplicate: old copy under
+    "Lab inventory and Plaxis booking", re-upload under "lab inventory", both
+    retrievable). Web documents are excluded (``canonicalUrl`` absent): they
+    are refreshed by URL via /api/kb/web, never replaced by a file upload.
+    ``differing_project_tags`` lists tags on the existing copy that differ
+    from the submitted one, so the confirm warning can say where the existing
+    copy lives instead of silently deleting across projects. Returns the
+    filter, counts and versions — WITHOUT deleting anything (Phase 4 gate)."""
     supersede_filter = {
         "category": KB_CATEGORY,
-        "projectTag": project_tag,
         "canonicalTitle": canonical_title,
+        "canonicalUrl": {"$exists": False},
     }
     count = await files_collection.count_documents(supersede_filter)
     prior_versions = await files_collection.distinct("version", supersede_filter)
+    prior_tags = await files_collection.distinct("projectTag", supersede_filter)
     max_version = max([v for v in prior_versions if isinstance(v, int)], default=0)
     return {
         "filter": supersede_filter,
         "would_delete_chunks": count,
         "prior_versions": sorted(v for v in prior_versions if isinstance(v, int)),
+        "prior_project_tags": sorted(t for t in prior_tags if isinstance(t, str)),
+        "differing_project_tags": sorted(
+            t for t in prior_tags if isinstance(t, str) and t != project_tag
+        ),
         "next_version": max_version + 1,
     }
 
@@ -199,6 +214,12 @@ async def _ingest_prepared_file(
     if plan["would_delete_chunks"] > 0:
         print(f"[KB_SUPERSEDE] filter={plan['filter']} deleting {plan['would_delete_chunks']} "
               f"prior-version chunk(s) for '{canonical_title}' before inserting v{version}")
+        if plan["differing_project_tags"]:
+            # Bulk uploads reach here without the single-upload confirm gate, so
+            # a cross-project replacement must at least be LOUD in the log.
+            print(f"[KB_SUPERSEDE] note: existing copy filed under different project "
+                  f"tag(s) {plan['differing_project_tags']} (submitted '{project}') — "
+                  f"replacing across tags")
         del_res = await files_collection.delete_many(plan["filter"])
         print(f"[KB_SUPERSEDE] deleted {del_res.deleted_count} chunk(s)")
 
@@ -314,16 +335,33 @@ async def kb_upload(
 
         plan = await _supersede_plan(project, canonical_title)
         if plan["would_delete_chunks"] > 0 and "supersede" not in acknowledged:
+            # Cross-project match: say WHERE the existing copy lives instead of
+            # silently duplicating (old behaviour) or silently deleting it.
+            if plan["differing_project_tags"]:
+                where = ", ".join(f'"{t}"' for t in plan["differing_project_tags"])
+                message = (
+                    f"A document titled \"{canonical_title}\" already exists in the "
+                    f"knowledge base under a DIFFERENT project tag ({where}; you "
+                    f"submitted \"{project}\") — version "
+                    f"{max(plan['prior_versions'], default=1)}, "
+                    f"{plan['would_delete_chunks']} chunks. Continuing removes that "
+                    f"copy and replaces it under \"{project}\". Continue?"
+                )
+            else:
+                message = (
+                    f"This replaces the existing \"{canonical_title}\" in project "
+                    f"\"{project}\" (version {max(plan['prior_versions'], default=1)}, "
+                    f"{plan['would_delete_chunks']} chunks). The old version will be "
+                    f"removed and replaced. Continue?"
+                )
             return {
                 "status": "needs_input",
                 "missing_fields": [],
                 "warnings": [{
                     "kind": "supersede",
-                    "message": (f"This replaces the existing \"{canonical_title}\" in project "
-                                f"\"{project}\" (version {max(plan['prior_versions'], default=1)}, "
-                                f"{plan['would_delete_chunks']} chunks). The old version will be "
-                                f"removed and replaced. Continue?"),
+                    "message": message,
                     "would_delete_chunks": plan["would_delete_chunks"],
+                    "differingProjects": plan["differing_project_tags"],
                 }],
                 "prefilled_metadata": await extract_metadata(prep["all_text"], filename),
                 "extraction": extraction_info,

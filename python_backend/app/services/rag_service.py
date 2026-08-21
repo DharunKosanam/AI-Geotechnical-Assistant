@@ -880,6 +880,40 @@ def _is_table_like(text: str) -> Tuple[bool, str]:
     return False, ""
 
 
+# --- meta-phrasing strip for the reranker (RERANK_STRIP_META_PHRASING) ------
+# Conversational scaffolding ("check the X file and tell me what...") drags
+# cross-encoder scores far below the same question phrased factually (format
+# diagnostic: worst wording in 6/9 formats). These patterns remove ONLY
+# scaffold tokens; the wh-lookahead on tell/show keeps content verbs intact
+# ("the logs show artesian pressure" is untouched).
+_META_SCAFFOLD_RES = (
+    re.compile(r"^\s*(please\s+)?(can|could|would)\s+you\s+", re.IGNORECASE),
+    re.compile(r"^\s*please\s+", re.IGNORECASE),
+    re.compile(r"^\s*(check|open|look\s+at|go\s+through|review|read|see)\s+(the\s+|our\s+|my\s+)?",
+               re.IGNORECASE),
+    re.compile(r"\b(and\s+|then\s+)?(tell|show)\s+(me\s+|us\s+)?(?=(what|how|if|whether|about)\b)",
+               re.IGNORECASE),
+    re.compile(r"\b(and\s+)?let\s+me\s+know\b\s*", re.IGNORECASE),
+)
+
+
+def _strip_meta_phrasing(query: str) -> str:
+    """Scaffold-stripped variant of ``query`` for the RERANKER only. Falls back
+    to the original when stripping changes nothing or leaves fewer than three
+    words (never hand the cross-encoder a stub)."""
+    stripped = query or ""
+    for pat in _META_SCAFFOLD_RES:
+        stripped = pat.sub("", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip(" .,;:!?")
+    # Unchanged up to whitespace/punctuation, or left as a stub: keep the
+    # original — never hand the cross-encoder less than the user said for no
+    # scaffold actually removed.
+    normalised_original = re.sub(r"\s+", " ", (query or "")).strip(" .,;:!?")
+    if stripped.lower() == normalised_original.lower() or len(stripped.split()) < 3:
+        return query
+    return stripped
+
+
 def _apply_rerank_threshold(
     ranked: List[Dict[str, Any]],
     threshold: float = RERANK_SCORE_THRESHOLD,
@@ -1018,7 +1052,15 @@ async def query_vector_store(
         try:
             reranker = get_reranker()
             documents = [c["text"] for c in combined]
-            scores = list(reranker.rerank(query, documents))
+            # Rerank-scoring input only: vector/BM25 above and the answer
+            # prompt downstream always see the ORIGINAL query.
+            rerank_query = query
+            if config.RERANK_STRIP_META_PHRASING:
+                stripped = _strip_meta_phrasing(query)
+                if stripped != query:
+                    print(f"[RERANK] meta-strip: {query!r} -> {stripped!r}")
+                    rerank_query = stripped
+            scores = list(reranker.rerank(rerank_query, documents))
             for c, s in zip(combined, scores):
                 c["rerank_score"] = float(s)
             combined.sort(key=lambda c: c["rerank_score"], reverse=True)

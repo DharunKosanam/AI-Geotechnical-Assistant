@@ -136,3 +136,35 @@ def test_structured_allowance_has_its_own_floor():
         _mixed([(-12.5, PIPE_TABLE)]), structured_threshold=-11.0)
     assert no_high is True
     assert all(c["low_confidence"] is True for c in chunks)
+
+
+# --- meta-phrasing strip (RERANK_STRIP_META_PHRASING; reranker input only) ----
+from app.services.rag_service import _strip_meta_phrasing
+
+
+def test_strip_meta_phrasing_scaffold_queries():
+    cases = {
+        "check the lab inventory file and tell what we have in the inventory":
+            "lab inventory file what we have in the inventory",
+        "Check the piezometer readings file and tell me what the levels are doing.":
+            "piezometer readings file what the levels are doing",
+        "Please can you look at the field visit notes and tell me what was agreed?":
+            "field visit notes what was agreed",
+    }
+    for raw, want in cases.items():
+        assert _strip_meta_phrasing(raw).lower() == want.lower()
+
+
+def test_strip_meta_phrasing_leaves_content_alone():
+    for q in (
+        "What is the factor of safety of the west slope of the Sooke embankment?",
+        "the borehole logs show artesian pressure below 12 m",  # 'show' is content
+        "How much settlement has plate SP-2 recorded?",
+    ):
+        assert _strip_meta_phrasing(q) == q
+
+
+def test_strip_meta_phrasing_never_returns_a_stub():
+    # If stripping would leave fewer than 3 words, the original is kept.
+    assert _strip_meta_phrasing("check the file") == "check the file"
+    assert _strip_meta_phrasing("") == ""

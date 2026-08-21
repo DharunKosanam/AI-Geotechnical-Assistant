@@ -433,6 +433,20 @@ KB_RERANK_SCORE_THRESHOLD_STRUCTURED = float(
     os.getenv("KB_RERANK_SCORE_THRESHOLD_STRUCTURED", str(RERANK_SCORE_THRESHOLD))
 )
 
+# Strip conversational scaffolding from the query BEFORE cross-encoder
+# reranking ONLY ("check the X file and tell me..." -> "X file what..."):
+# the format diagnostic measured meta-phrasing as the worst-scoring wording in
+# 6 of 9 formats (all three non-table fallbacks were this phrasing). Vector
+# search, BM25 and the answer prompt always keep the ORIGINAL query — only the
+# rerank scoring input changes. Conservative regex list, result must keep >= 3
+# words or the original is used. Default OFF: rerank input byte-identical.
+RERANK_STRIP_META_PHRASING = os.getenv("RERANK_STRIP_META_PHRASING", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # SEPARATE, permissive threshold for THREAD-SCOPED retrieval (THREAD_DOC mode).
 # The KB threshold above (0.0) is calibrated to filter noise out of a 16,811-chunk
 # corpus, where relevant chunks score +3 to +6. Thread-scoped retrieval has a

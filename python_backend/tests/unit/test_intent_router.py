@@ -265,3 +265,74 @@ def test_system_prompt_mentions_funding_when_web_ingest_on(monkeypatch):
     p = ir._system_prompt()
     assert p.startswith(ir.ROUTER_SYSTEM_PROMPT)   # strictly additive
     assert "funding" in p and "KB_QUERY" in p
+
+
+# --- ROUTER_UNCERTAIN_RETRIEVES: uncertainty fails toward retrieval -----------
+class _UncertainFakeClient:
+    def __init__(self, content):
+        self._content = content
+
+    async def chat(self, **kwargs):
+        return {"message": {"content": self._content}}
+
+
+def test_system_prompt_byte_identical_both_flags_off(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "WEB_INGEST_ENABLED", False)
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", False)
+    assert ir._system_prompt() == ir.ROUTER_SYSTEM_PROMPT
+
+
+def test_system_prompt_web_only_unchanged_shape(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "WEB_INGEST_ENABLED", True)
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", False)
+    p = ir._system_prompt()
+    assert p.startswith(ir.ROUTER_SYSTEM_PROMPT)
+    assert "\n5. The knowledge base ALSO contains" in p
+    assert "UNCERTAIN" not in p
+
+
+def test_system_prompt_uncertain_rule_numbering(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "WEB_INGEST_ENABLED", False)
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", True)
+    p = ir._system_prompt()
+    assert '\n5. You may also output {"mode": "UNCERTAIN"}' in p
+    # Both flags: web keeps 5, uncertain becomes 6.
+    monkeypatch.setattr(config, "WEB_INGEST_ENABLED", True)
+    p2 = ir._system_prompt()
+    assert "\n5. The knowledge base ALSO contains" in p2
+    assert '\n6. You may also output {"mode": "UNCERTAIN"}' in p2
+
+
+def test_parse_mode_uncertain_gated(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", False)
+    assert ir._parse_mode('{"mode": "UNCERTAIN"}') is None      # today: invalid
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", True)
+    assert ir._parse_mode('{"mode": "UNCERTAIN"}') == ir.UNCERTAIN
+
+
+def test_uncertain_never_in_valid_modes():
+    # The SYSTEM_PROMPTS keys == VALID_MODES guard must keep holding.
+    assert ir.UNCERTAIN not in ir.VALID_MODES
+
+
+@pytest.mark.asyncio
+async def test_classify_resolves_uncertain_to_kb_query(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", True)
+    mode = await ir.classify("How wide is the crack in the parkade wall?",
+                             client=_UncertainFakeClient('{"mode": "UNCERTAIN"}'))
+    assert mode == KB_QUERY
+
+
+@pytest.mark.asyncio
+async def test_classify_uncertain_flag_off_defaults_to_kb_query(monkeypatch):
+    from app.core import config
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", False)
+    # Flag off: UNCERTAIN is an invalid label -> DEFAULT_MODE, same as today.
+    mode = await ir.classify("anything",
+                             client=_UncertainFakeClient('{"mode": "UNCERTAIN"}'))
+    assert mode == ir.DEFAULT_MODE

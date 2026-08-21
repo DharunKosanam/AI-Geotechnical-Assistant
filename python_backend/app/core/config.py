@@ -99,6 +99,23 @@ ROUTER_ENABLED = os.getenv("ROUTER_ENABLED", "false").strip().lower() in (
     "on",
 )
 
+# Router uncertainty fails TOWARD retrieval. The router emits a bare JSON
+# label ({"mode": ...}, temperature 0, format=json — Ollama exposes no
+# confidence or logprobs for it), so an unsure model must GUESS, and the
+# format diagnostic measured the cost: 4/27 groundable questions (rerank up
+# to +6.92) were confidently labelled GENERAL and never retrieved. With this
+# ON, the router prompt offers an explicit UNCERTAIN class for factual /
+# site-specific questions the documents COULD answer, and UNCERTAIN resolves
+# to KB_QUERY — retrieval runs and the reranker threshold (plus the honest
+# fallback) decides, instead of the classifier skipping retrieval outright.
+# Default OFF: the router prompt and behaviour are byte-identical to today.
+ROUTER_UNCERTAIN_RETRIEVES = os.getenv("ROUTER_UNCERTAIN_RETRIEVES", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # ---------------------------------------------------------------------------
 # Response streaming (Phase 2) feature flag
 # ---------------------------------------------------------------------------

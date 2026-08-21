@@ -79,6 +79,14 @@ THREAD_DOC = "THREAD_DOC"
 # Every valid mode. Anything outside this set from the model is rejected.
 VALID_MODES = frozenset({KB_QUERY, GENERAL, MIXED, THREAD_DOC})
 
+# Uncertainty class (ROUTER_UNCERTAIN_RETRIEVES only). Deliberately NOT in
+# VALID_MODES — it never leaves this module: classify() resolves it to
+# KB_QUERY so uncertainty fails toward retrieval and the reranker threshold
+# decides. The router's decision is a bare JSON label with no confidence or
+# logprobs, so this explicit class is the only way the model can say
+# "I don't know" instead of guessing GENERAL and skipping retrieval.
+UNCERTAIN = "UNCERTAIN"
+
 # Safe fallback. KB_QUERY reproduces today's unconditional-retrieval behavior,
 # so a router failure (unreachable model, unparseable output) degrades to the
 # current path rather than dropping retrieval. The downstream retrieval-
@@ -120,20 +128,39 @@ ROUTER_SYSTEM_PROMPT = (
 def _system_prompt() -> str:
     """The classifier system prompt, resolved at CALL time.
 
-    With web ingestion on (WEB_INGEST_ENABLED), the KB also holds captured
-    university information pages (travel/conference funding, awards), and a
-    question about those topics must reach retrieval — the base prompt's
-    "lab documents / research papers" framing routes them to GENERAL, which
-    would answer funding questions ungrounded and uncited. With the flag off
-    the prompt is byte-identical to before this feature existed."""
-    if not config.WEB_INGEST_ENABLED:
-        return ROUTER_SYSTEM_PROMPT
-    return ROUTER_SYSTEM_PROMPT + (
-        "\n5. The knowledge base ALSO contains captured university information "
-        "pages (for example UVic travel and conference funding, award "
-        "eligibility, application deadlines). A question about funding, "
-        "awards, deadlines or university procedures is KB_QUERY."
-    )
+    Flag-gated rules are appended after the base prompt's rule 4, numbered
+    sequentially; with every flag off the prompt is byte-identical to before
+    any of these features existed.
+
+    * WEB_INGEST_ENABLED: the KB also holds captured university information
+      pages (travel/conference funding, awards) and questions about those
+      topics must reach retrieval — the base "lab documents / research
+      papers" framing routes them to GENERAL, ungrounded and uncited.
+    * ROUTER_UNCERTAIN_RETRIEVES: offers the explicit UNCERTAIN class so an
+      unsure model stops guessing GENERAL (which skips retrieval outright);
+      classify() resolves UNCERTAIN to KB_QUERY."""
+    extras = []
+    if config.WEB_INGEST_ENABLED:
+        extras.append(
+            "The knowledge base ALSO contains captured university information "
+            "pages (for example UVic travel and conference funding, award "
+            "eligibility, application deadlines). A question about funding, "
+            "awards, deadlines or university procedures is KB_QUERY."
+        )
+    if config.ROUTER_UNCERTAIN_RETRIEVES:
+        extras.append(
+            'You may also output {"mode": "UNCERTAIN"} when you cannot '
+            "confidently tell whether the lab's documents would answer the "
+            "question. Prefer UNCERTAIN over GENERAL whenever the question "
+            "asks for specific facts, measurements, observations, readings or "
+            "records that project documents COULD hold — even if it does not "
+            "mention a document. Reserve GENERAL for clearly general concept "
+            "explanations, definitions, writing help and conversation."
+        )
+    prompt = ROUTER_SYSTEM_PROMPT
+    for i, body in enumerate(extras, start=5):
+        prompt += f"\n{i}. {body}"
+    return prompt
 
 
 def _history_block(history: Optional[List[Dict[str, str]]], max_turns: int = 4) -> str:
@@ -198,6 +225,11 @@ def _parse_mode(raw: str) -> Optional[str]:
     if not isinstance(mode, str):
         return None
     mode = mode.strip().upper()
+    # UNCERTAIN is accepted ONLY when the flag offers it in the prompt; with
+    # the flag off it stays invalid (-> None -> DEFAULT_MODE), exactly as any
+    # unknown label today.
+    if mode == UNCERTAIN and config.ROUTER_UNCERTAIN_RETRIEVES:
+        return UNCERTAIN
     return mode if mode in VALID_MODES else None
 
 
@@ -267,6 +299,12 @@ async def classify(
 
     raw = (resp["message"]["content"] or "") if resp else ""
     parsed = _parse_mode(raw)
+    if parsed == UNCERTAIN:
+        # Uncertainty fails TOWARD retrieval: run the KB path and let the
+        # reranker threshold (and the honest fallback) decide, instead of the
+        # classifier skipping retrieval on a guess.
+        logger.info("router uncertain -> KB_QUERY (retrieval decides): %r", message)
+        parsed = KB_QUERY
     mode = parsed if parsed is not None else DEFAULT_MODE
     mode = _enforce_attachment_invariant(mode, thread_has_attachments)
 

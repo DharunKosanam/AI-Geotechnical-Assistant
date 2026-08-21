@@ -399,15 +399,18 @@ RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "5"))
 RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.0"))
 
 # STRUCTURED-chunk allowance for the KB path: applied INSTEAD of
-# RERANK_SCORE_THRESHOLD, but ONLY to chunks whose chunkingVersion is
-# "v3-xlsx" (row-per-line spreadsheet tables). The prose-trained ms-marco
-# cross-encoder scores pipe-table rows deeply negative even when they answer
-# the question exactly — the lab-inventory chunks scored -3.6/-4.3 against
-# "check the lab inventory file..." and the flat 0.0 discarded them all,
-# falling through to an uncited GENERAL answer. Defaults to the flat
-# threshold's value so behaviour is byte-identical until this is deliberately
-# set; the thread path's -11.0 (below) is the reference point for a
-# permissive setting. Used ONLY by query_vector_store (KB path); thread
+# RERANK_SCORE_THRESHOLD, but ONLY to chunks whose TEXT is table-like
+# (content-based detection in rag_service._is_table_like: pipe-delimited rows
+# from the v3-xlsx renderer, or whitespace-columned numeric rows as extracted
+# from table-heavy PDFs — the earlier chunkingVersion=="v3-xlsx" key missed
+# those PDFs, which are chunked as v2 yet show the same penalty). The
+# prose-trained ms-marco cross-encoder scores table rows deeply negative even
+# when they answer the question exactly — the lab-inventory chunks scored
+# -3.6/-4.3 against "check the lab inventory file..." and the flat 0.0
+# discarded them all, falling through to an uncited GENERAL answer. Defaults
+# to the flat threshold's value so behaviour is byte-identical until this is
+# deliberately set; the thread path's -11.0 (below) is the reference point
+# for a permissive setting. Used ONLY by query_vector_store (KB path); thread
 # retrieval is untouched.
 KB_RERANK_SCORE_THRESHOLD_STRUCTURED = float(
     os.getenv("KB_RERANK_SCORE_THRESHOLD_STRUCTURED", str(RERANK_SCORE_THRESHOLD))

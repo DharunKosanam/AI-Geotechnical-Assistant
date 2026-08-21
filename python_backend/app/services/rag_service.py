@@ -844,11 +844,40 @@ def _rrf_merge(
 
 logger = logging.getLogger(__name__)
 
-# chunkingVersion values whose text is row-structured table markup rather than
-# prose. The prose-trained cross-encoder scores these deeply negative even when
-# they answer the question exactly, so the KB path may grant them a separate,
-# more permissive threshold (KB_RERANK_SCORE_THRESHOLD_STRUCTURED).
-STRUCTURED_CHUNKING_VERSIONS = frozenset({"v3-xlsx"})
+# --- table-likeness detection (content-based, replaces the chunkingVersion
+# key). The prose-trained cross-encoder scores table rows deeply negative even
+# when they answer the question exactly; keying the structured-threshold
+# allowance on chunkingVersion == v3-xlsx missed table-heavy PDFs, which are
+# chunked as v2 prose yet showed the same penalty (format diagnostic: CPT
+# table PDF -2.10 on a query it answers). Two signals, measured on real
+# chunks: the v3-xlsx renderer's pipe-delimited rows (xlsx/csv: 10/12, 13/14
+# lines), and whitespace-columned numeric rows as PDF extraction preserves
+# them (CPT PDF: 19/21, 8/14 lines). Prose, OCR'd scans and docx all scored 0
+# on both signals.
+_TABLE_MIN_ROWS = 3
+_TABLE_ROW_RATIO = 0.5
+_MULTISPACE_RE = re.compile(r"\s{2,}")
+_NUMERIC_TOKEN_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
+
+
+def _is_table_like(text: str) -> Tuple[bool, str]:
+    """(is_table_like, reason). Pipe-delimited rows (the v3-xlsx renderer,
+    markdown tables) or whitespace-columned numeric rows (table-heavy PDFs)
+    must dominate the chunk's non-empty lines."""
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    if len(lines) < _TABLE_MIN_ROWS:
+        return False, ""
+    pipe_rows = sum(1 for l in lines if l.count("|") >= 2)
+    if pipe_rows >= _TABLE_MIN_ROWS and pipe_rows / len(lines) >= _TABLE_ROW_RATIO:
+        return True, f"pipe-delimited rows {pipe_rows}/{len(lines)}"
+    col_rows = sum(
+        1 for l in lines
+        if len(_MULTISPACE_RE.findall(l.strip())) >= 2
+        and len(_NUMERIC_TOKEN_RE.findall(l)) >= 3
+    )
+    if col_rows > _TABLE_MIN_ROWS and col_rows / len(lines) >= _TABLE_ROW_RATIO:
+        return True, f"whitespace-columned numeric rows {col_rows}/{len(lines)}"
+    return False, ""
 
 
 def _apply_rerank_threshold(
@@ -867,10 +896,11 @@ def _apply_rerank_threshold(
     chunks are retrieval noise that must not be shown to the user as sources.
 
     ``structured_threshold`` (KB path only — thread callers leave it None):
-    when set, chunks whose ``chunkingVersion`` is in
-    STRUCTURED_CHUNKING_VERSIONS are judged against IT instead of ``threshold``.
-    With it equal to ``threshold`` (the config default) the outcome is
-    byte-identical to before the parameter existed.
+    when set, chunks whose TEXT is table-like per ``_is_table_like`` (pipe
+    rows or whitespace-columned numeric rows — covers v3-xlsx spreadsheet
+    chunks AND table-heavy PDF chunks alike) are judged against IT instead of
+    ``threshold``. With it equal to ``threshold`` (the config default) the
+    outcome is byte-identical to before the parameter existed.
 
     Returns ``(chunks, no_high_confidence)``:
       * Some chunk clears the threshold -> those chunks, each tagged
@@ -880,19 +910,26 @@ def _apply_rerank_threshold(
         an answer; ``no_high_confidence = True``. Callers must exclude
         low-confidence chunks from the displayed sources.
     """
+    top = ranked[:top_k]
+
+    table_verdicts: Dict[int, Tuple[bool, str]] = {}
 
     def _threshold_for(c: Dict[str, Any]) -> float:
-        if (structured_threshold is not None
-                and c.get("chunkingVersion") in STRUCTURED_CHUNKING_VERSIONS):
-            return structured_threshold
-        return threshold
+        if structured_threshold is None:
+            return threshold
+        key = id(c)
+        if key not in table_verdicts:
+            table_verdicts[key] = _is_table_like(c.get("text", ""))
+        return structured_threshold if table_verdicts[key][0] else threshold
 
-    top = ranked[:top_k]
     for c in top:
+        applied = _threshold_for(c)
+        is_table, why = table_verdicts.get(id(c), (False, ""))
         logger.debug(
-            "[RERANK] %s cv=%s score=%+.3f applied_threshold=%+.3f",
+            "[RERANK] %s cv=%s score=%+.3f applied_threshold=%+.3f table_like=%s%s",
             c.get("filename"), c.get("chunkingVersion"),
-            c.get("rerank_score", 0.0), _threshold_for(c),
+            c.get("rerank_score", 0.0), applied, is_table,
+            f" ({why})" if why else "",
         )
     high_conf = [c for c in top if c.get("rerank_score", 0.0) >= _threshold_for(c)]
 
@@ -990,9 +1027,10 @@ async def query_vector_store(
             # Drop sub-threshold (noise) chunks. When nothing clears the bar the
             # helper returns the top 1-2 chunks tagged low_confidence=True so the
             # LLM still gets context; chat.py hides those from the sources list.
-            # Structured (v3-xlsx) chunks get their own configurable threshold
-            # (read at call time so it can be set per-process); with the default
-            # it equals the flat threshold and nothing changes.
+            # Table-like chunks (content-detected: v3-xlsx pipe rows OR
+            # table-heavy-PDF numeric columns) get their own configurable
+            # threshold (read at call time so it can be set per-process); with
+            # the default it equals the flat threshold and nothing changes.
             kept, _no_high_conf = _apply_rerank_threshold(
                 combined,
                 structured_threshold=config.KB_RERANK_SCORE_THRESHOLD_STRUCTURED,

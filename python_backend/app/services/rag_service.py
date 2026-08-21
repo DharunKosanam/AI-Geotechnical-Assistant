@@ -360,7 +360,16 @@ def extract_pages_from_pdf_with_ocr(
                 except Exception as e:
                     print(f"      [OCR ERROR] Page {pn} fallback failed: {e}")
 
-            # (3) Large embedded image OCR (figures, diagrams, scanned tables)
+            # (3) Large embedded image OCR (figures, diagrams, scanned tables).
+            # When the page-OCR fallback (2) fired, the rendered page already
+            # contained every embedded image — running (3) too reads the same
+            # pixels again and doubles the page text. Gated fix; default off.
+            if config.OCR_SKIP_EMBEDDED_AFTER_PAGE_OCR and ocr_used:
+                print(f"      [OCR] Page {pn}: embedded-image pass skipped "
+                      f"(page OCR already covered it)")
+                if base_text:
+                    triples.append((pn, base_text, ocr_used))
+                continue
             try:
                 page_obj = doc[i]
                 emb_text = _ocr_embedded_images(doc, page_obj, PDF_IMAGE_OCR_MIN_DIM).strip()

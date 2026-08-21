@@ -617,6 +617,21 @@ OCR_MIN_TEXT_LEN = int(os.getenv("OCR_MIN_TEXT_LEN", "50"))
 # OCRing figures/diagrams — tiny images are usually icons/decorations.
 PDF_IMAGE_OCR_MIN_DIM = int(os.getenv("PDF_IMAGE_OCR_MIN_DIM", "200"))
 
+# Skip the embedded-image OCR pass (step 3) on pages where the full-page OCR
+# fallback (step 2) already fired: on an image-only page the page render
+# CONTAINS every embedded image, so both passes read the same pixels and the
+# page text is duplicated (measured: a scanned borehole log ingested as
+# 857 chars = the same 428-char OCR output twice). Default OFF so extraction
+# output is byte-identical until deliberately enabled.
+OCR_SKIP_EMBEDDED_AFTER_PAGE_OCR = os.getenv(
+    "OCR_SKIP_EMBEDDED_AFTER_PAGE_OCR", "false"
+).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # ---------------------------------------------------------------------------
 # Vision extraction for scanned PDF pages (feature flag, default OFF)
 # ---------------------------------------------------------------------------

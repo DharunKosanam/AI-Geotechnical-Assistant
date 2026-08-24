@@ -199,7 +199,7 @@ async def interpret_sounding(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        think=False,
+        think=True,
         options={
             "num_ctx": config.OLLAMA_NUM_CTX,
             "num_predict": config.OLLAMA_NUM_PREDICT,

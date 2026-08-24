@@ -410,7 +410,7 @@ async def test_dfos_calculator_needs_a_dataset_then_runs_deterministically(
     assert body["interpretation"]["is_ai_draft"] is True
     assert body["interpretation"]["narrative"].startswith("Draft:")
     assert body["exportable"] is True and body["run_id"]
-    assert fake_llm.calls and fake_llm.calls[0]["think"] is False
+    assert fake_llm.calls and fake_llm.calls[0]["think"] is True
 
     # Determinism: run again -> identical deterministic payload (AI text aside).
     res2 = await _run_chat(async_client, "run dfos pass strain, influence line at 0.1 m")

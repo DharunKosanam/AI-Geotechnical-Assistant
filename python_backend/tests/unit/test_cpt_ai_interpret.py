@@ -79,7 +79,7 @@ async def test_prompt_sent_to_model_contains_summary_and_grounding(results):
     await interpret_sounding(results, client=fake)
     assert len(fake.calls) == 1
     call = fake.calls[0]
-    assert call["think"] is False  # raw client honours think=False
+    assert call["think"] is True  # prose path: think=True keeps qwen3 reasoning out of content
     sent = "\n".join(m["content"] for m in call["messages"])
     # Layer summary present in what the model actually received...
     assert "LAYERS (top to bottom):" in sent

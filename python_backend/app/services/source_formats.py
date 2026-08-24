@@ -179,7 +179,7 @@ async def _generate(
                 resp = await client.chat(
                     model=config.OLLAMA_MODEL,
                     messages=[{"role": "user", "content": prompt}],
-                    think=False,
+                    think=True,
                     options=options,
                 )
                 raw_parts.append(resp["message"]["content"] or "")
@@ -187,7 +187,7 @@ async def _generate(
                 stream = await client.chat(
                     model=config.OLLAMA_MODEL,
                     messages=[{"role": "user", "content": prompt}],
-                    think=False,
+                    think=True,
                     options=options,
                     stream=True,
                 )
@@ -238,7 +238,7 @@ async def _generate(
             resp = await retry.chat(
                 model=config.OLLAMA_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                think=False,
+                think=True,
                 options=options,
             )
             raw_answer = resp["message"]["content"] or ""

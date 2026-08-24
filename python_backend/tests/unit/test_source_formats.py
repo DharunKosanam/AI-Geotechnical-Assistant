@@ -331,13 +331,13 @@ class _FakeOllamaClient:
 
 
 @pytest.mark.asyncio
-async def test_generate_passes_think_false_and_sized_ctx(monkeypatch):
+async def test_generate_passes_think_true_and_sized_ctx(monkeypatch):
     _FakeOllamaClient.recorded = []
     monkeypatch.setattr(source_formats.ollama, "AsyncClient", _FakeOllamaClient)
     big_prompt = "x" * 320_000
     await source_formats._generate(big_prompt, 2048)
     call = _FakeOllamaClient.recorded[0]
-    assert call["think"] is False
+    assert call["think"] is True
     assert call["options"]["num_ctx"] > config.OLLAMA_NUM_CTX
     assert call["options"]["num_predict"] == 2048
 
@@ -363,7 +363,7 @@ async def test_format_ctx_raise_never_leaks_into_chat_call(monkeypatch):
     assert fmt_call["options"]["num_ctx"] > config.OLLAMA_NUM_CTX
     assert chat_call["options"]["num_ctx"] == config.OLLAMA_NUM_CTX
     assert chat_call["options"] == llm_service._ollama_options()
-    assert chat_call["think"] is False
+    assert chat_call["think"] is True
     # And the config constant itself never moved.
     assert config.OLLAMA_NUM_CTX == int(
         __import__("os").getenv("OLLAMA_NUM_CTX", "12288")

@@ -122,7 +122,7 @@ async def answer_question(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        think=False,
+        think=True,
         options={
             "num_ctx": config.OLLAMA_NUM_CTX,
             "num_predict": config.OLLAMA_NUM_PREDICT,

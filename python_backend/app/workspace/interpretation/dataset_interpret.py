@@ -62,7 +62,7 @@ async def interpret_dataset_result(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_prompt(payload)},
         ],
-        think=False,
+        think=True,
         options={
             "num_ctx": config.OLLAMA_NUM_CTX,
             "num_predict": min(int(config.OLLAMA_NUM_PREDICT), 700),

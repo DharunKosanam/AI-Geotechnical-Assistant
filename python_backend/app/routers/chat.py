@@ -593,7 +593,7 @@ async def _run_chat_turn(
                 history=conversation_history,
                 thread_has_attachments=thread_has_attachments,
             )
-            print(f"[ROUTER] Classified mode: {mode} (attachments={thread_has_attachments})")
+            print(f"[ROUTER] Classified mode: {mode} (attachments={thread_has_attachments}) userId={current_user.id} query={payload.query[:60]!a}")
 
             # Live-inventory turns (INVENTORY_ENABLED only): the answer
             # embeds inventory state that changes between turns, so these are

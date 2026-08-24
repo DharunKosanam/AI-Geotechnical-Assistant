@@ -21,7 +21,7 @@ from app.core.config import (
     OLLAMA_REWRITE_TIMEOUT,
     OLLAMA_TEMPERATURE,
 )
-from app.services.intent_router import GENERAL, KB_QUERY
+from app.services.intent_router import GENERAL, INVENTORY, KB_QUERY
 from app.services.prompt_config import get_system_prompt
 
 # Load environment variables
@@ -155,9 +155,16 @@ def _build_answer_prompt(
 
     # Format context section. GENERAL answers from the model's own knowledge with
     # no documents, so there is no context block at all (and no misleading "no
-    # documents found" line). Every other mode keeps the original behavior.
+    # documents found" line). INVENTORY's context is the deterministic snapshot,
+    # not documents, so it gets its own header (mode unreachable with the flag
+    # off, so every other mode keeps the original behavior byte-identically).
     if mode == GENERAL:
         context_section = ""
+    elif mode == INVENTORY:
+        if context and context.strip():
+            context_section = f"\n\nLIVE INVENTORY SNAPSHOT:\n{context}\n"
+        else:
+            context_section = "\n\n[The inventory system returned no data]\n"
     elif context and context.strip():
         context_section = f"\n\nRELEVANT CONTEXT FROM DOCUMENTS:\n{context}\n"
     else:

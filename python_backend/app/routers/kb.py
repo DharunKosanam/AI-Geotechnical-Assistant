@@ -12,7 +12,7 @@ Two-phase, single endpoint:
     then ingest with provenance stamped on every chunk and return the batch id.
 
 HARD failures (format, size, pages, extraction quality, EXACT-hash duplicate)
-reject outright. SOFT flags (near-duplicate, off-topic, PII, non-English) are
+reject outright. SOFT flags (near-duplicate, off-topic, non-English) are
 returned for the student to acknowledge, never blocking.
 
 Gated behind ``KB_UPLOAD_ENABLED`` (off by default) -> 404 when disabled.
@@ -166,8 +166,7 @@ async def _prepare_kb_file(content: bytes, filename: str) -> Dict[str, Any]:
     relevance_cos, relevance_outlier = (None, False)
     if centroid:
         relevance_cos, relevance_outlier = val.relevance(first_emb, centroid)
-    pii = val.scan_pii(all_text)
-    pii_sensitive = val.sensitive_pii(pii)  # gating subset: student numbers + phones
+    # name redaction removed
     non_english, lang_note = val.detect_non_english(all_text)
 
     out.update({
@@ -176,7 +175,7 @@ async def _prepare_kb_file(content: bytes, filename: str) -> Dict[str, Any]:
         "all_text": all_text, "first_emb": first_emb,
         "near_dup": dedup.near_match, "near_cosine": dedup.near_cosine,
         "relevance_cos": relevance_cos, "relevance_outlier": relevance_outlier,
-        "pii": pii, "pii_sensitive": pii_sensitive, "non_english": non_english, "lang_note": lang_note,
+        "non_english": non_english, "lang_note": lang_note,
     })
     return out
 
@@ -303,10 +302,7 @@ async def kb_upload(
                 "message": (f"This doesn't look closely related to the geotechnical knowledge base "
                             f"(relevance {prep['relevance_cos']:.2f}). Add it anyway?"),
             })
-        if prep["pii_sensitive"]:
-            warnings.append({"kind": "pii",
-                             "message": f"Possible sensitive personal data detected ({', '.join(prep['pii_sensitive'].keys())}). Confirm it's okay to index.",
-                             "details": prep["pii_sensitive"]})
+        # name redaction removed
         if prep["non_english"]:
             warnings.append({"kind": "language",
                              "message": f"This may not be in English ({prep['lang_note']}). Add it anyway?"})
@@ -461,7 +457,7 @@ async def _acquire_ingest_slot(max_wait: float = 120.0) -> bool:
 
 
 async def _kb_bulk_task(tmp_dir, file_entries, project, doc_type, year,
-                        uploader_id, uploader_name, batch_id, acknowledged=frozenset()):
+                        uploader_id, uploader_name, batch_id):
     """Process a bulk batch SEQUENTIALLY with pacing. Each file goes through the
     shared _prepare_kb_file + _ingest_prepared_file path; the per-file outcome is
     written to the kb_batch doc's files[] so the panel shows live progress. The
@@ -480,10 +476,7 @@ async def _kb_bulk_task(tmp_dir, file_entries, project, doc_type, year,
                 if sr:
                     await _set_bulk_file(batch_id, idx, "skipped", reason=sr,
                                          extra=({"duplicateOf": prep.get("duplicate_of")} if sr == "duplicate" else None))
-                elif prep["pii_sensitive"] and "pii" not in acknowledged:
-                    # Sensitive PII (student number / phone) and not batch-acknowledged.
-                    # Emails are public author contact and never reach here.
-                    await _set_bulk_file(batch_id, idx, "skipped", reason="pii")
+                # name redaction removed
                 elif not val.reserve_hash(prep["content_hash"]):
                     await _set_bulk_file(batch_id, idx, "skipped", reason="duplicate")
                 else:
@@ -537,7 +530,6 @@ async def kb_bulk_upload(
     docType: str = Form(""),
     year: str = Form(""),
     permissionConfirmed: bool = Form(False),
-    acknowledge: str = Form(""),  # batch-level acks, e.g. "pii" to add sensitive-PII files
     current_user: User = Depends(rate_limit_identify),
 ):
     """Bulk multi-file KB upload. Shared metadata (project/docType/year/permission)
@@ -584,10 +576,9 @@ async def kb_bulk_upload(
         "total": len(files), "done": 0, "files": file_status,
         "createdAt": datetime.now(),
     })
-    acknowledged = {k.strip() for k in acknowledge.split(",") if k.strip()}
     background_tasks.add_task(
         _kb_bulk_task, tmp_dir, file_entries, project, docType, year,
-        str(current_user.id), uploader_name, batch_id, acknowledged,
+        str(current_user.id), uploader_name, batch_id,
     )
     return {"status": "queued", "batchId": batch_id, "total": len(files),
             "accepted": len(file_entries)}

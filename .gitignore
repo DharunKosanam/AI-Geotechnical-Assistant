@@ -48,3 +48,6 @@ python_backend/venv/
 python_backend/tests/fixtures/
 # Parsed instrument dataset artifacts (.npz + raw uploads), see INSTRUMENT_DATA_DIR
 python_backend/data/instrument_datasets/
+
+# env backups (deploy script + manual copies) — never commit credentials
+python_backend/.env.bak*

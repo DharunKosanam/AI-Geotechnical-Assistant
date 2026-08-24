@@ -779,6 +779,31 @@ WEB_INGEST_TIMEOUT_SECONDS = float(os.getenv("WEB_INGEST_TIMEOUT_SECONDS", "15")
 WEB_INGEST_MAX_BYTES = int(os.getenv("WEB_INGEST_MAX_BYTES", str(10 * 1024 * 1024)))
 WEB_INGEST_MAX_REDIRECTS = int(os.getenv("WEB_INGEST_MAX_REDIRECTS", "5"))
 
+# ---------------------------------------------------------------------------
+# Lab inventory (equipment / consumables / PLAXIS seats) feature flag
+# ---------------------------------------------------------------------------
+# Master switch for the lab-inventory feature: the /api/inventory/* endpoints
+# are registered ONLY when this is on (highlights pattern — off means absent,
+# not present-and-404ing), the router prompt gains the INVENTORY mode rule
+# only when on, and _parse_mode rejects an INVENTORY label when off. Default
+# OFF: router prompt, route table and chat behavior are byte-identical to
+# before the feature existed. Read at call time (config.INVENTORY_ENABLED) so
+# tests can toggle it without re-import. Accepts 1/true/yes/on
+# (case-insensitive).
+INVENTORY_ENABLED = os.getenv("INVENTORY_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Ceiling for the deterministic inventory snapshot handed to the answer LLM,
+# in estimated tokens (len//4, the same heuristic as the chat history cap).
+# When the snapshot would exceed it, whole SECTIONS are dropped by priority
+# (alerts and open loans survive longest) and then whole ROWS — never a
+# partial row — and the omissions are named in the deterministic scope note.
+INVENTORY_SNAPSHOT_TOKEN_CAP = int(os.getenv("INVENTORY_SNAPSHOT_TOKEN_CAP", "4000"))
+
 # CORS Origins. NOTE: no "*" wildcard here. The frontend sends credentials (the
 # httpOnly access_token cookie), and the CORS spec forbids pairing
 # Access-Control-Allow-Credentials: true with a "*" origin -- browsers reject

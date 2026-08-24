@@ -8,7 +8,7 @@ Phase 4 endpoint orchestrates them.
 Policy (owner-confirmed):
   HARD reject : extraction-quality gate (chars/page + min content), size/page
                 caps, EXACT normalized-text hash duplicate.
-  SOFT flag   : near-duplicate (embedding cosine), off-topic (relevance), PII,
+  SOFT flag   : near-duplicate (embedding cosine), off-topic (relevance),
                 non-English. These require the student to confirm, never block.
 """
 import hashlib
@@ -95,47 +95,9 @@ def check_pages(npages: int) -> Tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Soft flags: PII + language
+# Soft flags: language
 # ---------------------------------------------------------------------------
-_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-# North-American-style phone numbers; deliberately conservative to limit noise.
-_PHONE = re.compile(r"(?<!\d)(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)")
-# Student identifiers, PRECISE so we don't flag DOIs / grant / ISBN numbers that
-# fill academic papers: the UVic V-number, plus a bare 8-9 digit run ONLY when a
-# student/SIN/ID keyword sits just before it.
-_VNUMBER = re.compile(r"\b[Vv]\d{8}\b")
-_CONTEXT_ID = re.compile(
-    r"(?i)\b(?:student\s*(?:number|no\.?|id)|s\.?\s*i\.?\s*n\.?|social\s+insurance(?:\s+number)?|id\s*(?:number|no\.?))\b"
-    r"[^0-9\n]{0,15}(\d{8,9})\b"
-)
-
-# Kinds that GATE an upload. Emails are public author-contact info in published
-# papers — detected (`emails`) but NON-gating; see sensitive_pii().
-SENSITIVE_PII_KINDS = ("student_numbers", "phones")
-
-
-def scan_pii(text: str) -> Dict[str, List[str]]:
-    """Regex scan for personal data. Returns {kind: [samples]} for anything found
-    (capped). Empty dict == clean. `emails` is informational; the GATING subset is
-    `sensitive_pii()` (student numbers + phones)."""
-    found: Dict[str, List[str]] = {}
-    emails = sorted(set(_EMAIL.findall(text)))
-    phones = sorted(set(_PHONE.findall(text)))
-    ids = sorted(set(_VNUMBER.findall(text)) | set(_CONTEXT_ID.findall(text)))
-    if emails:
-        found["emails"] = emails[:10]
-    if phones:
-        found["phones"] = phones[:10]
-    if ids:
-        found["student_numbers"] = ids[:10]
-    return found
-
-
-def sensitive_pii(found: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    """The subset of scan_pii that GATES an upload — student numbers + phone
-    numbers. Author-contact emails in published papers do not gate."""
-    return {k: v for k, v in found.items() if k in SENSITIVE_PII_KINDS}
-
+# name redaction removed
 
 _ENGLISH_STOP = frozenset(
     "the and of to in is that for with as are was this by be on an at or from it".split()

@@ -255,7 +255,13 @@ async def test_live_classification_golden(message, attachments, expected):
 # --- WEB_INGEST_ENABLED prompt gate (web link ingestion) ----------------------
 def test_system_prompt_unchanged_when_web_ingest_off(monkeypatch):
     from app.core import config
+    # Pin EVERY prompt-extra flag off: config reads the developer's .env, so a
+    # byte-identity assert that pins only one flag breaks the moment another
+    # flag is enabled locally (this happened when .env gained
+    # ROUTER_UNCERTAIN_RETRIEVES=true).
     monkeypatch.setattr(config, "WEB_INGEST_ENABLED", False)
+    monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", False)
+    monkeypatch.setattr(config, "INVENTORY_ENABLED", False)
     assert ir._system_prompt() == ir.ROUTER_SYSTEM_PROMPT
 
 
@@ -280,6 +286,7 @@ def test_system_prompt_byte_identical_both_flags_off(monkeypatch):
     from app.core import config
     monkeypatch.setattr(config, "WEB_INGEST_ENABLED", False)
     monkeypatch.setattr(config, "ROUTER_UNCERTAIN_RETRIEVES", False)
+    monkeypatch.setattr(config, "INVENTORY_ENABLED", False)
     assert ir._system_prompt() == ir.ROUTER_SYSTEM_PROMPT
 
 

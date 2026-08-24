@@ -39,10 +39,17 @@ from app.services.intent_router import (
     classify,
     classify_thread_doc_scope,
     DOC_LEVEL,
+    INVENTORY,
     KB_QUERY,
     GENERAL,
     MIXED,
     THREAD_DOC,
+)
+from app.services.inventory_service import (
+    build_inventory_snapshot_result,
+    infer_inventory_scope,
+    prepare_inventory_context,
+    query_mentions_inventory,
 )
 from app.services.mode_handlers import handle_general, handle_kb_fallback, handle_thread_doc_fallback
 from app.services.prompt_config import FORMAT_PROMPTS
@@ -588,6 +595,16 @@ async def _run_chat_turn(
             )
             print(f"[ROUTER] Classified mode: {mode} (attachments={thread_has_attachments})")
 
+            # Live-inventory turns (INVENTORY_ENABLED only): the answer
+            # embeds inventory state that changes between turns, so these are
+            # exempt from the answer cache entirely — no read here, no write
+            # at Step 5. Deterministic decision (mode / keyword membership),
+            # never model prose. False on every path when the flag is off.
+            inventory_live_turn = config.INVENTORY_ENABLED and (
+                mode == INVENTORY
+                or (mode == MIXED and query_mentions_inventory(payload.query))
+            )
+
             # Deferred, mode-scoped cache read (router ON). The key carries the
             # mode so a KB_QUERY answer can't be served for a GENERAL turn; a
             # THREAD_DOC key additionally carries the thread id (a deleted-and-
@@ -596,7 +613,7 @@ async def _run_chat_turn(
             # answer -- and its scope note naming the old document set -- can
             # never be served). The write at Step 5 uses this same key.
             cache_query = _mode_cache_key(cache_query, mode, thread_id, thread_doc_fp)
-            if redis_client is not None:
+            if redis_client is not None and not inventory_live_turn:
                 cached_response = await _serve_cached_response(
                     redis_client, cache_query, thread_id, current_user.id, payload.query
                 )
@@ -607,6 +624,7 @@ async def _run_chat_turn(
             # Defensive: THREAD_DOC (the only consumer) is unreachable with the
             # router off, but keep the name bound on every path.
             thread_doc_states: List[Dict] = []
+            inventory_live_turn = False
 
         if mode == GENERAL:
             # GENERAL: no rewrite, no retrieval, no citations. Answer straight
@@ -620,6 +638,29 @@ async def _run_chat_turn(
             clean_answer = general_result.answer
             sources = general_result.sources
             no_high_confidence_sources = general_result.no_high_confidence_sources
+        elif mode == INVENTORY:
+            # INVENTORY (INVENTORY_ENABLED only — _parse_mode rejects the
+            # label otherwise): live lab state. Retrieval AND reranking are
+            # skipped entirely — no FastEmbed call, no cross-encoder — the
+            # same routing-away principle as the instrument parsers. The
+            # context is the deterministic snapshot (plus the feasibility
+            # engine's report when the message asks to book a window); the
+            # model narrates it and never does the arithmetic. No citations,
+            # and the deterministic scope note (timestamp + sections
+            # included) is appended below from serializer output, never from
+            # model prose. Cache is skipped both ways (inventory_live_turn).
+            print("[ROUTER] INVENTORY mode - deterministic snapshot, skipping retrieval and rerank")
+            inv_context, inv_scope_note = await prepare_inventory_context(payload.query)
+            answer = await generate_answer_with_groq(
+                query=payload.query,
+                context=inv_context,
+                history=conversation_history,
+                mode=INVENTORY,
+                emit=emit,
+            )
+            clean_answer = f"{answer}\n\n{inv_scope_note}" if inv_scope_note else answer
+            sources = []
+            no_high_confidence_sources = False
         else:
             # Step 1.5: Query rewrite — history-aware resolution + language
             # normalization. Vague follow-ups ("ok", "how does it differ") retrieve
@@ -638,6 +679,7 @@ async def _run_chat_turn(
             # ranked search are skipped entirely and a structured sample of
             # the document(s) is read instead. Router-on only by construction
             # (mode can only be THREAD_DOC when ROUTER_ENABLED).
+            mixed_inv_note = ""  # set only on a MIXED turn that got the snapshot
             doc_level = False
             if mode == THREAD_DOC:
                 doc_level = (
@@ -838,6 +880,21 @@ async def _run_chat_turn(
                 sources = []
                 print("   [WARNING]  No relevant chunks found")
 
+            # MIXED + inventory (INVENTORY_ENABLED only): a MIXED turn whose
+            # query touches inventory state (deterministic keyword membership,
+            # see query_mentions_inventory) gets the snapshot APPENDED to the
+            # retrieved context — never replacing it — so the blend prompt can
+            # draw on lab documents and live inventory together. Its scope
+            # note is appended to the answer below from serializer output.
+            if inventory_live_turn and mode == MIXED:
+                snap = await build_inventory_snapshot_result(
+                    infer_inventory_scope(payload.query)
+                )
+                inv_block = f"LIVE INVENTORY SNAPSHOT:\n{snap.text}"
+                context = f"{context}\n\n{inv_block}" if context else inv_block
+                mixed_inv_note = snap.scope_note()
+                print(f"[ROUTER] MIXED + inventory - snapshot appended (~{snap.token_estimate} tokens)")
+
             # Retrieval-confidence fallback (router ON only): retrieval RAN and
             # no chunk cleared the reranker threshold, so answer from the model's
             # own knowledge (GENERAL, no citations) instead of a low-confidence /
@@ -857,6 +914,12 @@ async def _run_chat_turn(
                 config.ROUTER_ENABLED
                 and not skip_retrieval
                 and not retrieval_had_high_confidence
+                # A MIXED turn that got the snapshot has real deterministic
+                # context even when every retrieved chunk is low-confidence:
+                # falling through to the no-context fallback would drop the
+                # inventory facts (and falsify the appended scope note), so
+                # the MIXED prompt runs instead. Flag-off: never True.
+                and not (inventory_live_turn and mode == MIXED)
             )
 
             # Phase 1: a THREAD_DOC turn whose thread has NO searchable content
@@ -1024,6 +1087,14 @@ async def _run_chat_turn(
                 if scope_note:
                     clean_answer = f"{clean_answer}\n\n{scope_note}"
 
+            # MIXED-with-snapshot: the deterministic inventory scope note
+            # (timestamp + sections included), same placement contract as the
+            # THREAD_DOC note — appended BEFORE persistence so the thread
+            # history carries it too. INVENTORY turns append theirs in their
+            # own branch above.
+            if mixed_inv_note:
+                clean_answer = f"{clean_answer}\n\n{mixed_inv_note}"
+
         print(f"    Final answer to return ({len(clean_answer)} chars)")
         
         # Step 4: Save messages to database for history
@@ -1062,8 +1133,9 @@ async def _run_chat_turn(
         else:
             print("[SKIP] Not saving messages - no threadId provided")
         
-        # Step 5: Cache the answer (skip if Redis unavailable)
-        if redis_client:
+        # Step 5: Cache the answer (skip if Redis unavailable; live-inventory
+        # turns are never cached — their state changes between turns)
+        if redis_client and not inventory_live_turn:
             try:
                 await redis_client.set_cached_answer(cache_query, clean_answer, sources=sources, ttl=3600)
             except Exception as cache_error:

@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Layers, MessageSquare, Compass, Library, PanelLeft } from "lucide-react";
+import { Layers, MessageSquare, Compass, Library, Package, PanelLeft } from "lucide-react";
 import AccountMenu from "./account-menu";
 import styles from "./header.module.css";
 
@@ -27,6 +27,7 @@ const Header = ({ sidebarCollapsed, onToggleSidebar }: HeaderProps) => {
   const pathname = usePathname();
   const [workspaceEnabled, setWorkspaceEnabled] = useState(false);
   const [kbEnabled, setKbEnabled] = useState(false);
+  const [inventoryEnabled, setInventoryEnabled] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -41,6 +42,9 @@ const Header = ({ sidebarCollapsed, onToggleSidebar }: HeaderProps) => {
         });
     ask("/api/workspace/status", setWorkspaceEnabled);
     ask("/api/kb/status", setKbEnabled);
+    // INVENTORY_ENABLED off = router absent = 404, which ask() reads as
+    // disabled — the tab is simply hidden, nothing crashes or hangs.
+    ask("/api/inventory/status", setInventoryEnabled);
     return () => {
       active = false;
     };
@@ -48,7 +52,8 @@ const Header = ({ sidebarCollapsed, onToggleSidebar }: HeaderProps) => {
 
   const onWorkspace = pathname?.startsWith("/workspace") ?? false;
   const onKb = pathname?.startsWith("/knowledge-base") ?? false;
-  const onChat = !onWorkspace && !onKb;
+  const onInventory = pathname?.startsWith("/inventory") ?? false;
+  const onChat = !onWorkspace && !onKb && !onInventory;
 
   return (
     <header className={styles.header}>
@@ -72,7 +77,7 @@ const Header = ({ sidebarCollapsed, onToggleSidebar }: HeaderProps) => {
         )}
       </div>
 
-      {(workspaceEnabled || kbEnabled) && (
+      {(workspaceEnabled || kbEnabled || inventoryEnabled) && (
         <nav className={styles.toggle} aria-label="Section switch">
           <Link
             href="/"
@@ -100,6 +105,16 @@ const Header = ({ sidebarCollapsed, onToggleSidebar }: HeaderProps) => {
             >
               <Library size={14} strokeWidth={1.5} />
               <span className={styles.segmentLabel}>Knowledge Base</span>
+            </Link>
+          )}
+          {inventoryEnabled && (
+            <Link
+              href="/inventory"
+              className={`${styles.segment} ${onInventory ? styles.segmentActive : ""}`}
+              aria-current={onInventory ? "page" : undefined}
+            >
+              <Package size={14} strokeWidth={1.5} />
+              <span className={styles.segmentLabel}>Inventory</span>
             </Link>
           )}
         </nav>

@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from app.core.config import CORS_ORIGINS
 from app.core.database import close_mongo_connection, ensure_indexes
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
-from app.routers import chat, threads, files, auth, health, kb, kb_web, highlights
+from app.routers import chat, threads, files, auth, health, inventory, kb, kb_web, highlights
 from app.workspace.routes import router as workspace_router
 from app.workspace import dataset_routes as workspace_dataset_routes
 
@@ -61,6 +61,9 @@ workspace_dataset_routes.register(app)
 # KB web-page ingestion by pasted URL. Same contract: routes included ONLY
 # when WEB_INGEST_ENABLED is on; off = absent, route table unchanged.
 kb_web.register(app)
+# Lab inventory CRUD. Same contract: routes included ONLY when
+# INVENTORY_ENABLED is on; off = absent, route table unchanged.
+inventory.register(app)
 
 
 @app.get("/")

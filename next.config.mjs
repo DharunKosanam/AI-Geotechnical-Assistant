@@ -25,6 +25,10 @@ const nextConfig = {
         // Route Handler (long-timeout upload) wins; everything else (e.g.
         // GET /api/workspace/status) proxies straight to FastAPI.
         { source: '/api/workspace/:path*', destination: `${PYTHON_API_URL}/api/workspace/:path*` },
+        // Lab inventory (INVENTORY_ENABLED). Fast CRUD only — the plain
+        // rewrite is fine; with the flag off FastAPI has no such routes and
+        // the probe's 404 hides the tab.
+        { source: '/api/inventory/:path*', destination: `${PYTHON_API_URL}/api/inventory/:path*` },
         // /api/kb/* is handled by the dedicated long-timeout Route Handler
         // (app/api/kb/[...path]/route.ts), NOT this rewrite — the preflight + bulk
         // submission exceed the rewrite's short socket timeout.

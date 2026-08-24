@@ -23,7 +23,6 @@ const SKIP_LABELS: Record<string, string> = {
   duplicate: "already in the KB",
   scanned: "scanned / no text",
   unsupported: "unsupported type",
-  pii: "possible student/phone data",
   too_large: "too large",
 };
 
@@ -318,41 +317,7 @@ const KbUpload = () => {
     pollRef.current = setInterval(tick, 2000);
   };
 
-  // Re-submit just the sensitive-PII-skipped files with a batch acknowledgement.
-  const resubmitPii = async () => {
-    const toResubmit: File[] = (bulkBatch?.files || [])
-      .map((f: BulkFileStatus, i: number) => (f.status === "skipped" && f.reason === "pii" ? bulkFiles[i] : null))
-      .filter((x: File | null): x is File => !!x);
-    if (toResubmit.length === 0) return;
-    setPhase("submitting");
-    setError("");
-    const data = new FormData();
-    toResubmit.forEach((f) => data.append("files", f));
-    data.append("project", project.trim());
-    data.append("docType", docType.trim());
-    data.append("year", year.trim());
-    data.append("permissionConfirmed", permission ? "true" : "false");
-    data.append("acknowledge", "pii");
-    try {
-      const r = await fetch(API_ENDPOINTS.kbBulkUpload(), { method: "POST", credentials: "include", body: data });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setError(body.detail || `Upload failed (${r.status})`);
-        setPhase("error");
-        return;
-      }
-      setBulkFiles(toResubmit);
-      setBulkBatch({
-        status: "processing", total: body.total, done: 0,
-        files: toResubmit.map((f) => ({ filename: f.name, status: "queued" })),
-      });
-      startBulkPoll(body.batchId);
-      setPhase("bulkindexing");
-    } catch (e: any) {
-      setError(e?.message || "Upload failed");
-      setPhase("error");
-    }
-  };
+  // name redaction removed
 
   return (
     <div className={styles.container}>
@@ -568,11 +533,7 @@ const KbUpload = () => {
               <p className={styles.sub}>You can close this tab — indexing continues, and your uploads appear below.</p>
             ) : (
               <div className={styles.actions}>
-                {(bulkBatch.files || []).some((f: BulkFileStatus) => f.status === "skipped" && f.reason === "pii") && (
-                  <button type="button" className={styles.secondary} onClick={resubmitPii}>
-                    Add {(bulkBatch.files || []).filter((f: BulkFileStatus) => f.status === "skipped" && f.reason === "pii").length} flagged file(s) anyway
-                  </button>
-                )}
+                {/* name redaction removed */}
                 <button type="button" className={styles.primary} onClick={reset}>
                   <RotateCcw size={15} /> Upload more
                 </button>

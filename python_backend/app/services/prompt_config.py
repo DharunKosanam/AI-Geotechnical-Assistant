@@ -16,6 +16,8 @@ model -- only English instructions the answer LLM follows).
                 which claims came from lab documents (only those are cited).
   THREAD_DOC -- answer about a document the user uploaded into this thread;
                 citations refer to that uploaded document.
+  INVENTORY  -- (INVENTORY_ENABLED only) narrate the deterministic lab
+                inventory snapshot; no citations, no arithmetic of its own.
 
 Keys are the mode constants from intent_router, so the prompt map and the
 router's output vocabulary can never drift apart.
@@ -23,7 +25,7 @@ router's output vocabulary can never drift apart.
 
 from __future__ import annotations
 
-from app.services.intent_router import GENERAL, KB_QUERY, MIXED, THREAD_DOC, VALID_MODES
+from app.services.intent_router import GENERAL, INVENTORY, KB_QUERY, MIXED, THREAD_DOC, VALID_MODES
 
 # ---------------------------------------------------------------------------
 # KB_QUERY -- EXACT copy of the prompt previously inlined in
@@ -279,6 +281,31 @@ DOCUMENT TYPE: KEY TERMS GLOSSARY. Structure: an alphabetized list of the import
 }
 
 
+# ---------------------------------------------------------------------------
+# INVENTORY -- the context is a deterministic snapshot of the lab inventory
+# system (pipe-delimited tables built in Python), optionally followed by a
+# FEASIBILITY CHECK block computed by the feasibility engine. The model
+# narrates that state; it never computes availability itself (AI routes,
+# Python calculates). Mode only reachable when INVENTORY_ENABLED is on.
+# ---------------------------------------------------------------------------
+INVENTORY_PROMPT = """You are the lab assistant for a geotechnical research lab, answering questions about the lab's equipment inventory, loans, reservations, and PLAXIS software seats.
+
+The context below is a LIVE INVENTORY SNAPSHOT: pipe-delimited tables (ITEMS, OPEN LOANS, RESERVATIONS, PLAXIS SEATS, ALERTS) generated directly from the inventory database. It may be followed by a FEASIBILITY CHECK block computed by the booking engine.
+
+Rules — these are important:
+- Answer ONLY from the snapshot (and the FEASIBILITY CHECK block when present). Do NOT invent items, people, quantities, or dates that are not in it.
+- Do NOT recompute availability, overlaps, or shortfalls yourself. When a FEASIBILITY CHECK block is present, its per-item statuses, VERDICT and EARLIEST FULL AVAILABILITY are authoritative — restate them faithfully.
+- If the snapshot does not contain what the user asked about, say so plainly (the item may not be tracked, or that section may have been omitted for length — the note under the answer says which sections were included).
+- Use people's names and emails as they appear in the snapshot when answering "who has it" questions.
+- Be concise but thorough.
+- Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points.
+- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
+- If you use a table: put a blank line before it, include a proper header row and separator row (e.g. |---|---|), and put NO math/LaTeX inside cells — write any math in the surrounding prose or spell values out plainly in the cells.
+- Do NOT add a "Sources" or "References" section at the end of your response.
+
+CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
+
+
 # Mode -> system prompt. Keyed by the router's mode constants so a missing or
 # renamed mode is caught immediately (test asserts keys == VALID_MODES).
 SYSTEM_PROMPTS = {
@@ -286,6 +313,7 @@ SYSTEM_PROMPTS = {
     GENERAL: GENERAL_PROMPT,
     MIXED: MIXED_PROMPT,
     THREAD_DOC: THREAD_DOC_PROMPT,
+    INVENTORY: INVENTORY_PROMPT,
 }
 
 # Compile-time guard: every valid mode must have a prompt and vice versa.

@@ -174,13 +174,27 @@ def _system_prompt() -> str:
     if config.INVENTORY_ENABLED:
         extras.append(
             'You may also output {"mode": "INVENTORY"} for questions about '
-            "the lab's CURRENT inventory state: what equipment, consumables "
-            "or software the lab owns; who has an item checked out; what is "
-            "available right now; overdue loans; stock levels; maintenance or "
-            "calibration due; reservations; PLAXIS seats; or whether a set of "
-            "equipment can be booked for a time window. These are answered "
-            "from the live inventory system, not documents. A question that "
-            "needs BOTH lab documents AND inventory state stays MIXED."
+            "the lab's CURRENT inventory state: whether and how many of an "
+            "item the lab holds right now (equipment, consumables, software); "
+            "who has an item checked out; what is available right now; "
+            "overdue loans; stock levels; maintenance or calibration due; "
+            "reservations; PLAXIS seats; or whether a set of equipment can "
+            "be booked for a time window. These are answered from the live "
+            "inventory system, not documents. INVENTORY is about the lab's "
+            "PRESENT state, never about purchase or transaction records: the "
+            "knowledge base holds procurement documents (quotations, "
+            "invoices, order confirmations) for the same equipment the "
+            "inventory tracks, so a question about purchase price, what was "
+            "quoted, the vendor, order or invoice dates, PO numbers, quoted "
+            "specifications, warranty or delivery terms is KB_QUERY even "
+            'when it names equipment the lab owns. For example: "Who has '
+            'the DFOS strain sensor checked out?" and "How many shear vanes '
+            'do we have in stock?" are INVENTORY, but "What did we pay for '
+            'the DFOS strain sensors?" and "Which vendor quoted the shear '
+            'vane and when was it ordered?" are KB_QUERY. When torn between '
+            "INVENTORY and KB_QUERY or MIXED, do not choose INVENTORY. A "
+            "question that needs BOTH lab documents AND inventory state "
+            "stays MIXED."
         )
     prompt = ROUTER_SYSTEM_PROMPT
     for i, body in enumerate(extras, start=5):

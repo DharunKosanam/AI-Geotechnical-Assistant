@@ -39,12 +39,19 @@ from app.services.intent_router import (
     classify,
     classify_thread_doc_scope,
     DOC_LEVEL,
+    INVENTORY,
     KB_QUERY,
     GENERAL,
     MIXED,
     THREAD_DOC,
 )
-from app.services.mode_handlers import handle_general, handle_thread_doc_fallback
+from app.services.inventory_service import (
+    build_inventory_snapshot_result,
+    infer_inventory_scope,
+    prepare_inventory_context,
+    query_mentions_inventory,
+)
+from app.services.mode_handlers import handle_general, handle_kb_fallback, handle_thread_doc_fallback
 from app.services.prompt_config import FORMAT_PROMPTS
 from app.services.source_formats import generate_format_document
 from pydantic import BaseModel
@@ -586,7 +593,17 @@ async def _run_chat_turn(
                 history=conversation_history,
                 thread_has_attachments=thread_has_attachments,
             )
-            print(f"[ROUTER] Classified mode: {mode} (attachments={thread_has_attachments})")
+            print(f"[ROUTER] Classified mode: {mode} (attachments={thread_has_attachments}) userId={current_user.id} query={payload.query[:60]!a}")
+
+            # Live-inventory turns (INVENTORY_ENABLED only): the answer
+            # embeds inventory state that changes between turns, so these are
+            # exempt from the answer cache entirely — no read here, no write
+            # at Step 5. Deterministic decision (mode / keyword membership),
+            # never model prose. False on every path when the flag is off.
+            inventory_live_turn = config.INVENTORY_ENABLED and (
+                mode == INVENTORY
+                or (mode == MIXED and query_mentions_inventory(payload.query))
+            )
 
             # Deferred, mode-scoped cache read (router ON). The key carries the
             # mode so a KB_QUERY answer can't be served for a GENERAL turn; a
@@ -596,7 +613,7 @@ async def _run_chat_turn(
             # answer -- and its scope note naming the old document set -- can
             # never be served). The write at Step 5 uses this same key.
             cache_query = _mode_cache_key(cache_query, mode, thread_id, thread_doc_fp)
-            if redis_client is not None:
+            if redis_client is not None and not inventory_live_turn:
                 cached_response = await _serve_cached_response(
                     redis_client, cache_query, thread_id, current_user.id, payload.query
                 )
@@ -607,6 +624,7 @@ async def _run_chat_turn(
             # Defensive: THREAD_DOC (the only consumer) is unreachable with the
             # router off, but keep the name bound on every path.
             thread_doc_states: List[Dict] = []
+            inventory_live_turn = False
 
         if mode == GENERAL:
             # GENERAL: no rewrite, no retrieval, no citations. Answer straight
@@ -620,6 +638,29 @@ async def _run_chat_turn(
             clean_answer = general_result.answer
             sources = general_result.sources
             no_high_confidence_sources = general_result.no_high_confidence_sources
+        elif mode == INVENTORY:
+            # INVENTORY (INVENTORY_ENABLED only — _parse_mode rejects the
+            # label otherwise): live lab state. Retrieval AND reranking are
+            # skipped entirely — no FastEmbed call, no cross-encoder — the
+            # same routing-away principle as the instrument parsers. The
+            # context is the deterministic snapshot (plus the feasibility
+            # engine's report when the message asks to book a window); the
+            # model narrates it and never does the arithmetic. No citations,
+            # and the deterministic scope note (timestamp + sections
+            # included) is appended below from serializer output, never from
+            # model prose. Cache is skipped both ways (inventory_live_turn).
+            print("[ROUTER] INVENTORY mode - deterministic snapshot, skipping retrieval and rerank")
+            inv_context, inv_scope_note = await prepare_inventory_context(payload.query)
+            answer = await generate_answer_with_groq(
+                query=payload.query,
+                context=inv_context,
+                history=conversation_history,
+                mode=INVENTORY,
+                emit=emit,
+            )
+            clean_answer = f"{answer}\n\n{inv_scope_note}" if inv_scope_note else answer
+            sources = []
+            no_high_confidence_sources = False
         else:
             # Step 1.5: Query rewrite — history-aware resolution + language
             # normalization. Vague follow-ups ("ok", "how does it differ") retrieve
@@ -638,6 +679,7 @@ async def _run_chat_turn(
             # ranked search are skipped entirely and a structured sample of
             # the document(s) is read instead. Router-on only by construction
             # (mode can only be THREAD_DOC when ROUTER_ENABLED).
+            mixed_inv_note = ""  # set only on a MIXED turn that got the snapshot
             doc_level = False
             if mode == THREAD_DOC:
                 doc_level = (
@@ -753,6 +795,29 @@ async def _run_chat_turn(
                         )
                         if chunk.get("pageStart") is not None:
                             vp.add(chunk["pageStart"])
+                # Web-sourced chunks (KB web ingestion): their filename IS the
+                # canonical URL (the retrieval projection carries no web fields
+                # and retrieval is off-limits), so the fetch date comes from
+                # the kb_batch provenance docs in ONE query. sort=fetchedAt so
+                # after a refresh the LATEST batch's date wins. An empty
+                # candidate set means zero extra queries — a turn with no web
+                # chunk (and any flag-off deployment) is byte-identical.
+                web_fetch_dates: dict[str, str] = {}
+                web_candidates = {
+                    str(chunk.get("filename"))
+                    for chunk in chunks
+                    if not chunk.get("low_confidence")
+                    and str(chunk.get("filename", "")).startswith(("http://", "https://"))
+                }
+                if web_candidates:
+                    async for wdoc in files_collection.find(
+                        {"docType": "kb_batch", "canonicalUrl": {"$in": sorted(web_candidates)}},
+                        {"canonicalUrl": 1, "fetchedAt": 1},
+                    ).sort("fetchedAt", 1):
+                        fa = wdoc.get("fetchedAt")
+                        web_fetch_dates[wdoc["canonicalUrl"]] = (
+                            fa.isoformat() if hasattr(fa, "isoformat") else fa
+                        )
                 seen_titles: set[str] = set()
                 sources: list[dict] = []
                 for chunk in chunks:
@@ -788,6 +853,18 @@ async def _run_chat_turn(
                         "project": chunk.get("projectTag"),
                         "version": chunk.get("version"),
                     }
+                    # Web page citation: link the LIVE page and stamp the fetch
+                    # date — assembled deterministically from retrieval results
+                    # + stored provenance, never from model prose. Only web
+                    # chunks get these keys (and the url/title overrides);
+                    # every other source entry is byte-identical to before.
+                    web_fn = str(chunk.get("filename", ""))
+                    if web_fn in web_fetch_dates:
+                        source_entry["title"] = chunk.get("canonicalTitle") or info["title"]
+                        source_entry["url"] = web_fn
+                        source_entry["sourceFormat"] = "web"
+                        source_entry["fileType"] = "web"
+                        source_entry["fetchedAt"] = web_fetch_dates[web_fn]
                     # Vision provenance on the citation itself. Added ONLY when
                     # vision content contributes, so sources for ordinary
                     # documents are byte-identical to before. Membership (not
@@ -802,6 +879,21 @@ async def _run_chat_turn(
                 context = ""
                 sources = []
                 print("   [WARNING]  No relevant chunks found")
+
+            # MIXED + inventory (INVENTORY_ENABLED only): a MIXED turn whose
+            # query touches inventory state (deterministic keyword membership,
+            # see query_mentions_inventory) gets the snapshot APPENDED to the
+            # retrieved context — never replacing it — so the blend prompt can
+            # draw on lab documents and live inventory together. Its scope
+            # note is appended to the answer below from serializer output.
+            if inventory_live_turn and mode == MIXED:
+                snap = await build_inventory_snapshot_result(
+                    infer_inventory_scope(payload.query)
+                )
+                inv_block = f"LIVE INVENTORY SNAPSHOT:\n{snap.text}"
+                context = f"{context}\n\n{inv_block}" if context else inv_block
+                mixed_inv_note = snap.scope_note()
+                print(f"[ROUTER] MIXED + inventory - snapshot appended (~{snap.token_estimate} tokens)")
 
             # Retrieval-confidence fallback (router ON only): retrieval RAN and
             # no chunk cleared the reranker threshold, so answer from the model's
@@ -822,6 +914,12 @@ async def _run_chat_turn(
                 config.ROUTER_ENABLED
                 and not skip_retrieval
                 and not retrieval_had_high_confidence
+                # A MIXED turn that got the snapshot has real deterministic
+                # context even when every retrieved chunk is low-confidence:
+                # falling through to the no-context fallback would drop the
+                # inventory facts (and falsify the appended scope note), so
+                # the MIXED prompt runs instead. Flag-off: never True.
+                and not (inventory_live_turn and mode == MIXED)
             )
 
             # Phase 1: a THREAD_DOC turn whose thread has NO searchable content
@@ -881,13 +979,35 @@ async def _run_chat_turn(
                         payload.query, conversation_history, emit=emit
                     )
                 else:
-                    print(
-                        "[ROUTER] KB retrieval returned no chunk above the reranker "
-                        "threshold - falling through to GENERAL (no citations)"
-                    )
-                    general_result = await handle_general(
-                        payload.query, conversation_history, emit=emit
-                    )
+                    # Documents WERE found (just below the reranker threshold):
+                    # answer with the honest KB fallback that names them and
+                    # never claims "no file access". An EMPTY retrieval means
+                    # nothing was found at all — GENERAL's wording is accurate
+                    # there and is kept exactly as before.
+                    found_titles: list[str] = []
+                    for c in chunks:
+                        t = (c.get("canonicalTitle")
+                             or get_clean_title(c.get("filename", ""))["title"])
+                        if t and t not in found_titles:
+                            found_titles.append(t)
+                    if found_titles:
+                        print(
+                            "[ROUTER] KB retrieval returned no chunk above the reranker "
+                            f"threshold - honest KB fallback naming {len(found_titles)} "
+                            f"found document(s): {', '.join(found_titles)}"
+                        )
+                        general_result = await handle_kb_fallback(
+                            payload.query, conversation_history,
+                            found_titles=found_titles, emit=emit,
+                        )
+                    else:
+                        print(
+                            "[ROUTER] KB retrieval returned no chunk above the reranker "
+                            "threshold - falling through to GENERAL (no citations)"
+                        )
+                        general_result = await handle_general(
+                            payload.query, conversation_history, emit=emit
+                        )
                 clean_answer = general_result.answer
                 sources = general_result.sources
                 no_high_confidence_sources = general_result.no_high_confidence_sources
@@ -940,9 +1060,17 @@ async def _run_chat_turn(
                 if mode == KB_QUERY and sources:
                     high_conf_chunks = [c for c in chunks if not c.get("low_confidence")]
                     cited_chunks = filter_sources_by_citations(clean_answer, high_conf_chunks)
-                    cited_titles = {
-                        get_clean_title(c["filename"])["title"] for c in cited_chunks
-                    }
+                    cited_titles = set()
+                    for c in cited_chunks:
+                        cited_titles.add(get_clean_title(c["filename"])["title"])
+                        # A web chunk's DISPLAYED title is its canonicalTitle
+                        # (the filename is a URL, so the filename-derived title
+                        # never matches the entry built in Step 2b). Add it so
+                        # web sources survive this narrowing; for every other
+                        # chunk the set is exactly as before.
+                        if (str(c.get("filename", "")).startswith(("http://", "https://"))
+                                and c.get("canonicalTitle")):
+                            cited_titles.add(c["canonicalTitle"])
                     sources = [s for s in sources if s["title"] in cited_titles]
 
             # Phase 4: multi-document THREAD_DOC turns state their retrieval
@@ -958,6 +1086,14 @@ async def _run_chat_turn(
                 scope_note = _thread_scope_note(thread_scope)
                 if scope_note:
                     clean_answer = f"{clean_answer}\n\n{scope_note}"
+
+            # MIXED-with-snapshot: the deterministic inventory scope note
+            # (timestamp + sections included), same placement contract as the
+            # THREAD_DOC note — appended BEFORE persistence so the thread
+            # history carries it too. INVENTORY turns append theirs in their
+            # own branch above.
+            if mixed_inv_note:
+                clean_answer = f"{clean_answer}\n\n{mixed_inv_note}"
 
         print(f"    Final answer to return ({len(clean_answer)} chars)")
         
@@ -997,8 +1133,9 @@ async def _run_chat_turn(
         else:
             print("[SKIP] Not saving messages - no threadId provided")
         
-        # Step 5: Cache the answer (skip if Redis unavailable)
-        if redis_client:
+        # Step 5: Cache the answer (skip if Redis unavailable; live-inventory
+        # turns are never cached — their state changes between turns)
+        if redis_client and not inventory_live_turn:
             try:
                 await redis_client.set_cached_answer(cache_query, clean_answer, sources=sources, ttl=3600)
             except Exception as cache_error:

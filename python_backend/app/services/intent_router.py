@@ -17,6 +17,9 @@ MIXED      -- needs BOTH the knowledge base AND general knowledge. Retrieves,
 THREAD_DOC -- about a document the user uploaded into THIS thread. Retrieval is
               scoped to that thread's documents only. Only valid when the thread
               actually HAS uploaded documents.
+INVENTORY  -- (INVENTORY_ENABLED only) about the lab's live inventory state.
+              Skips retrieval AND reranking; answered from the deterministic
+              inventory snapshot.
 
 Design (mirrors app/workspace/router.py, the proven in-repo pattern):
   * The LLM ONLY selects a mode from a fixed set; it never answers or retrieves.
@@ -75,9 +78,25 @@ KB_QUERY = "KB_QUERY"
 GENERAL = "GENERAL"
 MIXED = "MIXED"
 THREAD_DOC = "THREAD_DOC"
+# Lab-inventory questions (INVENTORY_ENABLED): what the lab owns, who has an
+# item, availability/overdue/stock/maintenance, reservations, PLAXIS seats,
+# bookability. Answered from the deterministic inventory snapshot — retrieval
+# and reranking are skipped entirely (the instrument-parsers routing-away
+# principle). In VALID_MODES because it IS a dispatchable mode (unlike
+# UNCERTAIN below), but _parse_mode accepts it only while the flag is on, so
+# a flag-off deployment can never see it.
+INVENTORY = "INVENTORY"
 
 # Every valid mode. Anything outside this set from the model is rejected.
-VALID_MODES = frozenset({KB_QUERY, GENERAL, MIXED, THREAD_DOC})
+VALID_MODES = frozenset({KB_QUERY, GENERAL, MIXED, THREAD_DOC, INVENTORY})
+
+# Uncertainty class (ROUTER_UNCERTAIN_RETRIEVES only). Deliberately NOT in
+# VALID_MODES — it never leaves this module: classify() resolves it to
+# KB_QUERY so uncertainty fails toward retrieval and the reranker threshold
+# decides. The router's decision is a bare JSON label with no confidence or
+# logprobs, so this explicit class is the only way the model can say
+# "I don't know" instead of guessing GENERAL and skipping retrieval.
+UNCERTAIN = "UNCERTAIN"
 
 # Safe fallback. KB_QUERY reproduces today's unconditional-retrieval behavior,
 # so a router failure (unreachable model, unparseable output) degrades to the
@@ -115,6 +134,72 @@ ROUTER_SYSTEM_PROMPT = (
     "message plausibly refers to specific documents, reports, or indexed "
     "material; otherwise choose GENERAL."
 )
+
+
+def _system_prompt() -> str:
+    """The classifier system prompt, resolved at CALL time.
+
+    Flag-gated rules are appended after the base prompt's rule 4, numbered
+    sequentially; with every flag off the prompt is byte-identical to before
+    any of these features existed.
+
+    * WEB_INGEST_ENABLED: the KB also holds captured university information
+      pages (travel/conference funding, awards) and questions about those
+      topics must reach retrieval — the base "lab documents / research
+      papers" framing routes them to GENERAL, ungrounded and uncited.
+    * ROUTER_UNCERTAIN_RETRIEVES: offers the explicit UNCERTAIN class so an
+      unsure model stops guessing GENERAL (which skips retrieval outright);
+      classify() resolves UNCERTAIN to KB_QUERY.
+    * INVENTORY_ENABLED: offers the INVENTORY mode for live lab-inventory
+      state (who has what, availability, bookings, PLAXIS seats); those turns
+      are answered from a deterministic snapshot, never retrieval."""
+    extras = []
+    if config.WEB_INGEST_ENABLED:
+        extras.append(
+            "The knowledge base ALSO contains captured university information "
+            "pages (for example UVic travel and conference funding, award "
+            "eligibility, application deadlines). A question about funding, "
+            "awards, deadlines or university procedures is KB_QUERY."
+        )
+    if config.ROUTER_UNCERTAIN_RETRIEVES:
+        extras.append(
+            'You may also output {"mode": "UNCERTAIN"} when you cannot '
+            "confidently tell whether the lab's documents would answer the "
+            "question. Prefer UNCERTAIN over GENERAL whenever the question "
+            "asks for specific facts, measurements, observations, readings or "
+            "records that project documents COULD hold — even if it does not "
+            "mention a document. Reserve GENERAL for clearly general concept "
+            "explanations, definitions, writing help and conversation."
+        )
+    if config.INVENTORY_ENABLED:
+        extras.append(
+            'You may also output {"mode": "INVENTORY"} for questions about '
+            "the lab's CURRENT inventory state: whether and how many of an "
+            "item the lab holds right now (equipment, consumables, software); "
+            "who has an item checked out; what is available right now; "
+            "overdue loans; stock levels; maintenance or calibration due; "
+            "reservations; PLAXIS seats; or whether a set of equipment can "
+            "be booked for a time window. These are answered from the live "
+            "inventory system, not documents. INVENTORY is about the lab's "
+            "PRESENT state, never about purchase or transaction records: the "
+            "knowledge base holds procurement documents (quotations, "
+            "invoices, order confirmations) for the same equipment the "
+            "inventory tracks, so a question about purchase price, what was "
+            "quoted, the vendor, order or invoice dates, PO numbers, quoted "
+            "specifications, warranty or delivery terms is KB_QUERY even "
+            'when it names equipment the lab owns. For example: "Who has '
+            'the DFOS strain sensor checked out?" and "How many shear vanes '
+            'do we have in stock?" are INVENTORY, but "What did we pay for '
+            'the DFOS strain sensors?" and "Which vendor quoted the shear '
+            'vane and when was it ordered?" are KB_QUERY. When torn between '
+            "INVENTORY and KB_QUERY or MIXED, do not choose INVENTORY. A "
+            "question that needs BOTH lab documents AND inventory state "
+            "stays MIXED."
+        )
+    prompt = ROUTER_SYSTEM_PROMPT
+    for i, body in enumerate(extras, start=5):
+        prompt += f"\n{i}. {body}"
+    return prompt
 
 
 def _history_block(history: Optional[List[Dict[str, str]]], max_turns: int = 4) -> str:
@@ -179,6 +264,17 @@ def _parse_mode(raw: str) -> Optional[str]:
     if not isinstance(mode, str):
         return None
     mode = mode.strip().upper()
+    # UNCERTAIN is accepted ONLY when the flag offers it in the prompt; with
+    # the flag off it stays invalid (-> None -> DEFAULT_MODE), exactly as any
+    # unknown label today.
+    if mode == UNCERTAIN and config.ROUTER_UNCERTAIN_RETRIEVES:
+        return UNCERTAIN
+    # INVENTORY is in VALID_MODES (it is a real dispatchable mode) but is
+    # accepted ONLY while its flag offers it in the prompt — a flag-off
+    # deployment treats the label as unknown (-> None -> DEFAULT_MODE), so
+    # flag-off routing is byte-identical to before the feature.
+    if mode == INVENTORY and not config.INVENTORY_ENABLED:
+        return None
     return mode if mode in VALID_MODES else None
 
 
@@ -224,7 +320,7 @@ async def classify(
         resp = await client.chat(
             model=config.OLLAMA_MODEL,
             messages=[
-                {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+                {"role": "system", "content": _system_prompt()},
                 {"role": "user", "content": user_prompt},
             ],
             think=False,
@@ -248,6 +344,12 @@ async def classify(
 
     raw = (resp["message"]["content"] or "") if resp else ""
     parsed = _parse_mode(raw)
+    if parsed == UNCERTAIN:
+        # Uncertainty fails TOWARD retrieval: run the KB path and let the
+        # reranker threshold (and the honest fallback) decide, instead of the
+        # classifier skipping retrieval on a guess.
+        logger.info("router uncertain -> KB_QUERY (retrieval decides): %r", message)
+        parsed = KB_QUERY
     mode = parsed if parsed is not None else DEFAULT_MODE
     mode = _enforce_attachment_invariant(mode, thread_has_attachments)
 

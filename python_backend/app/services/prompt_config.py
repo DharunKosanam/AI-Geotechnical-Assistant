@@ -16,6 +16,8 @@ model -- only English instructions the answer LLM follows).
                 which claims came from lab documents (only those are cited).
   THREAD_DOC -- answer about a document the user uploaded into this thread;
                 citations refer to that uploaded document.
+  INVENTORY  -- (INVENTORY_ENABLED only) narrate the deterministic lab
+                inventory snapshot; no citations, no arithmetic of its own.
 
 Keys are the mode constants from intent_router, so the prompt map and the
 router's output vocabulary can never drift apart.
@@ -23,7 +25,7 @@ router's output vocabulary can never drift apart.
 
 from __future__ import annotations
 
-from app.services.intent_router import GENERAL, KB_QUERY, MIXED, THREAD_DOC, VALID_MODES
+from app.services.intent_router import GENERAL, INVENTORY, KB_QUERY, MIXED, THREAD_DOC, VALID_MODES
 
 # ---------------------------------------------------------------------------
 # KB_QUERY -- EXACT copy of the prompt previously inlined in
@@ -161,6 +163,60 @@ CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide dire
 
 
 # ---------------------------------------------------------------------------
+# KB retrieval-confidence fallback (KB_QUERY only): retrieval FOUND documents
+# but no chunk cleared the reranker threshold. GENERAL's "There are NO
+# reference documents" would be FALSE on this path — told that, the model
+# answers "I don't have access to your files" to a question naming a file the
+# KB holds (the lab-inventory incident). This prompt tells the truth instead:
+# documents WERE found, the match was not confident, and it names them. Built
+# by a function because the found titles are interpolated per turn. Direct
+# GENERAL (no documents found at all) keeps GENERAL_PROMPT verbatim. Kept OUT
+# of SYSTEM_PROMPTS (not a router mode); callers pass it via
+# generate_answer_with_groq(system_prompt=...).
+# ---------------------------------------------------------------------------
+_KB_FALLBACK_MAX_TITLES = 5
+
+KB_FALLBACK_PROMPT_TEMPLATE = """You are an expert AI assistant specializing in geotechnical engineering, answering from a lab's shared document knowledge base.
+
+The user's question WAS searched against the knowledge base, and potentially relevant document(s) WERE found — {titles} — but no passage in them matched this question confidently enough to quote as a grounded, citable answer.
+
+Guidelines:
+- NEVER say or imply that you have no access to files or documents, or that no documents exist, or that nothing was uploaded. Documents WERE found; the match was simply not confident enough.
+- Say plainly that the knowledge base was searched, and name the document(s) listed above as what was found, so the user knows where to look or can rephrase their question to target them.
+- Do NOT quote, summarize, or invent contents of those documents — you were not given their text with enough confidence to use it.
+- Then, if it is helpful, answer from your own general knowledge, clearly framed as general information rather than as something taken from those documents.
+- Do NOT fabricate document contents or citations.
+- Be concise but helpful.
+- Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points.
+- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
+- Write ALL inline math with consistent $...$ delimiters (e.g. $D_{50}$, $\\sigma'$). Never write bare subscripts like D_{50} or "D 50" outside of $...$.
+- Do NOT add a "Sources" or "References" section at the end of your response.
+
+CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
+
+
+def kb_fallback_prompt(found_titles) -> str:
+    """The KB confidence-fallback prompt with the found document titles
+    interpolated. Titles are deduplicated in order and capped at
+    ``_KB_FALLBACK_MAX_TITLES`` so a wide low-confidence net cannot bloat the
+    system prompt. Callers must only use this when at least one title exists
+    (an empty retrieval is a genuine GENERAL turn)."""
+    seen = []
+    for t in found_titles or []:
+        t = str(t or "").strip()
+        if t and t not in seen:
+            seen.append(t)
+    shown = seen[:_KB_FALLBACK_MAX_TITLES]
+    extra = len(seen) - len(shown)
+    listed = ", ".join(f'"{t}"' for t in shown) or '"(untitled document)"'
+    if extra > 0:
+        listed += f" and {extra} more"
+    # str.replace, NOT str.format: the template's math examples contain literal
+    # braces ($D_{50}$) that format() would treat as fields.
+    return KB_FALLBACK_PROMPT_TEMPLATE.replace("{titles}", listed)
+
+
+# ---------------------------------------------------------------------------
 # Source-grounded output formats (SOURCE_FORMATS_ENABLED). NOT router modes --
 # kept OUT of SYSTEM_PROMPTS so the keys==VALID_MODES guard holds. Each format
 # shares one grounding skeleton (strictly the provided context, per-source
@@ -225,6 +281,31 @@ DOCUMENT TYPE: KEY TERMS GLOSSARY. Structure: an alphabetized list of the import
 }
 
 
+# ---------------------------------------------------------------------------
+# INVENTORY -- the context is a deterministic snapshot of the lab inventory
+# system (pipe-delimited tables built in Python), optionally followed by a
+# FEASIBILITY CHECK block computed by the feasibility engine. The model
+# narrates that state; it never computes availability itself (AI routes,
+# Python calculates). Mode only reachable when INVENTORY_ENABLED is on.
+# ---------------------------------------------------------------------------
+INVENTORY_PROMPT = """You are the lab assistant for a geotechnical research lab, answering questions about the lab's equipment inventory, loans, reservations, and PLAXIS software seats.
+
+The context below is a LIVE INVENTORY SNAPSHOT: pipe-delimited tables (ITEMS, OPEN LOANS, RESERVATIONS, PLAXIS SEATS, ALERTS) generated directly from the inventory database. It may be followed by a FEASIBILITY CHECK block computed by the booking engine.
+
+Rules — these are important:
+- Answer ONLY from the snapshot (and the FEASIBILITY CHECK block when present). Do NOT invent items, people, quantities, or dates that are not in it.
+- Do NOT recompute availability, overlaps, or shortfalls yourself. When a FEASIBILITY CHECK block is present, its per-item statuses, VERDICT and EARLIEST FULL AVAILABILITY are authoritative — restate them faithfully.
+- If the snapshot does not contain what the user asked about, say so plainly (the item may not be tracked, or that section may have been omitted for length — the note under the answer says which sections were included).
+- Use people's names and emails as they appear in the snapshot when answering "who has it" questions.
+- Be concise but thorough.
+- Format your response with clear markdown: use ### for section headings, numbered lists, and bullet points.
+- Prefer prose with bullet or numbered lists. Only use a markdown table when the data is genuinely tabular.
+- If you use a table: put a blank line before it, include a proper header row and separator row (e.g. |---|---|), and put NO math/LaTeX inside cells — write any math in the surrounding prose or spell values out plainly in the cells.
+- Do NOT add a "Sources" or "References" section at the end of your response.
+
+CRITICAL: Do NOT use <think> tags or any XML tags in your response. Provide direct, clear answers only."""
+
+
 # Mode -> system prompt. Keyed by the router's mode constants so a missing or
 # renamed mode is caught immediately (test asserts keys == VALID_MODES).
 SYSTEM_PROMPTS = {
@@ -232,6 +313,7 @@ SYSTEM_PROMPTS = {
     GENERAL: GENERAL_PROMPT,
     MIXED: MIXED_PROMPT,
     THREAD_DOC: THREAD_DOC_PROMPT,
+    INVENTORY: INVENTORY_PROMPT,
 }
 
 # Compile-time guard: every valid mode must have a prompt and vice versa.

@@ -225,3 +225,53 @@ def test_system_prompt_override_wins_over_mode():
     )
     assert built.startswith("CUSTOM SYSTEM PROMPT")
     assert prompt_config.KB_QUERY_PROMPT not in built
+
+
+# --- KB confidence-fallback prompt + handler (fallback honesty) --------------
+def test_general_prompt_byte_identical_after_kb_fallback_addition():
+    # Direct GENERAL (no documents found at all) must keep today's wording
+    # EXACTLY — the honest fallback is a separate prompt. Frozen SHA taken
+    # before the KB-fallback change; deliberate edits must update it.
+    expected_sha = "c4f01cdd2784b70e8b00a93da6d08ed253fd9cb5060be0ce93c15811710d06d2"
+    actual = hashlib.sha256(prompt_config.GENERAL_PROMPT.encode()).hexdigest()
+    assert actual == expected_sha
+
+
+def test_kb_fallback_prompt_names_titles_and_forbids_no_access_claim():
+    p = prompt_config.kb_fallback_prompt(["Inventory", "PLAXIS booking sheet"])
+    assert '"Inventory"' in p and '"PLAXIS booking sheet"' in p
+    assert "WERE found" in p
+    assert "NEVER say or imply that you have no access to files" in p
+    # Must not instruct citations and must keep the shared output rules.
+    assert "[Source:" not in p
+    assert 'Do NOT add a "Sources"' in p and "<think>" in p
+    # The math-example braces survive (str.replace, not str.format).
+    assert "$D_{50}$" in p
+
+
+def test_kb_fallback_prompt_dedupes_and_caps_titles():
+    titles = ["A", "A", "", None, "B", "C", "D", "E", "F", "G"]
+    p = prompt_config.kb_fallback_prompt(titles)
+    assert p.count('"A"') == 1
+    assert '"E"' in p and '"F"' not in p          # capped at 5 distinct
+    assert "and 2 more" in p                       # F, G beyond the cap
+
+
+@pytest.mark.asyncio
+async def test_handle_kb_fallback_uses_honest_prompt_no_sources(monkeypatch):
+    captured = {}
+
+    async def fake_generate(*, query, context, history, mode, system_prompt=None, emit=None):
+        captured.update(query=query, context=context, mode=mode,
+                        system_prompt=system_prompt)
+        return "The knowledge base was searched; I found Inventory."
+
+    monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)
+    result = await mode_handlers.handle_kb_fallback(
+        "check the lab inventory file", found_titles=["Inventory"])
+    assert result.sources == [] and result.no_high_confidence_sources is False
+    assert captured["mode"] == GENERAL and captured["context"] == ""
+    assert '"Inventory"' in captured["system_prompt"]
+    assert "NEVER say or imply that you have no access" in captured["system_prompt"]
+    # And it is NOT the direct-GENERAL prompt.
+    assert captured["system_prompt"] != prompt_config.GENERAL_PROMPT

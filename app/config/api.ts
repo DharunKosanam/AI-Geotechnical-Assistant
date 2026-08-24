@@ -191,6 +191,10 @@ export const API_ENDPOINTS = {
   kbBulkUpload: () => `${PYTHON_BACKEND_URL}/api/kb/bulk-upload`,
   kbBatchStatus: (batchId: string) => `${PYTHON_BACKEND_URL}/api/kb/batch/${batchId}`,
   kbMyUploads: () => `${PYTHON_BACKEND_URL}/api/kb/my-uploads`,
+  // Web-page ingestion by pasted URL (WEB_INGEST_ENABLED). Routes exist only
+  // when the backend flag is on; the UI gates on kbStatus().webIngest.
+  kbWebPreview: () => `${PYTHON_BACKEND_URL}/api/kb/web/preview`,
+  kbWebIngest: () => `${PYTHON_BACKEND_URL}/api/kb/web/ingest`,
 
   // --- Message highlights + notes (HIGHLIGHTS_ENABLED). Same-origin; proxied
   // to FastAPI by the /api/assistants rewrite. The routes exist only when the

@@ -109,6 +109,10 @@ type NormalizedSource = {
   url?: string;
   meta: string[];
   vision?: { pages: number[] };
+  /* Captured web page (KB web ingestion): the citation must always carry the
+     fetch date — a funding deadline quoted from a stale capture is worse than
+     no answer, so the "captured on …, may have changed" note is not optional. */
+  web?: { fetchedAt?: string };
 };
 
 const normalizeSource = (source: any): NormalizedSource | null => {
@@ -137,6 +141,15 @@ const normalizeSource = (source: any): NormalizedSource | null => {
       vision: source.visionDerived
         ? { pages: Array.isArray(source.visionPages) ? source.visionPages : [] }
         : undefined,
+      web:
+        source.sourceFormat === "web"
+          ? {
+              fetchedAt:
+                typeof source.fetchedAt === "string"
+                  ? source.fetchedAt.slice(0, 10)
+                  : undefined,
+            }
+          : undefined,
     };
   }
   if (source == null) return null;
@@ -174,6 +187,13 @@ const SourcesPanel = ({ sources }: { sources: any[] }) => {
               {row.vision.pages.length > 0
                 ? `AI vision · p. ${row.vision.pages.join(", ")} — not verbatim`
                 : "AI vision description — not verbatim"}
+            </span>
+          )}
+          {row.web && (
+            <span className={s.sourceWeb}>
+              {row.web.fetchedAt
+                ? `web page · captured ${row.web.fetchedAt} — may have changed`
+                : "web page · captured copy — may have changed"}
             </span>
           )}
         </div>

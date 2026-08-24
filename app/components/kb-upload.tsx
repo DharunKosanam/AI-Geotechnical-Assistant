@@ -9,9 +9,12 @@ import {
   Trash2,
   FileText,
   RotateCcw,
+  Globe,
+  RefreshCw,
 } from "lucide-react";
 import { API_ENDPOINTS } from "../config/api";
 import styles from "./kb-upload.module.css";
+import KbWebIngest from "./kb-web-ingest";
 import { toast } from "./toaster";
 
 const ACCEPTED = ".pdf,.docx,.txt,.md,.pptx,.xlsx,.csv";
@@ -20,7 +23,6 @@ const SKIP_LABELS: Record<string, string> = {
   duplicate: "already in the KB",
   scanned: "scanned / no text",
   unsupported: "unsupported type",
-  pii: "possible student/phone data",
   too_large: "too large",
 };
 
@@ -209,6 +211,41 @@ const KbUpload = () => {
       return next;
     });
 
+  // Manual refresh of a web document: re-fetch + supersede (delete-before-
+  // insert keyed on canonicalUrl). Shows both the previous and new fetch date.
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const onRefreshWeb = async (u: any) => {
+    setRefreshingId(u.batchId);
+    try {
+      const r = await fetch(API_ENDPOINTS.kbWebIngest(), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: u.canonicalUrl,
+          project: u.projectTag || "",
+          permissionConfirmed: true,
+          refresh: true,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toast(d?.detail?.message || "Could not refresh this page.");
+        return;
+      }
+      toast(
+        `Refreshed — previously fetched ${(d.previousFetchedAt || "").slice(0, 10) || "n/a"}, ` +
+          `now ${(d.fetchedAt || "").slice(0, 10)}` +
+          (d.contentChanged ? "" : " (content unchanged)"),
+      );
+      loadUploads();
+    } catch {
+      toast("Could not refresh this page.");
+    } finally {
+      setRefreshingId(null);
+    }
+  };
+
   const onDelete = async (batchId: string) => {
     try {
       const r = await fetch(API_ENDPOINTS.kbBatchStatus(batchId), { method: "DELETE", credentials: "include" });
@@ -280,41 +317,7 @@ const KbUpload = () => {
     pollRef.current = setInterval(tick, 2000);
   };
 
-  // Re-submit just the sensitive-PII-skipped files with a batch acknowledgement.
-  const resubmitPii = async () => {
-    const toResubmit: File[] = (bulkBatch?.files || [])
-      .map((f: BulkFileStatus, i: number) => (f.status === "skipped" && f.reason === "pii" ? bulkFiles[i] : null))
-      .filter((x: File | null): x is File => !!x);
-    if (toResubmit.length === 0) return;
-    setPhase("submitting");
-    setError("");
-    const data = new FormData();
-    toResubmit.forEach((f) => data.append("files", f));
-    data.append("project", project.trim());
-    data.append("docType", docType.trim());
-    data.append("year", year.trim());
-    data.append("permissionConfirmed", permission ? "true" : "false");
-    data.append("acknowledge", "pii");
-    try {
-      const r = await fetch(API_ENDPOINTS.kbBulkUpload(), { method: "POST", credentials: "include", body: data });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setError(body.detail || `Upload failed (${r.status})`);
-        setPhase("error");
-        return;
-      }
-      setBulkFiles(toResubmit);
-      setBulkBatch({
-        status: "processing", total: body.total, done: 0,
-        files: toResubmit.map((f) => ({ filename: f.name, status: "queued" })),
-      });
-      startBulkPoll(body.batchId);
-      setPhase("bulkindexing");
-    } catch (e: any) {
-      setError(e?.message || "Upload failed");
-      setPhase("error");
-    }
-  };
+  // name redaction removed
 
   return (
     <div className={styles.container}>
@@ -530,11 +533,7 @@ const KbUpload = () => {
               <p className={styles.sub}>You can close this tab — indexing continues, and your uploads appear below.</p>
             ) : (
               <div className={styles.actions}>
-                {(bulkBatch.files || []).some((f: BulkFileStatus) => f.status === "skipped" && f.reason === "pii") && (
-                  <button type="button" className={styles.secondary} onClick={resubmitPii}>
-                    Add {(bulkBatch.files || []).filter((f: BulkFileStatus) => f.status === "skipped" && f.reason === "pii").length} flagged file(s) anyway
-                  </button>
-                )}
+                {/* name redaction removed */}
                 <button type="button" className={styles.primary} onClick={reset}>
                   <RotateCcw size={15} /> Upload more
                 </button>
@@ -551,6 +550,10 @@ const KbUpload = () => {
             </button>
           </div>
         )}
+
+        {/* Second input alongside file upload: paste a URL. Renders nothing
+            unless the backend reports webIngest (WEB_INGEST_ENABLED). */}
+        <KbWebIngest onIngested={loadUploads} />
       </div>
 
       <div className={styles.panel}>
@@ -562,12 +565,45 @@ const KbUpload = () => {
             {uploads.map((u) => (
               <li key={u.batchId} className={styles.listItem}>
                 <div className={styles.listMain}>
-                  <span className={styles.listTitle}>{u.canonicalTitle || u.filename}</span>
+                  <span className={styles.listTitle}>
+                    {u.canonicalUrl ? (
+                      <>
+                        <Globe size={13} aria-label="Web page" className={styles.webIcon} />
+                        <a
+                          className={styles.webLink}
+                          href={u.canonicalUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {u.canonicalTitle || u.filename}
+                        </a>
+                      </>
+                    ) : (
+                      u.canonicalTitle || u.filename
+                    )}
+                  </span>
                   <span className={styles.listMeta}>
+                    {u.canonicalUrl && `web · fetched ${(u.fetchedAt || "").slice(0, 10)} · `}
                     {u.projectTag} · v{u.version} ·{" "}
                     {u.status === "indexed" ? `${u.chunkCount ?? "?"} chunks` : u.status}
                   </span>
                 </div>
+                {u.canonicalUrl && (
+                  <button
+                    type="button"
+                    className={styles.refreshBtn}
+                    onClick={() => onRefreshWeb(u)}
+                    disabled={refreshingId === u.batchId}
+                    aria-label="Re-fetch this page"
+                    title="Re-fetch this page and replace the stored copy"
+                  >
+                    {refreshingId === u.batchId ? (
+                      <Loader2 size={15} className={styles.spin} />
+                    ) : (
+                      <RefreshCw size={15} />
+                    )}
+                  </button>
+                )}
                 {u.deletable ? (
                   <button
                     type="button"

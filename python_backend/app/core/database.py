@@ -42,6 +42,19 @@ highlights_collection = db["highlights"]
 workspace_datasets_collection = db["workspace_datasets"]  # dataset artifacts
 workspace_parse_jobs_collection = db["workspace_parse_jobs"]  # parse job state
 
+# Lab inventory (INVENTORY_ENABLED). Operational lab records: equipment /
+# consumables / software seats, loans, reservations, PLAXIS sessions, lab
+# members, and a full mutation audit trail. Names and emails are stored AS-IS
+# (no transformation) -- these are working custodial records, and answering
+# "who has the interrogator?" requires real identity. Separate collections so
+# the RAG/chat data is untouched.
+inv_items_collection = db["inv_items"]      # equipment / consumable / software items
+inv_tx_collection = db["inv_tx"]            # checkout / return / adjust / damage transactions
+inv_res_collection = db["inv_res"]          # reservations
+inv_plaxis_collection = db["inv_plaxis"]    # PLAXIS seat sessions
+inv_users_collection = db["inv_users"]      # lab members (name/email/role/group)
+inv_audit_collection = db["inv_audit"]      # one record per inventory mutation
+
 
 async def ensure_indexes():
     """Create required indexes. Idempotent -- safe to call on every startup.
@@ -88,6 +101,23 @@ async def ensure_indexes():
         await workspace_parse_jobs_collection.create_index(
             [("dataset_id", 1)], name="dataset_id_1"
         )
+
+    # Lab inventory (INVENTORY_ENABLED): unique item ids, per-item transaction
+    # and reservation lookups (the feasibility walk), the open-loan scan
+    # (actualReturn sparse: only returned loans carry the field), the
+    # reservation window scan, and active PLAXIS sessions. Flag-gated: a
+    # flag-off deployment creates nothing.
+    if _config.INVENTORY_ENABLED:
+        await inv_items_collection.create_index("id", unique=True, name="uniq_id")
+        await inv_tx_collection.create_index("itemId", name="itemId_1")
+        await inv_tx_collection.create_index(
+            "actualReturn", name="actualReturn_1", sparse=True
+        )
+        await inv_res_collection.create_index("itemId", name="itemId_1")
+        await inv_res_collection.create_index(
+            [("start", 1), ("end", 1)], name="start_1_end_1"
+        )
+        await inv_plaxis_collection.create_index("loggedOut", name="loggedOut_1")
 
 
 async def close_mongo_connection():

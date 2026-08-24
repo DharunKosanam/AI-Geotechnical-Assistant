@@ -454,3 +454,14 @@
   color: var(--t3);
   user-select: none;
 }
+
+/* Captured-web-page provenance on a citation (KB web ingestion). Same slot as
+   .sourceVision; neutral tone — informative, not alarming. */
+.sourceWeb {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--t3);
+  text-align: right;
+}

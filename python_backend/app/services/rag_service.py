@@ -20,6 +20,7 @@ RETRIEVAL:
     user-first ordering.
 """
 import hashlib
+import logging
 import re
 import asyncio
 import threading
@@ -359,7 +360,16 @@ def extract_pages_from_pdf_with_ocr(
                 except Exception as e:
                     print(f"      [OCR ERROR] Page {pn} fallback failed: {e}")
 
-            # (3) Large embedded image OCR (figures, diagrams, scanned tables)
+            # (3) Large embedded image OCR (figures, diagrams, scanned tables).
+            # When the page-OCR fallback (2) fired, the rendered page already
+            # contained every embedded image — running (3) too reads the same
+            # pixels again and doubles the page text. Gated fix; default off.
+            if config.OCR_SKIP_EMBEDDED_AFTER_PAGE_OCR and ocr_used:
+                print(f"      [OCR] Page {pn}: embedded-image pass skipped "
+                      f"(page OCR already covered it)")
+                if base_text:
+                    triples.append((pn, base_text, ocr_used))
+                continue
             try:
                 page_obj = doc[i]
                 emb_text = _ocr_embedded_images(doc, page_obj, PDF_IMAGE_OCR_MIN_DIM).strip()
@@ -841,11 +851,84 @@ def _rrf_merge(
     return merged[:limit]
 
 
+logger = logging.getLogger(__name__)
+
+# --- table-likeness detection (content-based, replaces the chunkingVersion
+# key). The prose-trained cross-encoder scores table rows deeply negative even
+# when they answer the question exactly; keying the structured-threshold
+# allowance on chunkingVersion == v3-xlsx missed table-heavy PDFs, which are
+# chunked as v2 prose yet showed the same penalty (format diagnostic: CPT
+# table PDF -2.10 on a query it answers). Two signals, measured on real
+# chunks: the v3-xlsx renderer's pipe-delimited rows (xlsx/csv: 10/12, 13/14
+# lines), and whitespace-columned numeric rows as PDF extraction preserves
+# them (CPT PDF: 19/21, 8/14 lines). Prose, OCR'd scans and docx all scored 0
+# on both signals.
+_TABLE_MIN_ROWS = 3
+_TABLE_ROW_RATIO = 0.5
+_MULTISPACE_RE = re.compile(r"\s{2,}")
+_NUMERIC_TOKEN_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
+
+
+def _is_table_like(text: str) -> Tuple[bool, str]:
+    """(is_table_like, reason). Pipe-delimited rows (the v3-xlsx renderer,
+    markdown tables) or whitespace-columned numeric rows (table-heavy PDFs)
+    must dominate the chunk's non-empty lines."""
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    if len(lines) < _TABLE_MIN_ROWS:
+        return False, ""
+    pipe_rows = sum(1 for l in lines if l.count("|") >= 2)
+    if pipe_rows >= _TABLE_MIN_ROWS and pipe_rows / len(lines) >= _TABLE_ROW_RATIO:
+        return True, f"pipe-delimited rows {pipe_rows}/{len(lines)}"
+    col_rows = sum(
+        1 for l in lines
+        if len(_MULTISPACE_RE.findall(l.strip())) >= 2
+        and len(_NUMERIC_TOKEN_RE.findall(l)) >= 3
+    )
+    if col_rows > _TABLE_MIN_ROWS and col_rows / len(lines) >= _TABLE_ROW_RATIO:
+        return True, f"whitespace-columned numeric rows {col_rows}/{len(lines)}"
+    return False, ""
+
+
+# --- meta-phrasing strip for the reranker (RERANK_STRIP_META_PHRASING) ------
+# Conversational scaffolding ("check the X file and tell me what...") drags
+# cross-encoder scores far below the same question phrased factually (format
+# diagnostic: worst wording in 6/9 formats). These patterns remove ONLY
+# scaffold tokens; the wh-lookahead on tell/show keeps content verbs intact
+# ("the logs show artesian pressure" is untouched).
+_META_SCAFFOLD_RES = (
+    re.compile(r"^\s*(please\s+)?(can|could|would)\s+you\s+", re.IGNORECASE),
+    re.compile(r"^\s*please\s+", re.IGNORECASE),
+    re.compile(r"^\s*(check|open|look\s+at|go\s+through|review|read|see)\s+(the\s+|our\s+|my\s+)?",
+               re.IGNORECASE),
+    re.compile(r"\b(and\s+|then\s+)?(tell|show)\s+(me\s+|us\s+)?(?=(what|how|if|whether|about)\b)",
+               re.IGNORECASE),
+    re.compile(r"\b(and\s+)?let\s+me\s+know\b\s*", re.IGNORECASE),
+)
+
+
+def _strip_meta_phrasing(query: str) -> str:
+    """Scaffold-stripped variant of ``query`` for the RERANKER only. Falls back
+    to the original when stripping changes nothing or leaves fewer than three
+    words (never hand the cross-encoder a stub)."""
+    stripped = query or ""
+    for pat in _META_SCAFFOLD_RES:
+        stripped = pat.sub("", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip(" .,;:!?")
+    # Unchanged up to whitespace/punctuation, or left as a stub: keep the
+    # original — never hand the cross-encoder less than the user said for no
+    # scaffold actually removed.
+    normalised_original = re.sub(r"\s+", " ", (query or "")).strip(" .,;:!?")
+    if stripped.lower() == normalised_original.lower() or len(stripped.split()) < 3:
+        return query
+    return stripped
+
+
 def _apply_rerank_threshold(
     ranked: List[Dict[str, Any]],
     threshold: float = RERANK_SCORE_THRESHOLD,
     top_k: int = RERANK_TOP_K,
     low_conf_context: int = LOW_CONF_CONTEXT_CHUNKS,
+    structured_threshold: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Drop reranked chunks the cross-encoder scored as irrelevant.
@@ -854,6 +937,13 @@ def _apply_rerank_threshold(
     the top ``top_k`` (as before), then keep only chunks scoring >= ``threshold``.
     ms-marco-MiniLM scores go negative for "not relevant", so sub-threshold
     chunks are retrieval noise that must not be shown to the user as sources.
+
+    ``structured_threshold`` (KB path only — thread callers leave it None):
+    when set, chunks whose TEXT is table-like per ``_is_table_like`` (pipe
+    rows or whitespace-columned numeric rows — covers v3-xlsx spreadsheet
+    chunks AND table-heavy PDF chunks alike) are judged against IT instead of
+    ``threshold``. With it equal to ``threshold`` (the config default) the
+    outcome is byte-identical to before the parameter existed.
 
     Returns ``(chunks, no_high_confidence)``:
       * Some chunk clears the threshold -> those chunks, each tagged
@@ -864,7 +954,27 @@ def _apply_rerank_threshold(
         low-confidence chunks from the displayed sources.
     """
     top = ranked[:top_k]
-    high_conf = [c for c in top if c.get("rerank_score", 0.0) >= threshold]
+
+    table_verdicts: Dict[int, Tuple[bool, str]] = {}
+
+    def _threshold_for(c: Dict[str, Any]) -> float:
+        if structured_threshold is None:
+            return threshold
+        key = id(c)
+        if key not in table_verdicts:
+            table_verdicts[key] = _is_table_like(c.get("text", ""))
+        return structured_threshold if table_verdicts[key][0] else threshold
+
+    for c in top:
+        applied = _threshold_for(c)
+        is_table, why = table_verdicts.get(id(c), (False, ""))
+        logger.debug(
+            "[RERANK] %s cv=%s score=%+.3f applied_threshold=%+.3f table_like=%s%s",
+            c.get("filename"), c.get("chunkingVersion"),
+            c.get("rerank_score", 0.0), applied, is_table,
+            f" ({why})" if why else "",
+        )
+    high_conf = [c for c in top if c.get("rerank_score", 0.0) >= _threshold_for(c)]
 
     if high_conf:
         for c in high_conf:
@@ -951,7 +1061,15 @@ async def query_vector_store(
         try:
             reranker = get_reranker()
             documents = [c["text"] for c in combined]
-            scores = list(reranker.rerank(query, documents))
+            # Rerank-scoring input only: vector/BM25 above and the answer
+            # prompt downstream always see the ORIGINAL query.
+            rerank_query = query
+            if config.RERANK_STRIP_META_PHRASING:
+                stripped = _strip_meta_phrasing(query)
+                if stripped != query:
+                    print(f"[RERANK] meta-strip: {query!r} -> {stripped!r}")
+                    rerank_query = stripped
+            scores = list(reranker.rerank(rerank_query, documents))
             for c, s in zip(combined, scores):
                 c["rerank_score"] = float(s)
             combined.sort(key=lambda c: c["rerank_score"], reverse=True)
@@ -960,7 +1078,14 @@ async def query_vector_store(
             # Drop sub-threshold (noise) chunks. When nothing clears the bar the
             # helper returns the top 1-2 chunks tagged low_confidence=True so the
             # LLM still gets context; chat.py hides those from the sources list.
-            kept, _no_high_conf = _apply_rerank_threshold(combined)
+            # Table-like chunks (content-detected: v3-xlsx pipe rows OR
+            # table-heavy-PDF numeric columns) get their own configurable
+            # threshold (read at call time so it can be set per-process); with
+            # the default it equals the flat threshold and nothing changes.
+            kept, _no_high_conf = _apply_rerank_threshold(
+                combined,
+                structured_threshold=config.KB_RERANK_SCORE_THRESHOLD_STRUCTURED,
+            )
             for c in kept[:3]:
                 print(f"   {c['rerank_score']:+.3f} | {c['filename']} (vec {c['score']:.3f})")
             return kept

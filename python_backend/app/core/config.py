@@ -99,6 +99,23 @@ ROUTER_ENABLED = os.getenv("ROUTER_ENABLED", "false").strip().lower() in (
     "on",
 )
 
+# Router uncertainty fails TOWARD retrieval. The router emits a bare JSON
+# label ({"mode": ...}, temperature 0, format=json — Ollama exposes no
+# confidence or logprobs for it), so an unsure model must GUESS, and the
+# format diagnostic measured the cost: 4/27 groundable questions (rerank up
+# to +6.92) were confidently labelled GENERAL and never retrieved. With this
+# ON, the router prompt offers an explicit UNCERTAIN class for factual /
+# site-specific questions the documents COULD answer, and UNCERTAIN resolves
+# to KB_QUERY — retrieval runs and the reranker threshold (plus the honest
+# fallback) decides, instead of the classifier skipping retrieval outright.
+# Default OFF: the router prompt and behaviour are byte-identical to today.
+ROUTER_UNCERTAIN_RETRIEVES = os.getenv("ROUTER_UNCERTAIN_RETRIEVES", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # ---------------------------------------------------------------------------
 # Response streaming (Phase 2) feature flag
 # ---------------------------------------------------------------------------
@@ -398,6 +415,38 @@ RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "5"))
 # Tune here without touching the pipeline code.
 RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.0"))
 
+# STRUCTURED-chunk allowance for the KB path: applied INSTEAD of
+# RERANK_SCORE_THRESHOLD, but ONLY to chunks whose TEXT is table-like
+# (content-based detection in rag_service._is_table_like: pipe-delimited rows
+# from the v3-xlsx renderer, or whitespace-columned numeric rows as extracted
+# from table-heavy PDFs — the earlier chunkingVersion=="v3-xlsx" key missed
+# those PDFs, which are chunked as v2 yet show the same penalty). The
+# prose-trained ms-marco cross-encoder scores table rows deeply negative even
+# when they answer the question exactly — the lab-inventory chunks scored
+# -3.6/-4.3 against "check the lab inventory file..." and the flat 0.0
+# discarded them all, falling through to an uncited GENERAL answer. Defaults
+# to the flat threshold's value so behaviour is byte-identical until this is
+# deliberately set; the thread path's -11.0 (below) is the reference point
+# for a permissive setting. Used ONLY by query_vector_store (KB path); thread
+# retrieval is untouched.
+KB_RERANK_SCORE_THRESHOLD_STRUCTURED = float(
+    os.getenv("KB_RERANK_SCORE_THRESHOLD_STRUCTURED", str(RERANK_SCORE_THRESHOLD))
+)
+
+# Strip conversational scaffolding from the query BEFORE cross-encoder
+# reranking ONLY ("check the X file and tell me..." -> "X file what..."):
+# the format diagnostic measured meta-phrasing as the worst-scoring wording in
+# 6 of 9 formats (all three non-table fallbacks were this phrasing). Vector
+# search, BM25 and the answer prompt always keep the ORIGINAL query — only the
+# rerank scoring input changes. Conservative regex list, result must keep >= 3
+# words or the original is used. Default OFF: rerank input byte-identical.
+RERANK_STRIP_META_PHRASING = os.getenv("RERANK_STRIP_META_PHRASING", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # SEPARATE, permissive threshold for THREAD-SCOPED retrieval (THREAD_DOC mode).
 # The KB threshold above (0.0) is calibrated to filter noise out of a 16,811-chunk
 # corpus, where relevant chunks score +3 to +6. Thread-scoped retrieval has a
@@ -568,6 +617,21 @@ OCR_MIN_TEXT_LEN = int(os.getenv("OCR_MIN_TEXT_LEN", "50"))
 # OCRing figures/diagrams — tiny images are usually icons/decorations.
 PDF_IMAGE_OCR_MIN_DIM = int(os.getenv("PDF_IMAGE_OCR_MIN_DIM", "200"))
 
+# Skip the embedded-image OCR pass (step 3) on pages where the full-page OCR
+# fallback (step 2) already fired: on an image-only page the page render
+# CONTAINS every embedded image, so both passes read the same pixels and the
+# page text is duplicated (measured: a scanned borehole log ingested as
+# 857 chars = the same 428-char OCR output twice). Default OFF so extraction
+# output is byte-identical until deliberately enabled.
+OCR_SKIP_EMBEDDED_AFTER_PAGE_OCR = os.getenv(
+    "OCR_SKIP_EMBEDDED_AFTER_PAGE_OCR", "false"
+).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # ---------------------------------------------------------------------------
 # Vision extraction for scanned PDF pages (feature flag, default OFF)
 # ---------------------------------------------------------------------------
@@ -676,6 +740,69 @@ KB_SELF_DELETE_WINDOW_HOURS = int(os.getenv("KB_SELF_DELETE_WINDOW_HOURS", "24")
 # monopolise the ingest pool / starve chat + Ollama.
 KB_BULK_MAX_FILES = int(os.getenv("KB_BULK_MAX_FILES", "50"))
 KB_BULK_PACING_SECONDS = float(os.getenv("KB_BULK_PACING_SECONDS", "0.5"))
+
+# ---------------------------------------------------------------------------
+# Web link ingestion (KB web sources) feature flag + fetch limits
+# ---------------------------------------------------------------------------
+# Master switch for ingesting web pages into the KB by pasted URL: the
+# /api/kb/web/* endpoints are registered ONLY when this is on (highlights
+# pattern — off means absent, not present-and-404ing), and /api/kb/status
+# gains "webIngest": true only when on. Default OFF: byte-identical to before
+# the feature existed. Read at call time (config.WEB_INGEST_ENABLED) so tests
+# can toggle it without re-import.
+WEB_INGEST_ENABLED = os.getenv("WEB_INGEST_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Domains a pasted URL may ultimately resolve to (comma-separated). A host
+# matches an entry when it EQUALS it or is a subdomain of it ("www.uvic.ca"
+# matches "uvic.ca"); nothing else matches — "uvic.ca.evil.com" does NOT.
+# NOTE: the CUPE 4163 site lives at 4163.cupe.ca (a cupe.ca subdomain), NOT
+# cupe4163.ca (that is only their e-mail domain). Seeding "4163.cupe.ca"
+# allows only that local's site, never all of cupe.ca. The allowlist applies
+# to any host that would SERVE content; a non-allowlisted host (e.g. a
+# share.google short link) may only ever redirect. The private/loopback/
+# link-local address block in web_fetch applies at every hop regardless.
+WEB_INGEST_ALLOWED_DOMAINS = [
+    d.strip().lower().lstrip(".")
+    for d in os.getenv("WEB_INGEST_ALLOWED_DOMAINS", "uvic.ca,4163.cupe.ca").split(",")
+    if d.strip()
+]
+
+# Per-fetch bounds: total request timeout, response size cap, and how many
+# redirect hops to follow before giving up (share.google -> destination is 1-2
+# hops; 5 covers http->https + apex->www chains with room to spare).
+WEB_INGEST_TIMEOUT_SECONDS = float(os.getenv("WEB_INGEST_TIMEOUT_SECONDS", "15"))
+WEB_INGEST_MAX_BYTES = int(os.getenv("WEB_INGEST_MAX_BYTES", str(10 * 1024 * 1024)))
+WEB_INGEST_MAX_REDIRECTS = int(os.getenv("WEB_INGEST_MAX_REDIRECTS", "5"))
+
+# ---------------------------------------------------------------------------
+# Lab inventory (equipment / consumables / PLAXIS seats) feature flag
+# ---------------------------------------------------------------------------
+# Master switch for the lab-inventory feature: the /api/inventory/* endpoints
+# are registered ONLY when this is on (highlights pattern — off means absent,
+# not present-and-404ing), the router prompt gains the INVENTORY mode rule
+# only when on, and _parse_mode rejects an INVENTORY label when off. Default
+# OFF: router prompt, route table and chat behavior are byte-identical to
+# before the feature existed. Read at call time (config.INVENTORY_ENABLED) so
+# tests can toggle it without re-import. Accepts 1/true/yes/on
+# (case-insensitive).
+INVENTORY_ENABLED = os.getenv("INVENTORY_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Ceiling for the deterministic inventory snapshot handed to the answer LLM,
+# in estimated tokens (len//4, the same heuristic as the chat history cap).
+# When the snapshot would exceed it, whole SECTIONS are dropped by priority
+# (alerts and open loans survive longest) and then whole ROWS — never a
+# partial row — and the omissions are named in the deterministic scope note.
+INVENTORY_SNAPSHOT_TOKEN_CAP = int(os.getenv("INVENTORY_SNAPSHOT_TOKEN_CAP", "4000"))
 
 # CORS Origins. NOTE: no "*" wildcard here. The frontend sends credentials (the
 # httpOnly access_token cookie), and the CORS spec forbids pairing

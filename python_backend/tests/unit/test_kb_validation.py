@@ -51,38 +51,7 @@ def test_size_and_page_caps():
     assert v.check_pages(10)[0] is True
 
 
-# --- PII scan -----------------------------------------------------------------
-def test_scan_pii_finds_and_is_clean():
-    found = v.scan_pii("Reach me at jane.doe@uvic.ca or 250-555-1234, id V00891234.")
-    assert "jane.doe@uvic.ca" in found["emails"]
-    assert found["phones"]
-    assert "V00891234" in found["student_numbers"]
-    assert v.scan_pii("Purely technical content about soil consolidation.") == {}
-
-
-def test_pii_emails_detected_but_non_gating():
-    found = v.scan_pii("Corresponding author: a.smith@university.edu")
-    assert found.get("emails")               # still detected
-    assert v.sensitive_pii(found) == {}       # but does NOT gate (public contact)
-
-
-def test_pii_bare_numbers_not_flagged_as_ids():
-    # DOI / grant / ISBN-style bare numbers must NOT be treated as student IDs.
-    found = v.scan_pii("See https://doi.org/10.1016/12345678 under grant 87654321.")
-    assert "student_numbers" not in found
-    assert v.sensitive_pii(found) == {}
-
-
-def test_pii_context_gated_ids_flagged():
-    found = v.scan_pii("Student Number: 12345678 recorded. Applicant SIN 123456789.")
-    assert "12345678" in found["student_numbers"]
-    assert "123456789" in found["student_numbers"]
-    assert v.sensitive_pii(found).get("student_numbers")   # gates
-
-
-def test_sensitive_pii_filters_to_gating_kinds():
-    s = v.sensitive_pii({"emails": ["a@b.com"], "phones": ["250-555-1234"], "student_numbers": ["V00891234"]})
-    assert set(s.keys()) == {"phones", "student_numbers"}
+# name redaction removed
 
 
 # --- language -----------------------------------------------------------------

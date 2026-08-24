@@ -12,7 +12,7 @@ Two-phase, single endpoint:
     then ingest with provenance stamped on every chunk and return the batch id.
 
 HARD failures (format, size, pages, extraction quality, EXACT-hash duplicate)
-reject outright. SOFT flags (near-duplicate, off-topic, PII, non-English) are
+reject outright. SOFT flags (near-duplicate, off-topic, non-English) are
 returned for the student to acknowledge, never blocking.
 
 Gated behind ``KB_UPLOAD_ENABLED`` (off by default) -> 404 when disabled.
@@ -87,21 +87,36 @@ def _embed_first_chunk(text: str) -> List[float]:
 
 
 async def _supersede_plan(project_tag: str, canonical_title: str) -> Dict[str, Any]:
-    """DRY-RUN: what a re-upload of the same (project, canonical title) would
-    supersede. Returns the filter, the current max version, and how many existing
-    chunks match — WITHOUT deleting anything (Phase 4 gate)."""
+    """DRY-RUN: what a re-upload with this canonical title would supersede.
+
+    Keyed on canonicalTitle ALONE — deliberately independent of projectTag:
+    keying on (projectTag, canonicalTitle) let the same document re-uploaded
+    under a different tag silently create a SECOND live copy instead of
+    replacing the first (the lab-inventory duplicate: old copy under
+    "Lab inventory and Plaxis booking", re-upload under "lab inventory", both
+    retrievable). Web documents are excluded (``canonicalUrl`` absent): they
+    are refreshed by URL via /api/kb/web, never replaced by a file upload.
+    ``differing_project_tags`` lists tags on the existing copy that differ
+    from the submitted one, so the confirm warning can say where the existing
+    copy lives instead of silently deleting across projects. Returns the
+    filter, counts and versions — WITHOUT deleting anything (Phase 4 gate)."""
     supersede_filter = {
         "category": KB_CATEGORY,
-        "projectTag": project_tag,
         "canonicalTitle": canonical_title,
+        "canonicalUrl": {"$exists": False},
     }
     count = await files_collection.count_documents(supersede_filter)
     prior_versions = await files_collection.distinct("version", supersede_filter)
+    prior_tags = await files_collection.distinct("projectTag", supersede_filter)
     max_version = max([v for v in prior_versions if isinstance(v, int)], default=0)
     return {
         "filter": supersede_filter,
         "would_delete_chunks": count,
         "prior_versions": sorted(v for v in prior_versions if isinstance(v, int)),
+        "prior_project_tags": sorted(t for t in prior_tags if isinstance(t, str)),
+        "differing_project_tags": sorted(
+            t for t in prior_tags if isinstance(t, str) and t != project_tag
+        ),
         "next_version": max_version + 1,
     }
 
@@ -151,8 +166,7 @@ async def _prepare_kb_file(content: bytes, filename: str) -> Dict[str, Any]:
     relevance_cos, relevance_outlier = (None, False)
     if centroid:
         relevance_cos, relevance_outlier = val.relevance(first_emb, centroid)
-    pii = val.scan_pii(all_text)
-    pii_sensitive = val.sensitive_pii(pii)  # gating subset: student numbers + phones
+    # name redaction removed
     non_english, lang_note = val.detect_non_english(all_text)
 
     out.update({
@@ -161,7 +175,7 @@ async def _prepare_kb_file(content: bytes, filename: str) -> Dict[str, Any]:
         "all_text": all_text, "first_emb": first_emb,
         "near_dup": dedup.near_match, "near_cosine": dedup.near_cosine,
         "relevance_cos": relevance_cos, "relevance_outlier": relevance_outlier,
-        "pii": pii, "pii_sensitive": pii_sensitive, "non_english": non_english, "lang_note": lang_note,
+        "non_english": non_english, "lang_note": lang_note,
     })
     return out
 
@@ -199,6 +213,12 @@ async def _ingest_prepared_file(
     if plan["would_delete_chunks"] > 0:
         print(f"[KB_SUPERSEDE] filter={plan['filter']} deleting {plan['would_delete_chunks']} "
               f"prior-version chunk(s) for '{canonical_title}' before inserting v{version}")
+        if plan["differing_project_tags"]:
+            # Bulk uploads reach here without the single-upload confirm gate, so
+            # a cross-project replacement must at least be LOUD in the log.
+            print(f"[KB_SUPERSEDE] note: existing copy filed under different project "
+                  f"tag(s) {plan['differing_project_tags']} (submitted '{project}') — "
+                  f"replacing across tags")
         del_res = await files_collection.delete_many(plan["filter"])
         print(f"[KB_SUPERSEDE] deleted {del_res.deleted_count} chunk(s)")
 
@@ -282,10 +302,7 @@ async def kb_upload(
                 "message": (f"This doesn't look closely related to the geotechnical knowledge base "
                             f"(relevance {prep['relevance_cos']:.2f}). Add it anyway?"),
             })
-        if prep["pii_sensitive"]:
-            warnings.append({"kind": "pii",
-                             "message": f"Possible sensitive personal data detected ({', '.join(prep['pii_sensitive'].keys())}). Confirm it's okay to index.",
-                             "details": prep["pii_sensitive"]})
+        # name redaction removed
         if prep["non_english"]:
             warnings.append({"kind": "language",
                              "message": f"This may not be in English ({prep['lang_note']}). Add it anyway?"})
@@ -314,16 +331,33 @@ async def kb_upload(
 
         plan = await _supersede_plan(project, canonical_title)
         if plan["would_delete_chunks"] > 0 and "supersede" not in acknowledged:
+            # Cross-project match: say WHERE the existing copy lives instead of
+            # silently duplicating (old behaviour) or silently deleting it.
+            if plan["differing_project_tags"]:
+                where = ", ".join(f'"{t}"' for t in plan["differing_project_tags"])
+                message = (
+                    f"A document titled \"{canonical_title}\" already exists in the "
+                    f"knowledge base under a DIFFERENT project tag ({where}; you "
+                    f"submitted \"{project}\") — version "
+                    f"{max(plan['prior_versions'], default=1)}, "
+                    f"{plan['would_delete_chunks']} chunks. Continuing removes that "
+                    f"copy and replaces it under \"{project}\". Continue?"
+                )
+            else:
+                message = (
+                    f"This replaces the existing \"{canonical_title}\" in project "
+                    f"\"{project}\" (version {max(plan['prior_versions'], default=1)}, "
+                    f"{plan['would_delete_chunks']} chunks). The old version will be "
+                    f"removed and replaced. Continue?"
+                )
             return {
                 "status": "needs_input",
                 "missing_fields": [],
                 "warnings": [{
                     "kind": "supersede",
-                    "message": (f"This replaces the existing \"{canonical_title}\" in project "
-                                f"\"{project}\" (version {max(plan['prior_versions'], default=1)}, "
-                                f"{plan['would_delete_chunks']} chunks). The old version will be "
-                                f"removed and replaced. Continue?"),
+                    "message": message,
                     "would_delete_chunks": plan["would_delete_chunks"],
+                    "differingProjects": plan["differing_project_tags"],
                 }],
                 "prefilled_metadata": await extract_metadata(prep["all_text"], filename),
                 "extraction": extraction_info,
@@ -423,7 +457,7 @@ async def _acquire_ingest_slot(max_wait: float = 120.0) -> bool:
 
 
 async def _kb_bulk_task(tmp_dir, file_entries, project, doc_type, year,
-                        uploader_id, uploader_name, batch_id, acknowledged=frozenset()):
+                        uploader_id, uploader_name, batch_id):
     """Process a bulk batch SEQUENTIALLY with pacing. Each file goes through the
     shared _prepare_kb_file + _ingest_prepared_file path; the per-file outcome is
     written to the kb_batch doc's files[] so the panel shows live progress. The
@@ -442,10 +476,7 @@ async def _kb_bulk_task(tmp_dir, file_entries, project, doc_type, year,
                 if sr:
                     await _set_bulk_file(batch_id, idx, "skipped", reason=sr,
                                          extra=({"duplicateOf": prep.get("duplicate_of")} if sr == "duplicate" else None))
-                elif prep["pii_sensitive"] and "pii" not in acknowledged:
-                    # Sensitive PII (student number / phone) and not batch-acknowledged.
-                    # Emails are public author contact and never reach here.
-                    await _set_bulk_file(batch_id, idx, "skipped", reason="pii")
+                # name redaction removed
                 elif not val.reserve_hash(prep["content_hash"]):
                     await _set_bulk_file(batch_id, idx, "skipped", reason="duplicate")
                 else:
@@ -499,7 +530,6 @@ async def kb_bulk_upload(
     docType: str = Form(""),
     year: str = Form(""),
     permissionConfirmed: bool = Form(False),
-    acknowledge: str = Form(""),  # batch-level acks, e.g. "pii" to add sensitive-PII files
     current_user: User = Depends(rate_limit_identify),
 ):
     """Bulk multi-file KB upload. Shared metadata (project/docType/year/permission)
@@ -546,10 +576,9 @@ async def kb_bulk_upload(
         "total": len(files), "done": 0, "files": file_status,
         "createdAt": datetime.now(),
     })
-    acknowledged = {k.strip() for k in acknowledge.split(",") if k.strip()}
     background_tasks.add_task(
         _kb_bulk_task, tmp_dir, file_entries, project, docType, year,
-        str(current_user.id), uploader_name, batch_id, acknowledged,
+        str(current_user.id), uploader_name, batch_id,
     )
     return {"status": "queued", "batchId": batch_id, "total": len(files),
             "accepted": len(file_entries)}
@@ -558,7 +587,12 @@ async def kb_bulk_upload(
 @router.get("/status")
 async def kb_status():
     """Ungated: lets the frontend decide whether to show the KB nav + panel."""
-    return {"enabled": config.KB_UPLOAD_ENABLED}
+    out = {"enabled": config.KB_UPLOAD_ENABLED}
+    # Key PRESENT only when web ingestion is on (highlights /api/upload/config
+    # pattern), so the flag-off response stays byte-identical.
+    if config.WEB_INGEST_ENABLED:
+        out["webIngest"] = True
+    return out
 
 
 @router.get("/batch/{batch_id}")
@@ -588,13 +622,14 @@ async def kb_my_uploads(current_user: User = Depends(get_current_user)):
     cur = files_collection.find(
         {"docType": "kb_batch", "uploaderId": str(current_user.id)},
         {"batchId": 1, "status": 1, "canonicalTitle": 1, "version": 1, "projectTag": 1,
-         "filename": 1, "chunkCount": 1, "sourceFormat": 1, "createdAt": 1},
+         "filename": 1, "chunkCount": 1, "sourceFormat": 1, "createdAt": 1,
+         "canonicalUrl": 1, "fetchedAt": 1},
     ).sort("createdAt", -1).limit(50)
     items = []
     async for d in cur:
         created = d.get("createdAt")
         age_h = ((datetime.now() - created).total_seconds() / 3600) if created else 1e9
-        items.append({
+        item = {
             "batchId": d.get("batchId"),
             "status": d.get("status"),
             "canonicalTitle": d.get("canonicalTitle"),
@@ -605,7 +640,15 @@ async def kb_my_uploads(current_user: User = Depends(get_current_user)):
             "sourceFormat": d.get("sourceFormat"),
             "createdAt": created.isoformat() if created else None,
             "deletable": age_h <= config.KB_SELF_DELETE_WINDOW_HOURS,
-        })
+        }
+        # Web documents carry their link + fetch date for the panel's web
+        # indicator. Keys PRESENT only on web batches, so every file batch's
+        # payload is byte-identical to before.
+        if d.get("canonicalUrl"):
+            item["canonicalUrl"] = d.get("canonicalUrl")
+            fa = d.get("fetchedAt")
+            item["fetchedAt"] = fa.isoformat() if hasattr(fa, "isoformat") else fa
+        items.append(item)
     return {"uploads": items}
 
 
@@ -628,7 +671,7 @@ async def kb_admin_uploads(
     items: List[Dict[str, Any]] = []
     async for d in files_collection.find(q).sort("createdAt", -1).limit(200):
         created = d.get("createdAt")
-        items.append({
+        item = {
             "batchId": d.get("batchId"),
             "uploaderId": d.get("uploaderId"),
             "uploaderName": d.get("uploaderName"),
@@ -639,7 +682,13 @@ async def kb_admin_uploads(
             "status": d.get("status"),
             "sourceFormat": d.get("sourceFormat"),
             "createdAt": created.isoformat() if created else None,
-        })
+        }
+        # Same conditional web fields as /my-uploads (see comment there).
+        if d.get("canonicalUrl"):
+            item["canonicalUrl"] = d.get("canonicalUrl")
+            fa = d.get("fetchedAt")
+            item["fetchedAt"] = fa.isoformat() if hasattr(fa, "isoformat") else fa
+        items.append(item)
     return {"uploads": items}
 
 

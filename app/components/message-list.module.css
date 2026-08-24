@@ -285,6 +285,19 @@
   color: var(--t3);
 }
 
+/* Shown in place of the sources panel when the backend reports
+   no_high_confidence_sources: retrieval found documents but none were
+   confident, so the answer is ungrounded. Same voice as the panel header. */
+.groundingNote {
+  margin: 12px 0 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t3);
+}
+
 .sourceRow {
   display: flex;
   align-items: baseline;

@@ -389,3 +389,221 @@ describe("report CSV quoting + export row counts", () => {
     expect(csv).toBe("item,user,email,group,qty,taken,due,days overdue\r\n");
   });
 });
+
+// =============================================================================
+// Phase 1 — client mirror of the server overlap gate
+// =============================================================================
+import { conflictLine, reservationConflicts } from "../lib";
+
+describe("reservationConflicts (client mirror)", () => {
+  const item = { id: "LL-FOS-001", kind: "equipment", qty: 1 };
+  const sensor = { id: "LL-SEN-004", kind: "equipment", qty: 3 };
+  const d = (day: number, h = 9) => new Date(2026, 7, day, h, 0);
+  const res = [
+    { id: "r1", itemId: "LL-FOS-001", user: "Saeed Mahjoubi", start: "2026-08-23T09:00:00", end: "2026-08-24T09:00:00", status: "Approved", qty: 1 },
+  ];
+  test("abutting is allowed, overlap is named", () => {
+    expect(reservationConflicts(item, d(24), d(25), 1, [], res)).toEqual([]);
+    expect(reservationConflicts(item, d(22), d(23), 1, [], res)).toEqual([]);
+    const holders = reservationConflicts(item, d(23, 12), d(25), 1, [], res);
+    expect(holders.map((h) => h.user)).toEqual(["Saeed Mahjoubi"]);
+    expect(conflictLine(holders)).toMatch(/^Conflicts with Saeed Mahjoubi \(/);
+  });
+  test("partial quantity is allowed up to capacity; denied never counts; self excluded", () => {
+    const two = [{ id: "r2", itemId: "LL-SEN-004", user: "A", start: "2026-08-23T09:00:00", end: "2026-08-26T09:00:00", status: "Pending", qty: 2 }];
+    expect(reservationConflicts(sensor, d(24), d(25), 1, [], two)).toEqual([]);
+    expect(reservationConflicts(sensor, d(24), d(25), 2, [], two)).toHaveLength(1);
+    const denied = [{ ...two[0], status: "Denied" }];
+    expect(reservationConflicts(sensor, d(24), d(25), 3, [], denied)).toEqual([]);
+    expect(reservationConflicts(item, d(23), d(24), 1, [], res, "r1")).toEqual([]);
+  });
+  test("open equipment loans commit the window (open-ended ones indefinitely)", () => {
+    const loan = [{ id: "t1", itemId: "LL-FOS-001", type: "checkout", user: "Yongxuan Gao", qty: 1, ts: "2026-08-20T09:00:00", expectedReturn: null }];
+    expect(reservationConflicts(item, d(30), d(31), 1, loan, [])).toHaveLength(1);
+    const due = [{ ...loan[0], expectedReturn: "2026-08-23T09:00:00" }];
+    expect(reservationConflicts(item, d(23), d(24), 1, due, [])).toEqual([]);
+  });
+});
+
+// =============================================================================
+// Phase 3 — filters, column sorting, item fields
+// =============================================================================
+import { distinctValues, filterItems, sortItems } from "../lib";
+
+describe("filterItems / sortItems / distinctValues", () => {
+  const items = [
+    { id: "B", name: "beta", category: "Sensors", kind: "equipment", qty: 5, qtyOut: 2, status: "In use", location: "Small room", condition: "Good", custodian: "Zed" },
+    { id: "A", name: "alpha", category: "Sensors", kind: "equipment", qty: 10, qtyOut: 0, status: "Available", location: "Storage", condition: "Fair", custodian: "Amy" },
+    { id: "C", name: "Gamma", category: "Fiber optics", kind: "consumable", qty: 2, minStock: 3, status: "Available", location: "Small room", condition: "Good", custodian: "Bo", description: "spare cleaver blades" },
+    { id: "D", name: "delta", category: "Fiber optics", kind: "equipment", qty: 1, qtyOut: 1, status: "Borrowed" },
+  ];
+  test("location and condition filters work alongside category/status/query", () => {
+    expect(filterItems(items, { location: "Small room" }).map((i) => i.id)).toEqual(["B", "C"]);
+    expect(filterItems(items, { condition: "Fair" }).map((i) => i.id)).toEqual(["A"]);
+    expect(filterItems(items, { location: "Small room", category: "Fiber optics" }).map((i) => i.id)).toEqual(["C"]);
+    expect(filterItems(items, { query: "cleaver" }).map((i) => i.id)).toEqual(["C"]); // description is searchable
+    // rows with no location/condition show as "—" and are selectable as such
+    expect(filterItems(items, { location: "—" }).map((i) => i.id)).toEqual(["D"]);
+  });
+  test("sorts by name (case-insensitive), numeric quantity/available, and status; desc flips", () => {
+    expect(sortItems(items, "name", "asc").map((i) => i.id)).toEqual(["A", "B", "D", "C"]);
+    expect(sortItems(items, "qty", "desc").map((i) => i.id)).toEqual(["A", "B", "C", "D"]);
+    expect(sortItems(items, "available", "asc").map((i) => i.id)).toEqual(["D", "C", "B", "A"]); // 0,2,3,10
+    expect(sortItems(items, "status", "asc").map((i) => i.id)).toEqual(["A", "C", "D", "B"]);   // Available×2 (tie→id), Borrowed, In use
+    expect(sortItems(items, "location", "desc")[0].id).toBe("A"); // "Storage" > "Small room" > ""
+  });
+  test("sorting is deterministic on ties (item id) and never mutates the input", () => {
+    const copy = [...items];
+    sortItems(items, "category", "asc");
+    expect(items).toEqual(copy);
+    expect(sortItems(items, "category", "asc").map((i) => i.id)).toEqual(["C", "D", "A", "B"]);
+  });
+  test("distinctValues lists sorted unique values with a placeholder for missing", () => {
+    expect(distinctValues(items, "location")).toEqual(["—", "Small room", "Storage"]);
+    expect(distinctValues(items, "condition")).toEqual(["—", "Fair", "Good"]);
+    expect(distinctValues(items, "category")).toEqual(["Fiber optics", "Sensors"]);
+  });
+});
+
+// =============================================================================
+// Phase 4 — reservation calendar (same week + half-open math as PLAXIS)
+// =============================================================================
+import { reservationCalendar, reservationCoversDay, weekDays } from "../lib";
+
+describe("reservation calendar", () => {
+  const r = { start: "2026-08-24T09:00:00", end: "2026-08-26T09:00:00" }; // Mon 09:00 → Wed 09:00
+  test("covers the days it overlaps, half-open at midnight", () => {
+    expect(reservationCoversDay(r, new Date(2026, 7, 23))).toBe(false); // Sun
+    expect(reservationCoversDay(r, new Date(2026, 7, 24))).toBe(true);  // Mon
+    expect(reservationCoversDay(r, new Date(2026, 7, 26))).toBe(true);  // Wed (ends 09:00 that day)
+    expect(reservationCoversDay({ start: "2026-08-24T09:00:00", end: "2026-08-26T00:00:00" }, new Date(2026, 7, 26))).toBe(false);
+    expect(reservationCoversDay(r, new Date(2026, 7, 27))).toBe(false);
+  });
+  test("builds item rows × the same 7 days weekDays() yields; denied excluded; spans sorted", () => {
+    const items = [{ id: "B", name: "Beta" }, { id: "A", name: "Alpha" }];
+    const res = [
+      { id: "r1", itemId: "B", user: "Bo", start: "2026-08-25T13:00:00", end: "2026-08-25T15:00:00", status: "Approved" },
+      { id: "r2", itemId: "B", user: "Al", start: "2026-08-25T09:00:00", end: "2026-08-25T11:00:00", status: "Pending" },
+      { id: "r3", itemId: "A", user: "Cy", start: "2026-08-28T09:00:00", end: "2026-08-29T09:00:00", status: "Denied" },
+      { id: "r4", itemId: "A", user: "Di", start: "2026-09-10T09:00:00", end: "2026-09-11T09:00:00", status: "Approved" }, // other week
+    ];
+    const anchor = new Date(2026, 7, 26);
+    const cal = reservationCalendar(items, res, anchor);
+    expect(cal.days.map((d) => d.getTime())).toEqual(weekDays(anchor).map((d) => d.getTime()));
+    expect(cal.rows.map((x) => x.name)).toEqual(["Beta"]); // Alpha only has denied / other-week rows
+    const tuesday = cal.rows[0].cells[1];
+    expect(tuesday.map((x) => x.id)).toEqual(["r2", "r1"]); // sorted by start
+    expect(cal.rows[0].cells[0]).toEqual([]);
+  });
+});
+
+// =============================================================================
+// Phase 5 — archived items are out of circulation
+// =============================================================================
+import { activeItems, availabilityByCategory as byCat, isArchived } from "../lib";
+
+describe("archived items", () => {
+  const items = [
+    { id: "A", name: "live", category: "Sensors", kind: "equipment", qty: 1, status: "Available" },
+    { id: "Z", name: "old", category: "Sensors", kind: "consumable", qty: 0, minStock: 2, status: "Archived", condition: "Damaged" },
+  ];
+  test("map to their own status key and are filtered from active views/reports", () => {
+    expect(statusKey({ status: "Archived" })).toBe("archived");
+    expect(isArchived({ status: "Archived" })).toBe(true);
+    expect(activeItems(items).map((i) => i.id)).toEqual(["A"]);
+    expect(byCat(items)[0]).toEqual({ category: "Sensors", records: 1, available: 1, inUse: 0, maintenance: 0, missing: 0 });
+    expect(lowStockItems(items)).toEqual([]);
+    expect(serviceItems(items)).toEqual([]);
+  });
+});
+
+// =============================================================================
+// Phase 6 — backup file validation happens client-side before any request
+// =============================================================================
+import { parseBackupFile } from "../lib";
+
+describe("parseBackupFile", () => {
+  test("accepts a v1 backup and returns it typed", () => {
+    const b = parseBackupFile(JSON.stringify({ schemaVersion: 1, exportedAt: "2026-08-21T12:00:00", collections: { items: [] } }));
+    expect(b.schemaVersion).toBe(1);
+  });
+  test.each([
+    ["not json", /valid JSON/],
+    [JSON.stringify({ schemaVersion: 2, collections: {} }), /schemaVersion 2/],
+    [JSON.stringify({ schemaVersion: 1 }), /no collections/],
+    [JSON.stringify({ schemaVersion: 1, collections: { secrets: [] } }), /Unknown collection/],
+    [JSON.stringify({ schemaVersion: 1, collections: { items: {} } }), /not a list/],
+  ])("rejects bad input: %s", (text, msg) => {
+    expect(() => parseBackupFile(text)).toThrow(msg);
+  });
+});
+
+// =============================================================================
+// Phase 7 — XLSX and CSV come from one builder and carry identical rows
+// =============================================================================
+import { buildXlsx, readXlsxRows, reportToAoa } from "../lib";
+
+describe("xlsx export", () => {
+  const reports = [
+    inventoryReport(ITEMS),
+    mostBorrowedReport(TX, ITEMS),
+    overdueReport(TX, ITEMS, [], NOW),
+    lowStockReport(ITEMS),
+    serviceReport(ITEMS),
+  ];
+  test.each(reports.map((r) => [r.title, r] as const))("%s: workbook rows == report rows == CSV rows", (_t, report) => {
+    const back = readXlsxRows(buildXlsx(report));
+    const expected = reportToAoa(report);
+    expect(back).toEqual(expected);
+    // CSV row count (header + data rows) matches the sheet, and the header
+    // line is the same header row.
+    const csv = toCSV(report.headers, report.rows);
+    expect(csv.split("\r\n").filter(Boolean).length).toBe(back.length);
+    expect(back[0]).toEqual(report.headers);
+  });
+  test("cells with commas, quotes and newlines survive the round trip intact", () => {
+    const back = readXlsxRows(buildXlsx(inventoryReport(ITEMS)));
+    const row = back.find((r) => r[0] === "LL-FOS-001")!;
+    expect(row[1]).toBe('Interrogator, LUNA "ODiSI"');
+    expect(row[20]).toBe("Shared instrument.\nBook through Reservations");
+  });
+});
+
+// =============================================================================
+// Phase 8 — photo pre-check mirrors the server rule
+// =============================================================================
+import { validateImageFile } from "../lib";
+
+describe("validateImageFile", () => {
+  test("accepts jpeg/png/webp under 10 MB; rejects others by type or size", () => {
+    expect(validateImageFile({ name: "a.jpg", type: "image/jpeg", size: 1024 })).toBe("");
+    expect(validateImageFile({ name: "a.webp", type: "image/webp", size: 1024 })).toBe("");
+    expect(validateImageFile({ name: "a.gif", type: "image/gif", size: 1024 })).toMatch(/JPEG, PNG or WebP/);
+    expect(validateImageFile({ name: "a.png", type: "image/png", size: 11 * 1024 * 1024 })).toMatch(/10 MB/);
+    expect(validateImageFile({ name: "a.png", type: "image/png", size: 0 })).toMatch(/empty/);
+  });
+});
+
+import { reservationsEmptyMessage, visibleReservations } from "../lib";
+
+describe("reservations list scoping (pure)", () => {
+  const res = [
+    { id: "a", itemId: "X", start: "2026-09-01T09:00:00" },
+    { id: "b", itemId: "Y", start: "2026-09-05T09:00:00" },
+    { id: "c", itemId: "X", start: "2026-09-03T09:00:00" },
+  ];
+  test("'' shows everything newest-first; an id filters", () => {
+    expect(visibleReservations(res, "").map((r) => r.id)).toEqual(["b", "c", "a"]);
+    expect(visibleReservations(res, "X").map((r) => r.id)).toEqual(["c", "a"]);
+    expect(visibleReservations(res, "Z")).toEqual([]);
+  });
+  test("the two empty states differ", () => {
+    expect(reservationsEmptyMessage(0, "", "")).toBe("No reservations yet.");
+    expect(reservationsEmptyMessage(0, "X", "Thing")).toBe("No reservations yet.");
+    expect(reservationsEmptyMessage(3, "", "")).toBe("No reservations yet.");
+    expect(reservationsEmptyMessage(1, "X", "Thing")).toBe(
+      'No reservations for Thing. 1 other exist — choose "All items" to see them.',
+    );
+    expect(reservationsEmptyMessage(2, "X", "Thing")).toContain("2 others exist");
+  });
+});

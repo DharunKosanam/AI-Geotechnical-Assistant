@@ -14,12 +14,14 @@ import s from "../inventory.module.css";
 import {
   Alert,
   InvDB,
+  activeItems,
   dayKey,
   fmtDate,
   fmtDateTime,
   isStaleSeat,
   openLoans,
   overdueDays,
+  seatsInUse,
   statusKey,
 } from "../lib";
 import { Empty, Kpi, SeverityDot } from "./ui";
@@ -33,6 +35,7 @@ export type DashboardProps = {
 
 export default function Dashboard({ db, session, onOpenItem, onGoTo }: DashboardProps) {
   const now = new Date();
+  const items = activeItems(db.items); // archived items are out of circulation
   const loans = openLoans(db.tx);
   const overdue = loans.filter((t) => overdueDays(t.expectedReturn, now) > 0);
   const weekAhead = new Date(now.getTime() + 7 * 86_400_000);
@@ -41,12 +44,14 @@ export default function Dashboard({ db, session, onOpenItem, onGoTo }: Dashboard
     const start = r.start ? new Date(r.start) : null;
     return start !== null && start >= new Date(now.getTime() - 86_400_000) && start <= weekAhead;
   });
-  const seatsInUse = db.plaxis.filter((p) => !p.loggedOut).length;
-  const lowStock = db.items.filter(
+  // DISTINCT occupied seats, never session rows (two sessions on one seat
+  // once read 2/2 while Seat 2 was free).
+  const seatsHeld = seatsInUse(db.plaxis);
+  const lowStock = items.filter(
     (i) => i.kind === "consumable" && typeof i.minStock === "number" && (i.qty ?? 0) <= i.minStock,
   ).length;
-  const availableNow = db.items.filter((i) => statusKey(i) === "available").length;
-  const inMaintenance = db.items.filter((i) => statusKey(i) === "maintenance").length;
+  const availableNow = items.filter((i) => statusKey(i) === "available").length;
+  const inMaintenance = items.filter((i) => statusKey(i) === "maintenance").length;
 
   // "Checked out to you": the session user's open loans — matched on email
   // first (what the server records), name as the fallback for legacy rows.
@@ -71,14 +76,14 @@ export default function Dashboard({ db, session, onOpenItem, onGoTo }: Dashboard
   return (
     <div>
       <div className={s.kpiRow}>
-        <Kpi label="Items on record" value={db.items.length} />
+        <Kpi label="Items on record" value={items.length} />
         <Kpi label="Available now" value={availableNow} tone="accent" />
         <Kpi label="On loan" value={loans.length} />
         <Kpi label="Overdue" value={overdue.length} tone={overdue.length ? "danger" : undefined} />
         <Kpi label="Low or out of stock" value={lowStock} tone={lowStock ? "warn" : undefined} />
         <Kpi label="In maintenance" value={inMaintenance} tone={inMaintenance ? "warn" : undefined} />
         <Kpi label="Reservations · 7d" value={upcomingRes.length} />
-        <Kpi label="PLAXIS seats in use" value={`${seatsInUse} / 2`} tone={seatsInUse >= 2 ? "warn" : undefined} />
+        <Kpi label="PLAXIS seats in use" value={`${seatsHeld} / 2`} tone={seatsHeld >= 2 ? "warn" : undefined} />
       </div>
 
       <div className={s.twoCol}>
@@ -200,7 +205,12 @@ export default function Dashboard({ db, session, onOpenItem, onGoTo }: Dashboard
                 {db.audit.slice(0, 12).map((a) => (
                   <tr key={a.id}>
                     <td className={s.cellNum}>{fmtDateTime(a.ts)}</td>
-                    <td className={s.cellStrong}>{a.actor || "—"}</td>
+                    <td className={s.cellStrong}>
+                      {a.actor || "—"}
+                      {a.owner && a.owner !== a.actor ? (
+                        <span className={s.muted}> · for {a.owner}</span>
+                      ) : null}
+                    </td>
                     <td>{a.action || "—"}</td>
                     <td className={s.cellNum}>{a.entity || "—"}</td>
                     <td className={s.muted}>

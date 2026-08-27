@@ -33,14 +33,16 @@ import {
 import { ExportModal } from "./modals";
 import { Chip, Empty } from "./ui";
 
+// Export buttons name their CONTENT, never a format: the Export modal
+// offers CSV and XLSX, so "Export CSV" would be wrong on both counts.
 function SectionHead({
   title,
   onExport,
-  exportLabel = "Export CSV",
+  exportLabel,
 }: {
   title: string;
   onExport: () => void;
-  exportLabel?: string;
+  exportLabel: string;
 }) {
   return (
     <div className={s.sectionHead}>
@@ -83,23 +85,23 @@ export default function ReportsPage({
       {/* 1 ─ Availability by category */}
       <SectionHead
         title="Availability by category"
-        exportLabel="Export inventory"
+        exportLabel="Export availability"
         onExport={() => open(inventoryReport(db.items))}
       />
       <div className={s.tableWrap}>
-        <table className={s.table}>
+        <table className={`${s.table} ${s.cardTable}`}>
           <thead>
             <tr><th>Category</th><th>Records</th><th>Available</th><th>In use / out</th><th>Maintenance</th><th>Missing</th></tr>
           </thead>
           <tbody>
             {byCategory.map((c) => (
               <tr key={c.category}>
-                <td className={s.cellStrong}>{c.category}</td>
-                <td className={s.cellNum}>{c.records}</td>
-                <td className={`${s.cellNum} ${s.kpiValue_accent}`}>{c.available}</td>
-                <td className={s.cellNum}>{c.inUse}</td>
-                <td className={`${s.cellNum} ${c.maintenance ? s.warnText : ""}`}>{c.maintenance}</td>
-                <td className={`${s.cellNum} ${c.missing ? s.dangerText : ""}`}>{c.missing}</td>
+                <td className={`${s.cellStrong} ${s.cardLead}`}>{c.category}</td>
+                <td className={s.cellNum} data-label="Records">{c.records}</td>
+                <td className={`${s.cellNum} ${s.kpiValue_accent} ${s.cardAvail}`} data-label="Available">{c.available}</td>
+                <td className={s.cellNum} data-label="In use">{c.inUse}</td>
+                <td className={`${s.cellNum} ${c.maintenance ? s.warnText : ""}`} data-label="Maintenance">{c.maintenance}</td>
+                <td className={`${s.cellNum} ${c.missing ? s.dangerText : ""}`} data-label="Missing">{c.missing}</td>
               </tr>
             ))}
           </tbody>
@@ -109,7 +111,7 @@ export default function ReportsPage({
       <div className={s.twoCol}>
         {/* 2 ─ Most borrowed */}
         <div>
-          <SectionHead title="Most borrowed" onExport={() => open(mostBorrowedReport(db.tx, db.items))} />
+          <SectionHead title="Most borrowed" exportLabel="Export most borrowed" onExport={() => open(mostBorrowedReport(db.tx, db.items))} />
           <div className={s.panel}>
             {frequency.length === 0 ? (
               <Empty>No check-outs yet.</Empty>
@@ -143,7 +145,7 @@ export default function ReportsPage({
 
         {/* 3 ─ Overdue */}
         <div>
-          <SectionHead title="Overdue" onExport={() => open(overdueReport(db.tx, db.items, db.alerts))} />
+          <SectionHead title="Overdue" exportLabel="Export overdue" onExport={() => open(overdueReport(db.tx, db.items, db.alerts))} />
           <div className={s.panel}>
             {overdue.length === 0 ? (
               <Empty>Nothing overdue — every loan is inside its return window.</Empty>
@@ -181,7 +183,7 @@ export default function ReportsPage({
         onExport={() => open(lowStockReport(db.items))}
       />
       <div className={s.tableWrap}>
-        <table className={s.table}>
+        <table className={`${s.table} ${s.cardTable}`}>
           <thead>
             <tr><th>Item</th><th>On hand</th><th>Minimum</th><th>Supplier</th><th>Location</th><th>Expiry</th></tr>
           </thead>
@@ -193,12 +195,12 @@ export default function ReportsPage({
                 const low = typeof i.minStock === "number" && availableQty(i) <= i.minStock;
                 return (
                   <tr key={i.id} {...rowProps(i.id)}>
-                    <td className={`${s.cellStrong} ${s.strata} ${low ? s.strata_daq : s.strata_fiber}`}>{i.name}</td>
-                    <td className={`${s.cellNum} ${low ? s.dangerText : ""}`}>{i.qty ?? 0} {i.unit || ""}</td>
-                    <td className={s.cellNum}>{i.minStock ?? 0}</td>
-                    <td className={s.muted}>{i.supplier || "—"}</td>
-                    <td className={s.muted}>{i.location || "—"}</td>
-                    <td className={s.muted}>{fmtDate(i.expiryDate)}</td>
+                    <td className={`${s.cellStrong} ${s.strata} ${low ? s.strata_daq : s.strata_fiber} ${s.cardLead}`}>{i.name}</td>
+                    <td className={`${s.cellNum} ${low ? s.dangerText : ""} ${s.cardAvail}`} data-label="On hand">{i.qty ?? 0} {i.unit || ""}</td>
+                    <td className={s.cellNum} data-label="Minimum">{i.minStock ?? 0}</td>
+                    <td className={s.muted} data-label="Supplier">{i.supplier || "—"}</td>
+                    <td className={s.muted} data-label="Location">{i.location || "—"}</td>
+                    <td className={s.muted} data-label="Expiry">{fmtDate(i.expiryDate)}</td>
                   </tr>
                 );
               })
@@ -208,9 +210,9 @@ export default function ReportsPage({
       </div>
 
       {/* 5 ─ Damaged, missing and in service */}
-      <SectionHead title="Damaged, missing and in service" onExport={() => open(serviceReport(db.items))} />
+      <SectionHead title="Damaged, missing and in service" exportLabel="Export damaged" onExport={() => open(serviceReport(db.items))} />
       <div className={s.tableWrap}>
-        <table className={s.table}>
+        <table className={`${s.table} ${s.cardTable}`}>
           <thead>
             <tr><th>Item</th><th>Status</th><th>Condition</th><th>Location</th><th>Next service</th></tr>
           </thead>
@@ -222,14 +224,14 @@ export default function ReportsPage({
                 const next = nextMaint(i);
                 return (
                   <tr key={i.id} {...rowProps(i.id)}>
-                    <td className={`${s.cellStrong} ${s.strata} ${s[`strata_${strataKey(i.category)}`]}`}>
+                    <td className={`${s.cellStrong} ${s.strata} ${s[`strata_${strataKey(i.category)}`]} ${s.cardLead}`}>
                       {i.name}
                       {i.notes ? <div className={s.rowNote}>{i.notes.slice(0, 70)}</div> : null}
                     </td>
-                    <td><Chip status={statusKey(i)} /></td>
-                    <td className={s.muted}>{i.condition || "—"}</td>
-                    <td className={s.muted}>{i.location || "—"}</td>
-                    <td className={s.cellNum}>{next ? next.toLocaleDateString("en-CA") : "—"}</td>
+                    <td className={s.cardStatus}><Chip status={statusKey(i)} /></td>
+                    <td className={s.muted} data-label="Condition">{i.condition || "—"}</td>
+                    <td className={s.muted} data-label="Location">{i.location || "—"}</td>
+                    <td className={s.cellNum} data-label="Next service">{next ? next.toLocaleDateString("en-CA") : "—"}</td>
                   </tr>
                 );
               })

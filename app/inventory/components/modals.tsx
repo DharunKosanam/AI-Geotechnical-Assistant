@@ -24,17 +24,25 @@ import {
   InvUser,
   SessionPrefill,
   V_NUMBER_RE,
+  conflictLine,
   downloadCSV,
+  downloadXlsx,
   fmtDate,
+  nextMaint,
+  reservationConflicts,
   rosterIdentityLine,
   seatConflicts,
+  validateImageFile,
 } from "../lib";
 import { CheckoutForm } from "../actions";
 import { Field, Modal } from "./ui";
 
 const CONDITIONS = ["New", "Good", "Fair", "Needs calibration", "Damaged"];
+// "Reserved" is deliberately absent: the server derives it from the live
+// reservation rows on every read and never stores it (a stored value went
+// stale once — LL-SEN-004 read Reserved with no reservation behind it).
 const STATUSES = [
-  "Available", "In use", "Borrowed", "Reserved", "Under maintenance",
+  "Available", "In use", "Borrowed", "Under maintenance",
   "Missing", "Depleted", "Retired",
 ];
 const KINDS = ["equipment", "consumable", "software"];
@@ -42,6 +50,22 @@ const KINDS = ["equipment", "consumable", "software"];
 function useField(initial = "") {
   const [value, setValue] = useState(initial);
   return { value, setValue };
+}
+
+/** In-flight guard (control audit finding: no create path had one): the
+ * submitting control disables on first fire, so a double-click can never
+ * produce two rows. Submission closes the modal, so unmount is the
+ * re-enable; a validation failure never arms it. */
+function useSubmitOnce(): [boolean, (fire: () => void) => void] {
+  const [busy, setBusy] = useState(false);
+  return [
+    busy,
+    (fire) => {
+      if (busy) return;
+      setBusy(true);
+      fire();
+    },
+  ];
 }
 
 function validStudentId(v: string): boolean {
@@ -72,6 +96,7 @@ export function CheckoutModal({
     purpose: "",
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [busy, fireOnce] = useSubmitOnce();
   const set = (k: keyof CheckoutForm, v: string | number) =>
     setForm((f) => ({ ...f, [k]: v }));
 
@@ -82,7 +107,7 @@ export function CheckoutModal({
     else if (form.qty > avail) e.qty = `Only ${avail} available.`;
     if (!form.expectedReturn) e.expectedReturn = "A return date is required.";
     setErrors(e);
-    if (Object.keys(e).length === 0) onSubmit(form);
+    if (Object.keys(e).length === 0) fireOnce(() => onSubmit(form));
   };
 
   // studentId/group are resolved SERVER-side from the roster via the
@@ -98,7 +123,7 @@ export function CheckoutModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnPrimary} onClick={submit}>Check out</button>
+          <button type="button" className={s.btnPrimary} disabled={busy} onClick={submit}>Check out</button>
         </>
       }
     >
@@ -140,14 +165,21 @@ export function ReturnModal({
   loans,
   onSubmit,
   onClose,
+  submitLabel,
 }: {
   item: InvItem;
   loans: InvTx[];
   onSubmit: (loan: InvTx, condAfter: string) => void;
   onClose: () => void;
+  /** Personal-view on-behalf labelling: a manager closing someone else's
+   * loan sees "Return for {name}" on the confirm button (the chosen
+   * consistent treatment — same wording as the PLAXIS release). Absent
+   * (flag off), the button reads "Record return" exactly as today. */
+  submitLabel?: (loan: InvTx) => string;
 }) {
   const [loanId, setLoanId] = useState(loans[0]?.id || "");
   const cond = useField(item.condition || "Good");
+  const [busy, fireOnce] = useSubmitOnce();
   const loan = loans.find((l) => l.id === loanId);
 
   return (
@@ -157,9 +189,9 @@ export function ReturnModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnPrimary} disabled={!loan}
-            onClick={() => loan && onSubmit(loan, cond.value)}>
-            Record return
+          <button type="button" className={s.btnPrimary} disabled={!loan || busy}
+            onClick={() => loan && fireOnce(() => onSubmit(loan, cond.value))}>
+            {loan && submitLabel ? submitLabel(loan) : "Record return"}
           </button>
         </>
       }
@@ -195,6 +227,7 @@ export function AdjustModal({
   const [delta, setDelta] = useState("0");
   const note = useField("");
   const [error, setError] = useState("");
+  const [busy, fireOnce] = useSubmitOnce();
 
   const submit = () => {
     const n = Number(delta);
@@ -206,7 +239,7 @@ export function AdjustModal({
       setError(`Cannot go below zero (currently ${item.qty ?? 0}).`);
       return;
     }
-    onSubmit(n, note.value);
+    fireOnce(() => onSubmit(n, note.value));
   };
 
   return (
@@ -216,7 +249,7 @@ export function AdjustModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnPrimary} onClick={submit}>Apply</button>
+          <button type="button" className={s.btnPrimary} disabled={busy} onClick={submit}>Apply</button>
         </>
       }
     >
@@ -233,15 +266,26 @@ export function AdjustModal({
 // ---------------------------------------------------------------------------
 export function DamageModal({
   item,
+  photosEnabled = false,
   onSubmit,
   onClose,
 }: {
   item: InvItem;
-  onSubmit: (condAfter: string, note: string) => void;
+  photosEnabled?: boolean;
+  onSubmit: (condAfter: string, note: string, photo?: File | null) => void;
   onClose: () => void;
 }) {
   const cond = useField("Damaged");
   const note = useField("");
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [photoError, setPhotoError] = useState("");
+  const [busy, fireOnce] = useSubmitOnce();
+  const pick = (f: File | undefined) => {
+    if (!f) { setPhoto(null); setPhotoError(""); return; }
+    const err = validateImageFile(f);
+    setPhotoError(err);
+    setPhoto(err ? null : f);
+  };
   return (
     <Modal
       title={`Report damage — ${item.name}`}
@@ -249,7 +293,8 @@ export function DamageModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnDanger} onClick={() => onSubmit(cond.value, note.value)}>
+          <button type="button" className={s.btnDanger} disabled={!!photoError || busy}
+            onClick={() => fireOnce(() => onSubmit(cond.value, note.value, photo))}>
             Record damage
           </button>
         </>
@@ -264,6 +309,12 @@ export function DamageModal({
         <textarea className={s.textarea} rows={3} value={note.value}
           onChange={(e) => note.setValue(e.target.value)} />
       </Field>
+      {photosEnabled && (
+        <Field label="Photo (optional · JPEG, PNG or WebP · 10 MB)" error={photoError}>
+          <input className={s.input} type="file" accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => pick(e.target.files?.[0])} />
+        </Field>
+      )}
     </Modal>
   );
 }
@@ -288,6 +339,7 @@ export function ItemModal({
     item ?? { kind: "equipment", status: "Available", condition: "Good", qty: 1, minStock: 0 },
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [busy, fireOnce] = useSubmitOnce();
   const set = (k: keyof InvItem, v: unknown) => setFields((f) => ({ ...f, [k]: v }));
 
   const submit = () => {
@@ -296,7 +348,7 @@ export function ItemModal({
     const qty = Number(fields.qty ?? 0);
     if (!Number.isInteger(qty) || qty < 0) e.qty = "Zero or more.";
     setErrors(e);
-    if (Object.keys(e).length === 0) onSubmit(fields);
+    if (Object.keys(e).length === 0) fireOnce(() => onSubmit(fields));
   };
 
   return (
@@ -306,7 +358,7 @@ export function ItemModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnPrimary} onClick={submit}>
+          <button type="button" className={s.btnPrimary} disabled={busy} onClick={submit}>
             {item ? "Save changes" : "Add item"}
           </button>
         </>
@@ -364,10 +416,23 @@ export function ItemModal({
             onChange={(e) => set("expiryDate", e.target.value || null)} />
         </Field>
         <div className={s.fieldFull}>
+          <Field label="Description">
+            <textarea className={s.textarea} rows={2} value={String(fields.description ?? "")}
+              onChange={(e) => set("description", e.target.value)} />
+          </Field>
+        </div>
+        <div className={s.fieldFull}>
           <Field label="Notes">
             <textarea className={s.textarea} rows={2} value={String(fields.notes ?? "")}
               onChange={(e) => set("notes", e.target.value)} />
           </Field>
+        </div>
+        <div className={s.fieldFull}>
+          <span className={s.muted}>
+            Next service (derived on save from last maintenance + interval):{" "}
+            {nextMaint({ lastMaint: String(fields.lastMaint ?? "") || null, maintDays: Number(fields.maintDays ?? 0) })
+              ?.toLocaleDateString("en-CA") || "—"}
+          </span>
         </div>
       </div>
     </Modal>
@@ -378,11 +443,15 @@ export function ItemModal({
 export function ReserveModal({
   item,
   prefill,
+  tx,
+  res,
   onSubmit,
   onClose,
 }: {
   item: InvItem;
   prefill: SessionPrefill;
+  tx: InvTx[];
+  res: InvRes[];
   onSubmit: (fields: Partial<InvRes>) => void;
   onClose: () => void;
 }) {
@@ -393,9 +462,19 @@ export function ReserveModal({
     start: "",
     end: "",
     purpose: "",
+    qty: 1,
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const set = (k: keyof InvRes, v: string) => setFields((f) => ({ ...f, [k]: v }));
+  const [busy, fireOnce] = useSubmitOnce();
+  const set = (k: keyof InvRes, v: string | number) => setFields((f) => ({ ...f, [k]: v }));
+
+  // Overlap pre-check (the server is the gate; this shows it before submit).
+  const conflict = useMemo(() => {
+    const start = fields.start ? new Date(fields.start) : null;
+    const end = fields.end ? new Date(fields.end) : null;
+    if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return "";
+    return conflictLine(reservationConflicts(item, start, end, Number(fields.qty) || 1, tx, res));
+  }, [fields.start, fields.end, fields.qty, item, tx, res]);
 
   const submit = () => {
     const e: Record<string, string> = {};
@@ -403,8 +482,12 @@ export function ReserveModal({
     if (!fields.start) e.start = "Required.";
     if (!fields.end) e.end = "Required.";
     if (fields.start && fields.end && fields.end <= fields.start) e.end = "Must be after the start.";
+    const q = Number(fields.qty);
+    if (!Number.isInteger(q) || q < 1) e.qty = "At least 1.";
+    else if (q > (item.qty ?? 0)) e.qty = `The lab has ${item.qty ?? 0}.`;
+    if (conflict) e.end = conflict;
     setErrors(e);
-    if (Object.keys(e).length === 0) onSubmit(fields);
+    if (Object.keys(e).length === 0) fireOnce(() => onSubmit({ ...fields, qty: q }));
   };
 
   return (
@@ -414,7 +497,7 @@ export function ReserveModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnPrimary} onClick={submit}>Request reservation</button>
+          <button type="button" className={s.btnPrimary} disabled={busy} onClick={submit}>Request reservation</button>
         </>
       }
     >
@@ -433,12 +516,19 @@ export function ReserveModal({
           <input className={s.input} type="datetime-local" value={String(fields.end ?? "")}
             onChange={(e) => set("end", e.target.value)} />
         </Field>
-        <div className={s.fieldFull}>
-          <Field label="Purpose">
-            <input className={s.input} value={String(fields.purpose ?? "")}
-              onChange={(e) => set("purpose", e.target.value)} />
-          </Field>
-        </div>
+        <Field label={`Quantity (lab has ${item.qty ?? 0})`} error={errors.qty}>
+          <input className={s.input} type="number" min={1} max={Math.max(item.qty ?? 1, 1)}
+            value={Number(fields.qty ?? 1)} onChange={(e) => set("qty", Number(e.target.value))} />
+        </Field>
+        <Field label="Purpose">
+          <input className={s.input} value={String(fields.purpose ?? "")}
+            onChange={(e) => set("purpose", e.target.value)} />
+        </Field>
+        {conflict ? (
+          <div className={s.fieldFull}>
+            <span className={s.dangerText}>{conflict}. Pick another window — the server will refuse this one.</span>
+          </div>
+        ) : null}
       </div>
     </Modal>
   );
@@ -456,6 +546,7 @@ export function UserModal({
 }) {
   const [fields, setFields] = useState<Partial<InvUser>>(existing ?? { role: "Student" });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [busy, fireOnce] = useSubmitOnce();
   const set = (k: keyof InvUser, v: string) => setFields((f) => ({ ...f, [k]: v }));
 
   const submit = () => {
@@ -463,7 +554,7 @@ export function UserModal({
     if (!String(fields.name || "").trim()) e.name = "A name is required.";
     if (!validStudentId(String(fields.studentId || ""))) e.studentId = "V-number looks like V00891234.";
     setErrors(e);
-    if (Object.keys(e).length === 0) onSubmit(fields);
+    if (Object.keys(e).length === 0) fireOnce(() => onSubmit(fields));
   };
 
   const text: [keyof InvUser, string][] = [
@@ -478,7 +569,7 @@ export function UserModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnPrimary} onClick={submit}>
+          <button type="button" className={s.btnPrimary} disabled={busy} onClick={submit}>
             {existing ? "Save" : "Add"}
           </button>
         </>
@@ -522,6 +613,7 @@ export function PlaxisModal({
   const user = useField(prefill.name);
   const purpose = useField("");
   const [error, setError] = useState("");
+  const [busy, fireOnce] = useSubmitOnce();
 
   const window = useMemo(() => {
     const start = new Date(`${date}T${from}`);
@@ -540,14 +632,15 @@ export function PlaxisModal({
     }
     setError("");
     // No group key: the server resolves it from the roster by the named
-    // person — a client-supplied value would be overwritten anyway.
-    onSubmit({
+    // person — a client-supplied value would be overwritten anyway. This
+    // pre-check is presentation only; the SERVER seat gate is the refusal.
+    fireOnce(() => onSubmit({
       seat,
       user: user.value,
       purpose: purpose.value,
       start: window.start.toISOString(),
       end: window.end.toISOString(),
-    });
+    }));
   };
 
   return (
@@ -557,7 +650,7 @@ export function PlaxisModal({
       actions={
         <>
           <button type="button" className={s.btnGhost} onClick={onClose}>Cancel</button>
-          <button type="button" className={s.btnPrimary} onClick={submit}>Start session</button>
+          <button type="button" className={s.btnPrimary} disabled={busy} onClick={submit}>Start session</button>
         </>
       }
     >
@@ -603,10 +696,17 @@ export function ExportModal({
   payload: ExportPayload;
   onClose: () => void;
 }) {
-  const filename = `linlab-${payload.title.replace(/\s+/g, "_").toLowerCase()}-${new Date().toLocaleDateString("en-CA")}.csv`;
+  const [format, setFormat] = useState<"csv" | "xlsx">("csv");
+  const base = `linlab-${payload.title.replace(/\s+/g, "_").toLowerCase()}-${new Date().toLocaleDateString("en-CA")}`;
+  const filename = `${base}.${format}`;
   const download = () => {
-    downloadCSV(filename, payload.csv);
-    toast("CSV downloaded");
+    if (format === "xlsx") {
+      downloadXlsx(filename, payload.report);
+      toast("Excel file downloaded");
+    } else {
+      downloadCSV(filename, payload.csv);
+      toast("CSV downloaded");
+    }
   };
   const copy = async () => {
     try {
@@ -625,14 +725,21 @@ export function ExportModal({
           <button type="button" className={s.btnGhost} onClick={onClose}>Close</button>
           <button type="button" className={s.btn} onClick={copy}>Copy</button>
           <button type="button" className={s.btnPrimary} onClick={download} disabled={payload.rows === 0}>
-            Download CSV
+            Download {format.toUpperCase()}
           </button>
         </>
       }
     >
-      <textarea className={s.preview} readOnly value={payload.csv} rows={14} aria-label="CSV preview" />
+      <div className={s.segmented} role="group" aria-label="Export format">
+        <button type="button" className={`${s.segment} ${format === "csv" ? s.segmentActive : ""}`}
+          aria-pressed={format === "csv"} onClick={() => setFormat("csv")}>CSV</button>
+        <button type="button" className={`${s.segment} ${format === "xlsx" ? s.segmentActive : ""}`}
+          aria-pressed={format === "xlsx"} onClick={() => setFormat("xlsx")}>Excel (.xlsx)</button>
+      </div>
+      <textarea className={s.preview} readOnly value={payload.csv} rows={14} aria-label="Export preview" />
       <span className={s.muted}>
-        {payload.rows} row{payload.rows === 1 ? "" : "s"} · {filename} · opens cleanly in Excel.
+        {payload.rows} row{payload.rows === 1 ? "" : "s"} · {filename}
+        {format === "xlsx" ? " · same rows as the preview, one sheet, auto-width columns." : " · opens cleanly in Excel."}
       </span>
     </Modal>
   );

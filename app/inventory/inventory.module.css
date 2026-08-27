@@ -157,11 +157,23 @@
 .select:focus-visible,
 .textarea:focus-visible { outline: none; }
 
+/* Search is the most-used control, so it gets a REAL flex-basis and a
+   readable minimum. `flex: 1` alone means flex-basis 0: the input then
+   contributes nothing to the wrap decision, so the selects, checkbox and
+   button pack the first line at natural width and the search is left with
+   the scraps — split 50/50 with .spacer (also flex: 1) — collapsing to a
+   sliver at desktop width. A 240px basis participates in wrapping (the row
+   breaks instead of squeezing), flex-grow 3 wins most of the free space,
+   and min-width: 200px is the floor. Guarded by a test (mobile.test.tsx). */
 .searchInput {
   composes: input;
-  flex: 1;
-  max-width: 320px;
+  flex: 3 1 240px;
+  min-width: 200px;
+  max-width: 480px;
 }
+
+/* A select never grows past its row (long item names, 390px screens). */
+.select { max-width: 100%; }
 
 .spacer { flex: 1; }
 
@@ -181,6 +193,10 @@
   padding: 6px 12px;
   cursor: pointer;
   transition: background 120ms var(--ease);
+  /* A button never breaks or shrinks below its label: inside a wrapping
+     toolbar the ROW wraps instead ("Add member" was clipped mid-word). */
+  white-space: nowrap;
+  flex: none;
 }
 
 .btn:hover { background: var(--s4); }
@@ -263,6 +279,13 @@
 
 .cellStrong { color: var(--t1); }
 .cellNum { font-family: var(--font-mono); font-size: 11.5px; }
+/* Per-row action buttons stay on one line; the .tableWrap scroll reveals
+   them rather than the column squeezing them onto two. */
+.actionsCell { white-space: nowrap; }
+/* Free-text / JSON cells (audit detail) wrap instead of forcing the table
+   wide: JSON has no spaces, so without this one row could push the table to
+   thousands of pixels. */
+.cellWrap { overflow-wrap: anywhere; max-width: 420px; }
 .muted { color: var(--t3); }
 .dangerText { color: var(--danger-2); }
 .warnText { color: var(--warn-2); }
@@ -311,6 +334,26 @@
 .chip_missing { color: var(--bg); background: var(--danger); }
 .chip_depleted { color: var(--t3); background: var(--s2); border-color: var(--line-2); }
 .chip_retired { color: var(--t3); background: transparent; border-color: var(--line); }
+.chip_archived { color: var(--t3); background: transparent; border-color: var(--line-2); text-decoration: line-through; }
+
+.thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: var(--r1);
+  border: 1px solid var(--line-2);
+  background: var(--s1);
+  display: block;
+}
+
+.toggleLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--t2);
+  cursor: pointer;
+}
 
 /* --- Alerts: severity ranks crim (danger) > rust (oxide) > amber (warn) --- */
 .sevDot {
@@ -507,6 +550,7 @@
 /* --- PLAXIS weekly grid ----------------------------------------------------- */
 .plxNav {
   display: flex;
+  flex-wrap: wrap; /* six controls: wrap on phones rather than overflow */
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
@@ -726,4 +770,186 @@
 .rowNote {
   font-size: 11px;
   color: var(--t3);
+}
+
+/* Segmented list/calendar toggle (mirrors the sidebar's segmented control). */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  overflow: hidden;
+}
+
+.segment {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.segmentActive {
+  background: var(--s3);
+  color: var(--accent-2);
+}
+
+/* Reservation calendar: item rows × day columns; cells/heads reuse the
+   PLAXIS grid classes so both schedules read as one system. */
+.calGrid {
+  display: grid;
+  grid-template-columns: 180px repeat(7, minmax(110px, 1fr));
+  min-width: 900px;
+}
+
+.calItem {
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+}
+
+.calItemBtn {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--t1);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.calItemBtn:hover { color: var(--accent-2); }
+
+.calSpan {
+  appearance: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: var(--r1);
+  padding: 2px 6px;
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--t1);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Status colour on the existing tokens: Approved = accent, Pending = warn. */
+.calSpan_approved { background: var(--accent-a); border-left-color: var(--accent); }
+.calSpan_pending { background: var(--warn-a); border-left-color: var(--warn); color: var(--warn-2); }
+
+.calEmpty {
+  grid-column: 1 / -1;
+  padding: 18px;
+  text-align: center;
+  color: var(--t3);
+  font-size: 12.5px;
+}
+
+.sortTh {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sortTh:hover { color: var(--t2); }
+
+.sortIndicator {
+  color: var(--accent-2);
+}
+
+/* --- Mobile (lab-floor phone use). Structural rules only, same tokens.
+       Breakpoint 767px per the spec (the rest of the app uses 720/560/480).
+       .subnav keeps flex: none above — never collapsed, scrolls sideways. --- */
+@media (max-width: 767px) {
+  .wrap { padding: 12px 12px 32px; }
+
+  .subnav { -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .subTab { min-height: 44px; padding: 12px 12px; }
+
+  /* 44px tap targets; 16px inputs stop iOS zoom-on-focus. */
+  .btn, .btnPrimary, .btnDanger, .btnGhost { min-height: 44px; padding: 10px 14px; }
+  .btnSm { min-height: 44px; padding: 10px 12px; }
+  .input, .select, .textarea { font-size: 16px; min-height: 44px; }
+  .searchInput { max-width: none; flex-basis: 100%; }
+  .rowBtn td, .linkRow, .listRow { min-height: 44px; }
+
+  .kpiRow { grid-template-columns: repeat(2, 1fr); }
+  .twoCol, .formGrid { grid-template-columns: 1fr; }
+
+  /* Stacked cards: a .cardTable becomes one card per row. The row leads
+     with .cardLead (name), .cardStatus (chip) and .cardAvail (count);
+     every other cell prints its column name from data-label. */
+  .cardTable thead { display: none; }
+  .cardTable, .cardTable tbody { display: block; width: 100%; }
+  .cardTable tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 14px;
+    padding: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .cardTable td {
+    display: block;
+    border: 0;
+    padding: 2px 0;
+    font-size: 12.5px;
+    /* Flex items default to min-width:auto = their longest unbreakable
+       word; an email or JSON blob would push the card past the panel. */
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .cardTable .actionsCell { flex: 1 1 100%; padding-top: 6px; }
+  .cellWrap { max-width: 100%; }
+  .cardTable td[data-label]::before {
+    content: attr(data-label);
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--t3);
+    margin-right: 6px;
+  }
+  .cardTable .cardLead { order: -3; flex: 1 1 100%; font-size: 14.5px; padding-left: 10px; }
+  .cardTable .cardLead::before { content: none; }
+  .cardTable .cardStatus { order: -2; }
+  .cardTable .cardStatus::before { content: none; }
+  .cardTable .cardAvail { order: -1; }
+  .cardTable .cardHide { display: none; }
+
+  /* Item drawer: full-screen sheet instead of a side panel. */
+  .layoutSplit { display: block; }
+  .drawer {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    border-radius: 0;
+    border: 0;
+    overflow-y: auto;
+    z-index: 55;
+    padding: 16px 16px 40px;
+  }
+
+  /* Modals: full-screen. */
+  .modalOverlay { padding: 0; align-items: stretch; }
+  .modal { width: 100%; max-height: none; border-radius: 0; border: 0; }
+
+  /* PLAXIS grid / reservation calendar: horizontal scroll, first column pinned. */
+  .plxHour, .calItem { position: sticky; left: 0; z-index: 2; background: var(--s2); }
+  .calGrid { grid-template-columns: 140px repeat(7, minmax(110px, 1fr)); }
+  .plxGrid { grid-template-columns: 48px repeat(7, minmax(112px, 1fr)); }
 }

@@ -54,6 +54,7 @@ inv_res_collection = db["inv_res"]          # reservations
 inv_plaxis_collection = db["inv_plaxis"]    # PLAXIS seat sessions
 inv_users_collection = db["inv_users"]      # lab members (name/email/role/group)
 inv_audit_collection = db["inv_audit"]      # one record per inventory mutation
+inv_reminders_collection = db["inv_reminders"]  # (email, day) sends — idempotency for the daily digest
 
 
 async def ensure_indexes():
@@ -118,6 +119,24 @@ async def ensure_indexes():
             [("start", 1), ("end", 1)], name="start_1_end_1"
         )
         await inv_plaxis_collection.create_index("loggedOut", name="loggedOut_1")
+        # TOCTOU backstop for the seat-window gate: two truly concurrent
+        # identical bookings can both pass the application-level
+        # read-then-check, so HELD sessions (loggedOut: false — the UI always
+        # writes the field) are additionally unique on (seat, start, end) at
+        # the DB layer. The router translates the DuplicateKeyError into the
+        # same 409 the gate produces. Partial: logged-out history rows are
+        # exempt, so re-booking a window someone has released stays legal.
+        # Verified buildable against the live data before adding (1 held
+        # row, no duplicates, no rows missing loggedOut).
+        await inv_plaxis_collection.create_index(
+            [("seat", 1), ("start", 1), ("end", 1)],
+            unique=True,
+            partialFilterExpression={"loggedOut": False},
+            name="uniq_held_seat_window",
+        )
+        await inv_reminders_collection.create_index(
+            [("email", 1), ("day", 1)], unique=True, name="email_1_day_1"
+        )
 
 
 async def close_mongo_connection():

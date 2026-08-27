@@ -157,6 +157,92 @@ def _is_open_loan(tx: Dict[str, Any]) -> bool:
     return tx.get("type") == "checkout" and not tx.get("actualReturn")
 
 
+def active_items(items: Sequence[Dict]) -> List[Dict]:
+    """Archived items are out of circulation: excluded from the snapshot,
+    alerts, KPIs and the feasibility walk (spec: archive instead of delete)."""
+    return [i for i in items if str(i.get("status") or "").lower() != "archived"]
+
+
+# ---------------------------------------------------------------------------
+# Reserved is DERIVED, never stored.
+#
+# The bench (and the sheet it was transcribed from) wrote "Reserved" onto the
+# item when an approved booking was created and nothing ever cleared it, so
+# an item could read Reserved with no reservation behind it (LL-SEN-004 was
+# seeded exactly that way). Here the item's status is computed from the live
+# inv_res rows on every read: a non-denied reservation whose window has not
+# ended makes an otherwise-available item Reserved; none makes a stored
+# Reserved read Available. Deny, cancel, delete and expiry therefore need no
+# clearing step — they simply stop being live rows. Any other status (Under
+# maintenance, Borrowed, Missing, Archived...) is left alone: a broken item
+# with a booking is still broken.
+# ---------------------------------------------------------------------------
+_RESERVED = "Reserved"
+_AVAILABLE = "Available"
+_RESERVABLE = ("available", "reserved")
+_DEAD_RES = ("denied", "cancelled", "canceled")
+
+
+def _live_reservation(r: Dict[str, Any], now: datetime) -> bool:
+    if str(r.get("status") or "Pending").lower() in _DEAD_RES:
+        return False
+    end = _as_dt(r.get("end"))
+    return end is None or end >= now
+
+
+def derive_reserved(
+    items: Sequence[Dict], reservations: Sequence[Dict], now: datetime
+) -> List[Dict]:
+    """Return COPIES of ``items`` with ``status`` derived from ``reservations``
+    (see the note above). Pure; the input dicts are not mutated."""
+    live: Dict[str, int] = {}
+    for r in reservations:
+        if _live_reservation(r, now):
+            key = str(r.get("itemId"))
+            live[key] = live.get(key) + 1 if key in live else 1
+    out: List[Dict] = []
+    for it in items:
+        doc = dict(it)
+        stored = str(doc.get("status") or "").lower()
+        if stored in _RESERVABLE:
+            doc["status"] = _RESERVED if live.get(str(doc.get("id"))) else _AVAILABLE
+        out.append(doc)
+    return out
+
+
+def strip_stored_reserved(doc: Dict[str, Any]) -> None:
+    """Write-path guard: a client (or an old backup) asking to STORE
+    ``Reserved`` stores ``Available`` instead — the reservation rows decide
+    what is read back. In place; no-op for every other status."""
+    if str(doc.get("status") or "").lower() == _RESERVED.lower():
+        doc["status"] = _AVAILABLE
+
+
+def reconcile_status_plan(
+    items: Sequence[Dict], reservations: Sequence[Dict], now: datetime
+) -> List[Dict[str, Any]]:
+    """Items whose STORED status disagrees with their reservations. Each row:
+    ``{id, name, stored, derived, live}`` (live = count of backing rows).
+    Stored-Reserved-with-nothing-behind-it is the stale case the one-shot
+    script rewrites; stored-Available-with-live-rows is reported only (the
+    read path already shows it as Reserved and the rows will expire)."""
+    derived = {str(d.get("id")): d for d in derive_reserved(items, reservations, now)}
+    live: Dict[str, int] = {}
+    for r in reservations:
+        if _live_reservation(r, now):
+            key = str(r.get("itemId"))
+            live[key] = live.get(key, 0) + 1
+    plan: List[Dict[str, Any]] = []
+    for it in items:
+        key = str(it.get("id"))
+        stored = str(it.get("status") or "")
+        new = str(derived[key].get("status") or "")
+        if stored != new:
+            plan.append({"id": key, "name": it.get("name") or key, "stored": stored,
+                         "derived": new, "live": live.get(key, 0)})
+    return plan
+
+
 # ---------------------------------------------------------------------------
 # Alerts (server-side port of the bench's alertsFor(), computed in Python)
 # ---------------------------------------------------------------------------
@@ -184,6 +270,7 @@ def alerts_for(
     now: datetime,
 ) -> List[Dict[str, Any]]:
     """Alert records (see _alert). Deterministic; sorted high→low."""
+    items = active_items(items)
     items_by_id = {str(i.get("id")): i for i in items}
     alerts: List[Dict[str, Any]] = []
 
@@ -254,6 +341,22 @@ def alerts_for(
                 ref_id=s.get("id"),
             ))
 
+    # Upcoming reservations: APPROVED bookings starting within 48 h (the
+    # Dashboard's heads-up; the 24 h email digest is the reminder).
+    for r in reservations:
+        if str(r.get("status") or "").lower() != "approved":
+            continue
+        start = _as_dt(r.get("start"))
+        if start is None or not (now <= start <= now + timedelta(hours=48)):
+            continue
+        alerts.append(_alert(
+            "low", "upcoming_reservation",
+            f"{r.get('user') or 'unknown'}: {_item_name(items_by_id, r.get('itemId'))} "
+            f"reserved {_fmt_dt(start)} → {_fmt_dt(r.get('end'))}",
+            item_id=r.get("itemId"), ref_id=r.get("id"),
+            days=(start - now).days,
+        ))
+
     # Reservations pending approval.
     for r in reservations:
         if str(r.get("status") or "").lower() == "pending":
@@ -263,6 +366,34 @@ def alerts_for(
                 f"{_fmt_dt(r.get('start'))} → {_fmt_dt(r.get('end'))} awaits approval",
                 item_id=r.get("itemId"), ref_id=r.get("id"),
             ))
+
+    # Conflicting bookings already in the data (pre-Phase-1 rows, or a loan
+    # that overran into a reservation). One alert per overlapping pair.
+    seen_pairs: set = set()
+    for it in items:
+        item_res = [r for r in reservations
+                    if str(r.get("itemId")) == str(it.get("id"))
+                    and str(r.get("status") or "").lower() != "denied"]
+        for r in item_res:
+            r_start, r_end = _as_dt(r.get("start")), _as_dt(r.get("end"))
+            if r_start is None or r_end is None:
+                continue
+            holders = reservation_conflicts(
+                it, r_start, r_end, int(r.get("qty") or 1), open_loans, reservations,
+                exclude_id=r.get("id"),
+            )
+            for h in holders:
+                pair = frozenset({str(r.get("id")), str(h.get("id"))})
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                alerts.append(_alert(
+                    "high", "conflict",
+                    f"{it.get('name') or it.get('id')}: {r.get('user') or 'unknown'} "
+                    f"({_fmt_dt(r_start)} → {_fmt_dt(r_end)}) overlaps {h['user']} "
+                    f"({h['start']} → {h['end']})",
+                    item_id=it.get("id"), ref_id=r.get("id"),
+                ))
 
     order = {"high": 0, "medium": 1, "low": 2}
     alerts.sort(key=lambda a: (order.get(a["severity"], 3), a["kind"], a["detail"]))
@@ -373,7 +504,7 @@ def render_snapshot(
     drops whole sections (SECTION_DROP_ORDER), then whole rows from the
     largest section — never a partial row."""
     cap = cap_tokens if cap_tokens is not None else config.INVENTORY_SNAPSHOT_TOKEN_CAP
-    items = data.get("items") or []
+    items = active_items(data.get("items") or [])
     open_loans = [t for t in (data.get("open_loans") or []) if _is_open_loan(t)]
     reservations = data.get("reservations") or []
     plaxis = data.get("plaxis") or []
@@ -458,7 +589,9 @@ async def _fetch_inventory_data() -> Dict[str, List[Dict]]:
         )
     ]
     return {
-        "items": items,
+        # Reserved is derived from the reservation rows on every read, so the
+        # snapshot, alerts and feasibility never see a stale stored value.
+        "items": derive_reserved(items, reservations, datetime.now()),
         "open_loans": open_loans,
         "reservations": reservations,
         "plaxis": plaxis,
@@ -514,6 +647,115 @@ def _overlaps(res: Dict, start: datetime, end: datetime) -> bool:
     return r_start < end and r_end > start
 
 
+def _loan_overlaps(tx: Dict, start: datetime, end: datetime) -> bool:
+    """An open loan occupies [ts, expectedReturn) — open-ended when it has no
+    expected return (the gear is out until it comes back). Half-open, like
+    reservations."""
+    l_start = _as_dt(tx.get("ts")) or datetime.min
+    l_end = _as_dt(tx.get("expectedReturn"))
+    if l_end is None:
+        return l_start < end
+    return l_start < end and l_end > start
+
+
+def reservation_conflicts(
+    item: Dict,
+    start: datetime,
+    end: datetime,
+    qty: int,
+    open_loans: Sequence[Dict],
+    reservations: Sequence[Dict],
+    exclude_id: Any = None,
+) -> List[Dict[str, Any]]:
+    """The overlap gate (Phase 1). Quantity-aware: committed units in
+    [start, end) — open loans (equipment only; consumables are consumed at
+    checkout, never on loan) plus every NON-denied reservation, half-open
+    overlap ``a.start < b.end and a.end > b.start`` — plus the requested
+    ``qty`` must not exceed the item's ``qty``. Returns the holders that
+    share the window when it would (empty list == allowed). ``exclude_id``
+    skips the reservation being edited/approved so it never conflicts with
+    itself."""
+    item_id = str(item.get("id"))
+    capacity = int(item.get("qty") or 0)
+    requested = max(int(qty or 1), 0)
+    holders: List[Dict[str, Any]] = []
+    committed = 0
+    if item.get("kind") != "consumable":
+        for tx in open_loans:
+            if not _is_open_loan(tx) or str(tx.get("itemId")) != item_id:
+                continue
+            if _loan_overlaps(tx, start, end):
+                committed += int(tx.get("qty") or 1)
+                holders.append({
+                    "kind": "loan", "id": tx.get("id"), "user": tx.get("user") or "unknown",
+                    "qty": int(tx.get("qty") or 1), "start": _fmt_dt(tx.get("ts")),
+                    "end": _fmt_dt(tx.get("expectedReturn")) or "open",
+                })
+    for r in reservations:
+        if str(r.get("itemId")) != item_id:
+            continue
+        if exclude_id is not None and str(r.get("id")) == str(exclude_id):
+            continue
+        if str(r.get("status") or "").lower() == "denied":
+            continue
+        if _overlaps(r, start, end):
+            committed += int(r.get("qty") or 1)
+            holders.append({
+                "kind": "reservation", "id": r.get("id"), "user": r.get("user") or "unknown",
+                "qty": int(r.get("qty") or 1), "start": _fmt_dt(r.get("start")),
+                "end": _fmt_dt(r.get("end")), "status": r.get("status") or "Pending",
+            })
+    if committed + requested <= capacity:
+        return []
+    return holders
+
+
+def conflict_message(item: Dict, holders: Sequence[Dict[str, Any]]) -> str:
+    """The 409 body: names every holder and window sharing the requested slot."""
+    parts = [f"{h['user']} ({h['start']} → {h['end']})" for h in holders]
+    return (f"{item.get('name') or item.get('id')} is already committed for that window — "
+            f"conflicts with {'; '.join(parts) if parts else 'existing bookings'}.")
+
+
+# The lab license: two concurrent seats, numbered 0 and 1 ("Seat 1"/"Seat 2"
+# in the UI). The seat-window gate below is the server-side counterpart of
+# the client's presentation-only seatConflicts pre-check.
+PLAXIS_SEATS = (0, 1)
+
+
+def seat_conflicts(
+    sessions: Sequence[Dict],
+    seat: Any,
+    start: datetime,
+    end: datetime,
+    exclude_id: Any = None,
+) -> List[Dict[str, Any]]:
+    """HELD sessions (``loggedOut`` falsy) on ``seat`` overlapping the
+    half-open window ``a.start < b.end and a.end > b.start`` — back-to-back
+    bookings never conflict, exactly like reservation_conflicts. NOT
+    owner-aware: every held session counts regardless of who holds it (a
+    seat is physical state). ``exclude_id`` skips the row being edited so it
+    never conflicts with itself. Holder dicts feed conflict_message
+    unchanged."""
+    holders: List[Dict[str, Any]] = []
+    for s in sessions:
+        if s.get("loggedOut"):
+            continue
+        if s.get("seat") != seat:
+            continue
+        if exclude_id is not None and str(s.get("id")) == str(exclude_id):
+            continue
+        s_start, s_end = _as_dt(s.get("start")), _as_dt(s.get("end"))
+        if s_start is None or s_end is None:
+            continue
+        if s_start < end and s_end > start:
+            holders.append({
+                "kind": "plaxis", "id": s.get("id"), "user": s.get("user") or "unknown",
+                "start": _fmt_dt(s_start), "end": _fmt_dt(s_end),
+            })
+    return holders
+
+
 def _availability(
     item: Dict,
     req_qty: int,
@@ -567,7 +809,7 @@ def compute_feasibility(
     date the FULL set becomes available (scanning loan expectedReturns and
     reservation ends as the only times availability can change)."""
     now = now or datetime.now()
-    items_by_id = {str(i.get("id")): i for i in items}
+    items_by_id = {str(i.get("id")): i for i in active_items(items)}
     open_loans = [t for t in open_loans if _is_open_loan(t)]
     approved_res = [r for r in approved_res if str(r.get("status") or "").lower() == "approved"]
 

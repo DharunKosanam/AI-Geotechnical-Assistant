@@ -7,10 +7,12 @@
  *   checkout          POST /api/inventory/tx   {type:"checkout"}   (server: qtyOut+/consumable qty-)
  *   returnLoan        POST /api/inventory/tx   {type:"return", closesTxId}
  *   adjust            POST /api/inventory/tx   {type:"adjust", qty:<delta>}
- *   damage            POST /api/inventory/tx   {type:"damage", condAfter}
+ *   damage            POST /api/inventory/tx   {type:"damage", condAfter, photoId?}
+ *                     (optional photo: POST /api/inventory/photos first, INVENTORY_PHOTOS_ENABLED)
  *   createItem        POST /api/inventory/items
  *   editItem          PUT  /api/inventory/items/{id}      + expectedUpdatedAt
- *   deleteItem        DELETE /api/inventory/items/{id}
+ *   archiveItem       POST /api/inventory/items/{id}/archive   (manager; DELETE /items is 405)
+ *   restoreItem       POST /api/inventory/items/{id}/restore
  *   reserve           POST /api/inventory/res
  *   setReservation    PUT  /api/inventory/res/{id}        + expectedUpdatedAt (approve/deny)
  *   cancelReservation DELETE /api/inventory/res/{id}
@@ -141,19 +143,24 @@ export function makeActions(mutate: Mutate) {
       });
     },
 
-    damage(item: InvItem, condAfter: string, note: string, actor: string) {
+    damage(item: InvItem, condAfter: string, note: string, actor: string, photo?: File | null) {
       return mutate({
         label: item.name,
         refetch: ["items", "tx"],
         apply: (db) => patchItem(db, item.id, { condition: condAfter || "Damaged" }),
-        request: () =>
-          invApi.create("tx", {
+        request: async () => {
+          // Upload first so the transaction can reference the stored photo;
+          // a failed upload fails the whole report (nothing half-recorded).
+          const photoId = photo ? (await invApi.uploadPhoto(photo)).photoId : undefined;
+          return invApi.create("tx", {
             type: "damage",
             itemId: item.id,
             condAfter: condAfter || "Damaged",
             user: actor,
             purpose: note,
-          }),
+            ...(photoId ? { photoId } : {}),
+          });
+        },
       });
     },
 
@@ -182,12 +189,21 @@ export function makeActions(mutate: Mutate) {
       });
     },
 
-    deleteItem(item: InvItem) {
+    archiveItem(item: InvItem) {
       return mutate({
         label: item.name,
         refetch: ["items"],
-        apply: (db) => ({ ...db, items: db.items.filter((i) => i.id !== item.id) }),
-        request: () => invApi.remove("items", item.id),
+        apply: (db) => patchItem(db, item.id, { status: "Archived" }),
+        request: () => invApi.action("items", item.id, "archive"),
+      });
+    },
+
+    restoreItem(item: InvItem) {
+      return mutate({
+        label: item.name,
+        refetch: ["items"],
+        apply: (db) => patchItem(db, item.id, { status: "Available" }),
+        request: () => invApi.action("items", item.id, "restore"),
       });
     },
 
@@ -200,7 +216,7 @@ export function makeActions(mutate: Mutate) {
       };
       return mutate({
         label: item.name,
-        refetch: ["res"],
+        refetch: ["res", "items"], // Reserved is server-derived from the rows
         apply: (db) => ({ ...db, res: [...db.res, optimistic] }),
         request: () =>
           invApi.create("res", {
@@ -214,7 +230,7 @@ export function makeActions(mutate: Mutate) {
     setReservation(r: InvRes, itemName: string, status: "Approved" | "Denied") {
       return mutate({
         label: itemName,
-        refetch: ["res"],
+        refetch: ["res", "items"], // Reserved is server-derived from the rows
         apply: (db) => ({
           ...db,
           res: db.res.map((x) => (x.id === r.id ? { ...x, status } : x)),
@@ -227,7 +243,7 @@ export function makeActions(mutate: Mutate) {
     cancelReservation(r: InvRes, itemName: string) {
       return mutate({
         label: itemName,
-        refetch: ["res"],
+        refetch: ["res", "items"], // Reserved is server-derived from the rows
         apply: (db) => ({ ...db, res: db.res.filter((x) => x.id !== r.id) }),
         request: () => invApi.remove("res", r.id),
       });

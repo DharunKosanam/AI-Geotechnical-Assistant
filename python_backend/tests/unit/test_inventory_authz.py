@@ -4,14 +4,26 @@ the roster-resolved studentId/group on transactions. Route functions are
 called directly with fake collections — no Mongo, no HTTP server."""
 
 import re
+from datetime import datetime
 
 import pytest
 from fastapi import HTTPException
 
+from app.core import config
 from app.routers import inventory as inv
 from models import User
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _personal_view_off(monkeypatch):
+    """This file documents the OPEN-ACCESS (flag-off) contract. The dev .env
+    now ships INVENTORY_PERSONAL_VIEW=true (live since 2026-08-26), so pin
+    it off explicitly instead of inheriting the environment — the
+    ROUTER_UNCERTAIN_RETRIEVES lesson. Flag-on behavior is covered by
+    test_inventory_ownership.py."""
+    monkeypatch.setattr(config, "INVENTORY_PERSONAL_VIEW", False)
 
 
 def _user(role: str, email: str = "dharunk@uvic.ca") -> User:
@@ -37,6 +49,13 @@ class FakeColl:
         self.queries.append(query)
         return self.doc
 
+    def find(self, query=None, *a, **k):
+        # The Phase-1 overlap gate walks loans/reservations; these fakes hold none.
+        async def gen():
+            if False:
+                yield None
+        return gen()
+
     async def insert_one(self, d):
         self.inserted.append(d)
 
@@ -52,11 +71,15 @@ def fakes(monkeypatch):
     """Swap every collection the touched routes reach for fakes."""
     items = FakeColl(doc=None)
     tx = FakeColl()
-    res = FakeColl(doc={"id": "RS-1", "status": "Pending", "updatedAt": None})
+    # Reservation rows carry a real window + item so the Phase-1 overlap
+    # gate (which needs both) runs and passes on an empty ledger.
+    res = FakeColl(doc={"id": "RS-1", "itemId": "LL-X", "status": "Pending", "updatedAt": None,
+                        "start": datetime(2026, 9, 1, 9), "end": datetime(2026, 9, 2, 9)})
     users_coll = FakeColl(doc=None)
     audit = FakeColl()
     monkeypatch.setattr(inv, "inv_items_collection", items)
     monkeypatch.setattr(inv, "inv_tx_collection", tx)
+    monkeypatch.setattr(inv, "inv_res_collection", res)
     monkeypatch.setattr(inv, "inv_users_collection", users_coll)
     monkeypatch.setattr(inv, "inv_audit_collection", audit)
     monkeypatch.setattr(inv, "_RESOURCES", {
@@ -70,18 +93,25 @@ def fakes(monkeypatch):
 
 
 # --- the two retained gates, enforced server-side ---------------------------
-@pytest.mark.parametrize("resource", ["items", "users"])
-async def test_delete_items_and_users_403_for_non_manager(resource):
+async def test_delete_users_403_for_non_manager():
     # Gate fires BEFORE any DB access — no fakes needed.
     with pytest.raises(HTTPException) as ei:
-        await inv.delete_resource(resource, "X-1", current_user=_user("user"))
+        await inv.delete_resource("users", "X-1", current_user=_user("user"))
     assert ei.value.status_code == 403
 
 
+@pytest.mark.parametrize("role", ["user", "admin", "professor"])
+async def test_delete_items_is_405_for_everyone(role):
+    # Phase 5: inventory records are archived, never deleted — managers too.
+    with pytest.raises(HTTPException) as ei:
+        await inv.delete_resource("items", "LL-X", current_user=_user(role))
+    assert ei.value.status_code == 405
+
+
 @pytest.mark.parametrize("role", ["admin", "professor"])
-async def test_delete_items_allowed_for_managers(role, fakes):
-    out = await inv.delete_resource("items", "LL-X", current_user=_user(role))
-    assert out == {"deleted": "LL-X"}
+async def test_delete_users_allowed_for_managers(role, fakes):
+    out = await inv.delete_resource("users", "U-X", current_user=_user(role))
+    assert out == {"deleted": "U-X"}
 
 
 async def test_delete_reservation_stays_open_to_everyone(fakes):
@@ -98,6 +128,7 @@ async def test_approve_via_put_403_for_non_manager():
 
 
 async def test_approve_via_put_allowed_for_manager(fakes):
+    fakes["items"].doc = {"id": "LL-X", "kind": "equipment", "qty": 1}
     out = await inv.update_resource("res", "RS-1", {"status": "Approved"},
                                     current_user=_user("professor"))
     assert out["id"] == "RS-1"
@@ -119,7 +150,9 @@ async def test_create_res_pre_approved_403_for_non_manager(fakes):
 
 
 async def test_create_pending_res_open_to_everyone(fakes):
-    out = await inv.create_resource("res", {"itemId": "LL-X", "status": "Pending"},
+    fakes["items"].doc = {"id": "LL-X", "kind": "equipment", "qty": 1}
+    out = await inv.create_resource("res", {"itemId": "LL-X", "status": "Pending",
+                                            "start": "2026-09-01T09:00:00", "end": "2026-09-02T09:00:00"},
                                     current_user=_user("user"))
     assert out["status"] == "Pending"
     assert fakes["res"].inserted
@@ -205,10 +238,11 @@ async def test_tx_unresolvable_email_writes_null_without_erroring(fakes):
 # --- roster-resolved group on reservations and PLAXIS sessions ----------------
 async def test_res_group_resolved_by_name_and_client_value_ignored(fakes):
     fakes["users"].doc = {"studentId": "", "group": "Lin Lab — Geogrid"}
+    fakes["items"].doc = {"id": "LL-FOS-001", "kind": "equipment", "qty": 1}
     out = await inv.create_resource(
         "res",
         {"itemId": "LL-FOS-001", "user": "Jiming Liu", "group": "Spoofed",
-         "status": "Pending"},
+         "status": "Pending", "start": "2026-09-01T09:00:00", "end": "2026-09-02T09:00:00"},
         current_user=_user("user"),
     )
     assert out["group"] == "Lin Lab — Geogrid"
@@ -233,8 +267,10 @@ async def test_plaxis_group_resolved_by_name_and_client_value_ignored(fakes):
 
 async def test_res_unknown_name_writes_null_group_without_erroring(fakes):
     fakes["users"].doc = None
+    fakes["items"].doc = {"id": "LL-FOS-001", "kind": "equipment", "qty": 1}
     out = await inv.create_resource(
-        "res", {"itemId": "LL-FOS-001", "user": "A Visitor", "group": "Typed"},
+        "res", {"itemId": "LL-FOS-001", "user": "A Visitor", "group": "Typed",
+                "start": "2026-09-01T09:00:00", "end": "2026-09-02T09:00:00"},
         current_user=_user("user"),
     )
     assert out["group"] is None
@@ -245,3 +281,30 @@ async def test_roster_lookup_blank_keys_resolve_null(fakes):
     assert await inv._roster_lookup("   ", "  ") == {"studentId": None, "group": None}
     # And with no key at all, the roster is never queried.
     assert fakes["users"].queries == []
+
+
+# --- Phase 3: description + server-derived nextMaint ---------------------------
+async def test_item_create_derives_next_maint_and_keeps_description(fakes):
+    out = await inv.create_resource(
+        "items",
+        {"id": "LL-NM", "name": "Tensiometer", "qty": 1, "description": "Refillable",
+         "lastMaint": "2026-06-30", "maintDays": 90,
+         "nextMaint": "1999-01-01"},   # client value must be ignored
+        current_user=_user("user"),
+    )
+    assert out["description"] == "Refillable"
+    assert out["nextMaint"] == datetime(2026, 9, 28)
+
+
+async def test_item_create_without_inputs_stores_null_next_maint(fakes):
+    out = await inv.create_resource("items", {"id": "LL-NM2", "name": "Gloves", "qty": 6},
+                                    current_user=_user("user"))
+    assert out["nextMaint"] is None
+
+
+async def test_item_update_recomputes_next_maint_from_merged_row(fakes):
+    fakes["items"].doc = {"id": "LL-NM", "name": "Tensiometer", "updatedAt": None,
+                          "lastMaint": datetime(2026, 6, 30), "maintDays": 90}
+    await inv.update_resource("items", "LL-NM", {"maintDays": 30}, current_user=_user("user"))
+    (_args, _kw) = fakes["items"].updated[-1]
+    assert _args[1]["$set"]["nextMaint"] == datetime(2026, 7, 30)

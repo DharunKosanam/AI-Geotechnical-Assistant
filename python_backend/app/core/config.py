@@ -804,6 +804,55 @@ INVENTORY_ENABLED = os.getenv("INVENTORY_ENABLED", "false").strip().lower() in (
 # partial row — and the omissions are named in the deterministic scope note.
 INVENTORY_SNAPSHOT_TOKEN_CAP = int(os.getenv("INVENTORY_SNAPSHOT_TOKEN_CAP", "4000"))
 
+# Damage-report photos (the one inventory phase that touches storage), so it
+# is independently switchable. OFF: the photo endpoints 404 and the Damage
+# modal shows no file field. Photos are stored inline in the existing Mongo
+# `files` collection (same document shape as user uploads, category
+# "inventory_photo") and served by a flag-gated inventory route to any
+# authenticated lab member. Content is MIME-sniffed server-side (JPEG / PNG /
+# WebP magic bytes), never trusted from the extension.
+INVENTORY_PHOTOS_ENABLED = os.getenv("INVENTORY_PHOTOS_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+INVENTORY_PHOTO_MAX_BYTES = int(os.getenv("INVENTORY_PHOTO_MAX_BYTES", str(10 * 1024 * 1024)))
+
+# Reservation / return reminders (daily digest per user via the existing
+# email_service provider — Brevo in production). Default OFF: nothing is
+# scheduled and the manual endpoint 404s. The backend runs ONE uvicorn worker
+# (systemd unit, no --workers), so the in-process ticker cannot double-fire;
+# sends are additionally recorded per (email, day) in inv_reminders so a
+# restart never re-sends the same day's digest. INVENTORY_REMINDER_HOUR is
+# the earliest local hour the digest may go out.
+INVENTORY_REMINDERS_ENABLED = os.getenv("INVENTORY_REMINDERS_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+INVENTORY_REMINDER_HOUR = int(os.getenv("INVENTORY_REMINDER_HOUR", "8"))
+
+# Ownership boundary + personal view. ON: rows with exactly one owner (open
+# loans, reservations, PLAXIS sessions) refuse writes from anyone who is not
+# that owner (403, load-then-compare-then-mutate) — managers may additionally
+# return loans and release PLAXIS seats ON BEHALF (audited with actor and
+# owner recorded separately), but may NOT edit or cancel someone else's
+# reservation. Shared physical state (checkout, adjust, damage, item edits)
+# stays open to every authenticated user. Also gates GET /api/inventory/me
+# (the caller's own loans/reservations/seats/alerts — a presentation filter
+# over the full data; NO list query is ever user-scoped) and the My Bench tab
+# + "Mine only" toggles in the frontend. Default OFF: every handler, payload
+# and rendered control is byte-identical to today. Read at call time
+# (config.INVENTORY_PERSONAL_VIEW) so tests can toggle it without re-import.
+INVENTORY_PERSONAL_VIEW = os.getenv("INVENTORY_PERSONAL_VIEW", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # CORS Origins. NOTE: no "*" wildcard here. The frontend sends credentials (the
 # httpOnly access_token cookie), and the CORS spec forbids pairing
 # Access-Control-Allow-Credentials: true with a "*" origin -- browsers reject

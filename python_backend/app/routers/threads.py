@@ -70,8 +70,31 @@ async def list_threads(current_user: User = Depends(get_current_user)):
                 "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None,
                 "updatedAt": doc.get("updatedAt").isoformat() if doc.get("updatedAt") else None,
             }
+            if config.CHAT_SHARING_ENABLED:
+                # Flag-on extras only — the flag-off payload keys are pinned
+                # byte-identical by test_chat_sharing (members is stored data,
+                # never echoed flag-off).
+                thread_data["shared"] = False
+                thread_data["memberCount"] = len(doc.get("members") or [doc.get("userId")])
             threads.append(thread_data)
-        
+
+        if config.CHAT_SHARING_ENABLED:
+            # Lab shared = threads the caller JOINED: member, not owner. A
+            # second query, never a widening of the caller-scoped one above.
+            shared_cursor = conversations_collection.find(
+                {"members": current_user.id, "userId": {"$ne": current_user.id}}
+            ).sort("updatedAt", -1)
+            async for doc in shared_cursor:
+                threads.append({
+                    "threadId": doc.get("threadId"),
+                    "name": doc.get("name"),
+                    "isGroup": doc.get("isGroup", False),
+                    "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None,
+                    "updatedAt": doc.get("updatedAt").isoformat() if doc.get("updatedAt") else None,
+                    "shared": True,
+                    "memberCount": len(doc.get("members") or []),
+                })
+
         print(f"[OK] Retrieved {len(threads)} threads from history")
         return {"threads": threads}
         
@@ -94,6 +117,11 @@ async def create_thread_history(
             "threadId": request.threadId,
             "name": request.name,
             "isGroup": request.isGroup,
+            # Membership (CHAT_SHARING_ENABLED): the owner is always a member.
+            # Written regardless of flag state so the data never drifts while
+            # the flag is off — the response and every flag-off read surface
+            # are unchanged (list_threads does not echo it flag-off).
+            "members": [current_user.id],
             "createdAt": datetime.now(),
             "updatedAt": datetime.now()
         }
@@ -556,6 +584,99 @@ async def submit_tool_actions(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred, please try again."
         )
+
+
+# ---------------------------------------------------------------------------
+# Thread sharing (CHAT_SHARING_ENABLED, default off). A separate router,
+# included by main.py ONLY when the flag is on — flag-off these paths are
+# absent and the route table is byte-identical to today (the inventory
+# personal_router pattern). Decided semantics, not re-litigated here: an
+# owner shares explicitly (isGroup true) and a thread id alone grants
+# nothing; members read history and post but never rename/delete/remove
+# others; a member may remove themselves; the owner may remove anyone but
+# is never removed (owner ∈ members is an invariant); FILES ARE NEVER
+# SHARED — nothing here touches files or retrieval scoping.
+# ---------------------------------------------------------------------------
+sharing_router = APIRouter(prefix="/api/assistants/threads", tags=["threads"])
+
+
+@sharing_router.post("/{thread_id}/join")
+async def join_thread(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Join a SHARED thread by id. 404 unknown thread; 403 when the owner has
+    not shared it (isGroup false) — possessing an id grants nothing.
+    Idempotent: $addToSet, and joining twice (or the owner joining their own
+    thread) changes nothing. The $each also repairs a legacy row missing the
+    owner in members, keeping the owner-always-included invariant."""
+    conv = await conversations_collection.find_one({"threadId": thread_id})
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if not conv.get("isGroup"):
+        raise HTTPException(
+            status_code=403,
+            detail="This thread is not shared. Ask its owner to share it first.")
+    to_add = [current_user.id]
+    if conv.get("userId"):
+        to_add.append(conv["userId"])
+    await conversations_collection.update_one(
+        {"threadId": thread_id},
+        {"$addToSet": {"members": {"$each": to_add}}},
+    )
+    print(f"[SHARE] {current_user.id} joined thread {thread_id}")
+    return {"success": True, "threadId": thread_id, "name": conv.get("name")}
+
+
+@sharing_router.post("/{thread_id}/leave")
+async def leave_thread(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Remove SELF from a shared thread. The owner cannot leave their own
+    thread (delete it instead); a non-member leaving is an idempotent
+    no-op."""
+    conv = await conversations_collection.find_one({"threadId": thread_id})
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if conv.get("userId") == current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="The owner cannot leave their own thread.")
+    await conversations_collection.update_one(
+        {"threadId": thread_id},
+        {"$pull": {"members": current_user.id}},
+    )
+    print(f"[SHARE] {current_user.id} left thread {thread_id}")
+    return {"success": True, "threadId": thread_id}
+
+
+@sharing_router.delete("/{thread_id}/members/{member_id}")
+async def remove_thread_member(
+    thread_id: str,
+    member_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Owner-only member removal. The owner themselves can never be removed
+    (owner ∈ members is the invariant); removing a non-member is an
+    idempotent no-op."""
+    conv = await conversations_collection.find_one({"threadId": thread_id})
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if conv.get("userId") != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the thread owner can remove members.")
+    if member_id == conv.get("userId"):
+        raise HTTPException(
+            status_code=400,
+            detail="The owner cannot be removed from their own thread.")
+    await conversations_collection.update_one(
+        {"threadId": thread_id},
+        {"$pull": {"members": member_id}},
+    )
+    print(f"[SHARE] owner removed {member_id} from thread {thread_id}")
+    return {"success": True, "threadId": thread_id, "removed": member_id}
 
 
 # ---------------------------------------------------------------------------

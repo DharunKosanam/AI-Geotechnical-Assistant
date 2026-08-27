@@ -228,6 +228,10 @@ const Chat = ({
   // silence the history poll, which would otherwise overwrite the message being
   // streamed with the server's not-yet-written version of it.
   const [isStreaming, setIsStreaming] = useState(false);
+  // CHAT_SHARING_ENABLED: member count of the ACTIVE thread, from the
+  // flag-on history payload (absent flag-off -> stays 0). >1 arms the idle
+  // 5s poll of the active thread — never a second global poller.
+  const [activeThreadMemberCount, setActiveThreadMemberCount] = useState(0);
   const [threadId, setThreadId] = useState<string | null>("");
   // Mirrors threadId for code that mints a thread and then immediately uses it
   // in the SAME handler (attach -> upload), where the state closure is stale.
@@ -1797,7 +1801,11 @@ const Chat = ({
         console.log(`[LOAD] DISCARDING stale data for ${targetThreadId} (now loading ${loadingThreadRef.current})`);
         return;
       }
-      
+
+      // Shared-thread member count (CHAT_SHARING_ENABLED): present only
+      // flag-on; anything else resets to 0 so the idle poll disarms.
+      setActiveThreadMemberCount(typeof data.memberCount === "number" ? data.memberCount : 0);
+
       // Parse messages - handle both old format (nested content) and new format (direct content)
       const newMessages = (data.messages || []).map((msg: any) => {
         const text = msg.content?.[0]?.text?.value || msg.content || '';
@@ -1876,15 +1884,21 @@ const Chat = ({
     // NOT while streaming: loadThread() replaces the whole message list from
     // the DB, and the assistant row is not written until the turn completes —
     // so a poll landing mid-stream would wipe the text as it is being typed.
-    if (threadId && !isNewThread && inputDisabled && !isStreaming) {
-      console.log(`🔄 Starting polling while waiting for AI response: ${threadId}`);
-      
-      // Poll every 2 seconds only while waiting for response
+    const waitingPoll = threadId && !isNewThread && inputDisabled && !isStreaming;
+    // Shared thread with other members (CHAT_SHARING_ENABLED): the ACTIVE
+    // thread also polls while idle so their turns appear — 5s, only when the
+    // thread really has >1 member, and reusing THIS single interval (the 3s
+    // threads-list poller leak must not be compounded with a second global
+    // one). Flag-off memberCount stays 0 and this arm never fires.
+    const sharedPoll = threadId && !isNewThread && !isStreaming && activeThreadMemberCount > 1;
+    if (waitingPoll || sharedPoll) {
+      const intervalMs = waitingPoll ? 2000 : 5000;
+      console.log(`🔄 Starting polling (${intervalMs}ms) for thread: ${threadId}`);
       pollingIntervalRef.current = setInterval(() => {
         pollForNewMessages(threadId);
-      }, 2000);
+      }, intervalMs);
     }
-    
+
     // Cleanup function
     return () => {
       if (pollingIntervalRef.current) {
@@ -1893,7 +1907,7 @@ const Chat = ({
         pollingIntervalRef.current = null;
       }
     };
-  }, [threadId, isNewThread, inputDisabled, isStreaming]);
+  }, [threadId, isNewThread, inputDisabled, isStreaming, activeThreadMemberCount]);
   const createNewThread = () => {
     // Simply reset to welcome state
     // Thread will be created when the user sends the first message OR attaches
@@ -1901,6 +1915,7 @@ const Chat = ({
     setThreadId(null);
     threadIdRef.current = null;
     setMessages([]);
+    setActiveThreadMemberCount(0); // disarm the shared-thread idle poll
     setIsGroupConversation(false);
     setActiveThreadTitle(null);
     setIsNewThread(true);
@@ -1963,15 +1978,40 @@ const Chat = ({
   };
 
   const handleJoinTeam = async () => {
-    if (!joinThreadInput.trim()) return;
+    const targetId = joinThreadInput.trim();
+    if (!targetId) return;
 
     try {
-      setShowJoinModal(false);
-      setJoinThreadInput('');
-      // Load the shared thread directly without saving to personal sidebar history
-      handleThreadSelect(joinThreadInput, true);
+      // Real join (CHAT_SHARING_ENABLED): membership is granted server-side.
+      const response = await fetch(
+        `/api/assistants/threads/${encodeURIComponent(targetId)}/join`,
+        { method: 'POST', credentials: 'include' },
+      );
+      if (response.ok) {
+        setShowJoinModal(false);
+        setJoinThreadInput('');
+        handleThreadSelect(targetId, true);
+        toast('Joined the team thread. It will appear under "Lab shared".');
+        return;
+      }
+      let detail = '';
+      try {
+        detail = (await response.json())?.detail || '';
+      } catch { /* non-JSON body */ }
+      if (response.status === 404 && detail === 'Not Found') {
+        // Route absent = CHAT_SHARING_ENABLED is off: byte-identical to the
+        // old behavior — open the thread client-side, silently.
+        setShowJoinModal(false);
+        setJoinThreadInput('');
+        handleThreadSelect(targetId, true);
+        return;
+      }
+      // Real refusal (bad id, or the owner has not shared it): surface the
+      // server's message and keep the modal open so the id can be fixed.
+      toast(detail || `Could not join that thread (${response.status}).`);
     } catch (error) {
       console.error('Error joining team chat:', error);
+      toast('Could not reach the server to join the thread. Try again.');
     }
   };
 

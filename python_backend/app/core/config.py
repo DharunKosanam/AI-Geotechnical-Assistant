@@ -871,6 +871,28 @@ INVENTORY_PERSONAL_VIEW = os.getenv("INVENTORY_PERSONAL_VIEW", "false").strip().
     "on",
 )
 
+# ---------------------------------------------------------------------------
+# Thread sharing (chat) feature flag
+# ---------------------------------------------------------------------------
+# ON: an owner-shared thread (isGroup true) can be JOINED by thread id; members
+# read the full message history and post; the sidebar gains a real "Lab
+# shared" server query ({members: caller, userId: {$ne: caller}}). FILES ARE
+# NEVER SHARED — retrieval file scoping is untouched in every flag state (a
+# member can never read another user's uploads through a shared thread; FIPPA
+# boundary, enforced at the retrieval query). Membership data (the
+# conversations.members array, owner always included) is written regardless
+# of flag state so it never drifts; every behavioural surface — join/leave/
+# member routes, widened history reads, membership authz — exists only when
+# ON. Default OFF: routes absent, queries and payloads byte-identical to
+# today. Read at call time (config.CHAT_SHARING_ENABLED) so tests can toggle
+# it without re-import.
+CHAT_SHARING_ENABLED = os.getenv("CHAT_SHARING_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # CORS Origins. NOTE: no "*" wildcard here. The frontend sends credentials (the
 # httpOnly access_token cookie), and the CORS spec forbids pairing
 # Access-Control-Allow-Credentials: true with a "*" origin -- browsers reject

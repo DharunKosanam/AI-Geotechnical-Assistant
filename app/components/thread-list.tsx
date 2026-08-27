@@ -65,6 +65,10 @@ interface Thread {
   isGroup: boolean;
   createdAt?: string;
   updatedAt?: string;
+  /** CHAT_SHARING_ENABLED extras (absent flag-off): shared = a thread the
+   * caller JOINED (member, not owner). */
+  shared?: boolean;
+  memberCount?: number;
 }
 
 interface ThreadListProps {
@@ -338,14 +342,21 @@ const ThreadList = forwardRef<any, ThreadListProps>(
   }, [threads]);
 
   // Sidebar-owned view filters (mine/lab segmented control + search), then
-  // contiguous day groups (the list is already newest-first). "Mine" is every
-  // thread in this list (they are all the user's own — joined team threads are
-  // never saved here); "Lab shared" is the subset promoted to group threads.
-  // A thread the user just shared must NOT vanish from their default view.
+  // contiguous day groups (the list is already newest-first).
+  // Flag-off (no `shared` field on any row — CHAT_SHARING_ENABLED off):
+  // byte-identical to before — "Mine" is every thread, "Lab shared" the
+  // subset promoted to group threads. Flag-on the server also returns
+  // JOINED threads marked shared:true, and the tabs follow the server
+  // queries: "Mine" = own threads only ({userId: caller}, groups included
+  // — a just-shared thread stays in the default view), "Lab shared" =
+  // joined ones ({members: caller, userId: {$ne: caller}}).
   const groupedThreads = useMemo(() => {
     const q = (searchQuery ?? "").trim().toLowerCase();
     const visible = sortedUniqueThreads
-      .filter((t) => (filter === "lab" ? t.isGroup : true))
+      .filter((t) =>
+        filter === "lab"
+          ? t.shared === true || (t.shared === undefined && t.isGroup)
+          : t.shared !== true)
       .filter((t) => !q || (t.name || "").toLowerCase().includes(q));
     const groups: { label: string; threads: Thread[] }[] = [];
     for (const t of visible) {

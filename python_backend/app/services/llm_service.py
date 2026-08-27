@@ -11,6 +11,7 @@ import ollama
 from llama_index.llms.groq import Groq
 from dotenv import load_dotenv
 
+from app.core import config
 from app.core.config import (
     GROQ_MODEL,
     LLM_PROVIDER,
@@ -75,8 +76,9 @@ def get_llm():
         # the ollama API's top-level `think` flag on every request. (NOT
         # additional_kwargs -- that goes into model `options`, not the think
         # flag; and a Modelfile PARAMETER does not work on this Ollama version.)
-        # Every raw ollama.AsyncClient.chat() call site in the backend passes
-        # think=True for the same reason.
+        # The raw ollama.AsyncClient.chat() classifier call sites pass
+        # think=False; the ANSWER path follows OLLAMA_THINK_ANSWERS (default
+        # off since 2026-08-26 -- see _think_for_answers and config.py).
         return Ollama(
             model=OLLAMA_MODEL,
             base_url=OLLAMA_BASE_URL,
@@ -117,6 +119,15 @@ def _active_model_emits_thinking_tags() -> bool:
     if LLM_PROVIDER == "ollama":
         return True
     return _model_emits_thinking_tags(GROQ_MODEL)
+
+
+def _think_for_answers() -> bool:
+    """``think=`` for the answer-path chat calls (initial and guard retry,
+    streaming and non-streaming). Read from the config module at CALL time,
+    not import time, so OLLAMA_THINK_ANSWERS can be toggled per test / per
+    process without re-importing this module. Default off: see config.py.
+    """
+    return bool(config.OLLAMA_THINK_ANSWERS)
 
 
 def _ollama_options() -> dict:
@@ -394,7 +405,7 @@ async def _ollama_stream_and_clean(
             stream = await client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
-                think=True,
+                think=_think_for_answers(),
                 options=_ollama_options(),
                 stream=True,
             )
@@ -465,7 +476,7 @@ async def _ollama_stream_and_clean(
             resp = await retry_client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
-                think=True,
+                think=_think_for_answers(),
                 options=_ollama_options(),
             )
             raw_answer = resp["message"]["content"] or ""
@@ -600,7 +611,7 @@ async def generate_answer_with_groq(
                     resp = await client.chat(
                         model=OLLAMA_MODEL,
                         messages=[{"role": "user", "content": full_prompt}],
-                        think=True,
+                        think=_think_for_answers(),
                         options=_ollama_options(),
                     )
                 finally:

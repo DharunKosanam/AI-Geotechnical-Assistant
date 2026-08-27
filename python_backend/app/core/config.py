@@ -52,6 +52,24 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "12288"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
 
+# Thinking on the ANSWER path only -- the raw ollama.AsyncClient chat calls in
+# llm_service (generate_answer_with_groq and _ollama_stream_and_clean, initial
+# and guard retry). Default OFF (2026-08-26): num_predict caps thinking AND
+# answer TOGETHER, and gemma4 routinely spends the whole 2048-token budget
+# reasoning about a hard question -> done_reason='length', eval_count=2048,
+# thinking ~6k chars, content='' -- twice, then the guard fallback. That is the
+# "empty answer" incident, reproduced with the guard diagnostics; it is
+# deterministic on hard questions, not transient. Classifiers are always
+# think=False; the title call is bounded separately (threads._title_llm).
+# Read at call time via the config module so tests can toggle it without a
+# re-import. Accepts 1/true/yes/on (case-insensitive).
+OLLAMA_THINK_ANSWERS = os.getenv("OLLAMA_THINK_ANSWERS", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # Ollama request timeouts (seconds) — passed to the ollama.AsyncClient
 # constructor (forwarded to the underlying httpx client) so a hung generation
 # fails cleanly instead of holding a worker forever. Sized against the observed

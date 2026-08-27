@@ -12,6 +12,7 @@ from llama_index.llms.groq import Groq
 from dotenv import load_dotenv
 
 from app.core import config
+from app.core.llm_output import strip_unpaired_think
 from app.core.config import (
     GROQ_MODEL,
     LLM_PROVIDER,
@@ -312,6 +313,11 @@ def _clean_llm_answer(raw_answer: str, *, allow_raw_fallback: bool = True) -> st
     # span between "<" and ">". Geotechnical answers are full of "<" and ">".
     if _active_model_emits_thinking_tags():
         cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
+        # qwen3's chat template prefills the OPENING <think>, so with think=False
+        # (OLLAMA_THINK_ANSWERS off) the content is "reasoning</think>answer" --
+        # no opener for the paired regex above to match. Drop everything up to
+        # the last closing tag; a no-op when there is no unpaired </think>.
+        cleaned_answer = strip_unpaired_think(cleaned_answer)
         cleaned_answer = _THINK_TAG_RE.sub('', cleaned_answer)
     else:
         cleaned_answer = raw_answer
@@ -376,6 +382,18 @@ def _stable_raw_prefix(raw: str) -> str:
     return raw.rstrip()
 
 
+def _withhold_until_close_tag(think: bool) -> bool:
+    """Whether the streaming prefix buffer must hold ALL output until the
+    first ``</think>`` has arrived.
+
+    Engages only for qwen3 models called with ``think=False``: their chat
+    template prefills the opening tag, so the stream is
+    ``reasoning ... </think> answer`` with no opener for ``_stable_raw_prefix``
+    to hold on. Any other model, or ``think=True``, streams exactly as before.
+    """
+    return (not think) and "qwen3" in (OLLAMA_MODEL or "").lower()
+
+
 async def _ollama_stream_and_clean(
     full_prompt: str, emit: TokenEmitter, *, mode: str = "?"
 ) -> str:
@@ -400,12 +418,21 @@ async def _ollama_stream_and_clean(
     _GENERATIONS_IN_FLIGHT += 1
     in_flight = _GENERATIONS_IN_FLIGHT
 
+    think = _think_for_answers()
+    # Unpaired-</think> withhold (qwen3 + think=False only). Until the closing
+    # tag has been seen, nothing is emitted; once seen, the cleaner strips the
+    # reasoning prefix and streaming proceeds normally. If the stream ends
+    # without one, the final flush below emits the cleaned whole -- nothing is
+    # ever lost.
+    withhold = _withhold_until_close_tag(think)
+    close_tag_seen = False
+
     try:
         try:
             stream = await client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
-                think=_think_for_answers(),
+                think=think,
                 options=_ollama_options(),
                 stream=True,
             )
@@ -417,6 +444,11 @@ async def _ollama_stream_and_clean(
                 if not piece:
                     continue
                 raw_parts.append(piece)
+
+                if withhold and not close_tag_seen:
+                    if "</think>" not in "".join(raw_parts).lower():
+                        continue
+                    close_tag_seen = True
 
                 candidate = _clean_llm_answer(
                     _stable_raw_prefix("".join(raw_parts)),

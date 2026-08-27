@@ -128,6 +128,7 @@ async def test_parent_with_zero_chunks_reports_has_attachments(monkeypatch):
     assert states == [{
         "filename": "fresh.pdf", "status": "pending", "reason": None,
         "sourceType": None,
+        "fileType": None,   # metadata.fileType surfaced for the router (additive)
     }]
 
 

@@ -343,3 +343,33 @@ async def test_classify_uncertain_flag_off_defaults_to_kb_query(monkeypatch):
     mode = await ir.classify("anything",
                              client=_UncertainFakeClient('{"mode": "UNCERTAIN"}'))
     assert mode == ir.DEFAULT_MODE
+
+
+# --- Attachment naming (image / diagram / document kinds) --------------------
+@pytest.mark.asyncio
+async def test_prompt_names_uploaded_files_with_kinds():
+    client = _FakeClient(_mode_json(GENERAL))
+    await ir.classify(
+        "what is the name of the shoe",
+        thread_has_attachments=True,
+        thread_attachments=[
+            {"filename": "shoe.png", "fileType": ".png"},
+            {"filename": "flow.png", "fileType": ".png", "sourceType": "diagram"},
+            {"filename": "report.pdf", "fileType": ".pdf"},
+        ],
+        client=client,
+    )
+    user_msg = client.last_kwargs["messages"][1]["content"]
+    assert (
+        "UPLOADED FILES IN THIS THREAD: shoe.png (image), flow.png (diagram), "
+        "report.pdf (document)"
+    ) in user_msg
+
+
+@pytest.mark.asyncio
+async def test_prompt_omits_file_list_without_attachments():
+    client = _FakeClient(_mode_json(GENERAL))
+    await ir.classify("hello", thread_has_attachments=False,
+                      thread_attachments=[{"filename": "x.png", "fileType": ".png"}],
+                      client=client)
+    assert "UPLOADED FILES IN THIS THREAD" not in client.last_kwargs["messages"][1]["content"]

@@ -657,6 +657,7 @@ async def _run_chat_turn(
                 payload.query,
                 history=conversation_history,
                 thread_has_attachments=thread_has_attachments,
+                thread_attachments=thread_doc_states,
             )
             print(f"[ROUTER] Classified mode: {mode} (attachments={thread_has_attachments}) userId={current_user.id} query={payload.query[:60]!a}")
 

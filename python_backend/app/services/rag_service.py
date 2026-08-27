@@ -1261,16 +1261,21 @@ async def thread_document_inventory(
     async for d in files_collection.find(
         query,
         {"filename": 1, "chunkCount": 1, "status": 1, "error": 1, "createdAt": 1,
-         "sourceType": 1},
+         "sourceType": 1, "metadata.fileType": 1},
     ):
         fn = d.get("filename") or ""
         status, reason = effective_ingest_status(d, now=now)
         triples.append((fn, int(d.get("chunkCount") or 0), status))
         # sourceType ("diagram") lets the scope note label a drawn diagram as
         # one; absent (None) for every pre-diagram document, additive only.
+        # fileType (extension) lets the intent router tell the classifier
+        # WHAT was uploaded (image / diagram / document) -- a bare
+        # "has documents: yes" left an image upload routed to KB_QUERY unless
+        # the user said "the image I uploaded" (2026-08-27). Additive.
         doc_states.append({
             "filename": fn, "status": status, "reason": reason,
             "sourceType": d.get("sourceType"),
+            "fileType": (d.get("metadata") or {}).get("fileType"),
         })
     if not triples:
         return False, "", []

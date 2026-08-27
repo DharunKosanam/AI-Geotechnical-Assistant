@@ -124,8 +124,9 @@ ROUTER_SYSTEM_PROMPT = (
     "engineering. Answered from your own knowledge, no documents.\n"
     "- MIXED: needs BOTH the knowledge base AND general knowledge (for example, "
     "comparing what a lab report says with standard engineering practice).\n"
-    "- THREAD_DOC: about a document the user uploaded into THIS conversation. "
-    "Only valid when this thread HAS an uploaded document.\n\n"
+    "- THREAD_DOC: about a file the user uploaded into THIS conversation -- a "
+    "document, image, photo or diagram. Only valid when this thread HAS an "
+    "uploaded file.\n\n"
     "Rules:\n"
     '1. Output ONLY {"mode": "<MODE>"} using one of KB_QUERY, GENERAL, MIXED, '
     "THREAD_DOC. No prose, no explanation, no extra keys.\n"
@@ -139,7 +140,14 @@ ROUTER_SYSTEM_PROMPT = (
     "properties, testing methods, design parameters, and standards -- even "
     "when no document is named. Choose GENERAL only for greetings, "
     "conversation, questions about this assistant, writing help, or topics "
-    "outside engineering."
+    "outside engineering.\n"
+    "5. When UPLOADED FILES IN THIS THREAD are listed, choose THREAD_DOC if the "
+    "LATEST MESSAGE is about one of them: it names the file, refers to it by "
+    "kind (\"the image\", \"the photo\", \"the diagram\", \"the report\", "
+    "\"what I uploaded\"), or asks what an uploaded image or photo shows, "
+    "contains or is named. A general engineering or knowledge-base question "
+    "that does not concern the uploaded files stays KB_QUERY even though "
+    "files are attached."
 )
 
 
@@ -226,20 +234,52 @@ def _history_block(history: Optional[List[Dict[str, str]]], max_turns: int = 4) 
     )
 
 
+_IMAGE_FILE_TYPES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".tiff", ".tif"})
+
+
+def _attachment_kind(state: Dict[str, Any]) -> str:
+    """image / diagram / document, from the parent doc's sourceType + fileType."""
+    if state.get("sourceType") == "diagram":
+        return "diagram"
+    if str(state.get("fileType") or "").lower() in _IMAGE_FILE_TYPES:
+        return "image"
+    return "document"
+
+
+def _attachments_block(attachments: Optional[List[Dict[str, Any]]]) -> str:
+    """One line naming each upload with its kind, or "" when nothing is known.
+
+    The classifier used to see only a yes/no flag, so "what is the name of
+    the shoe" in a thread holding shoe.png routed to KB_QUERY (an image is not
+    obviously a "document") unless the user said "the image I uploaded".
+    Naming the files and their kinds lets the model connect the question to
+    the upload. Filenames only -- never content.
+    """
+    if not attachments:
+        return ""
+    names = ", ".join(
+        f"{(a.get('filename') or '?')} ({_attachment_kind(a)})" for a in attachments
+    )
+    return f"UPLOADED FILES IN THIS THREAD: {names}\n\n"
+
+
 def _build_user_prompt(
     message: str,
     history: Optional[List[Dict[str, str]]],
     thread_has_attachments: bool,
+    thread_attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Assemble the classifier user prompt.
 
     The attachment flag is stated explicitly so the model does not pick
     THREAD_DOC when the thread has no uploads (rule 2). It is ALSO enforced in
     code after parsing, so a model that ignores the rule still cannot leak
-    THREAD_DOC.
+    THREAD_DOC. ``thread_attachments`` (optional, additive) names the uploads
+    and their kinds so an image/photo question can route to THREAD_DOC.
     """
     return (
         f"THIS THREAD HAS UPLOADED DOCUMENTS: {'yes' if thread_has_attachments else 'no'}\n\n"
+        f"{_attachments_block(thread_attachments) if thread_has_attachments else ''}"
         f"CONVERSATION HISTORY:\n{_history_block(history)}\n\n"
         f"LATEST MESSAGE: {message.strip()}\n\n"
         'Respond with ONLY {"mode": "<MODE>"}.'
@@ -312,6 +352,7 @@ async def classify(
     *,
     history: Optional[List[Dict[str, str]]] = None,
     thread_has_attachments: bool = False,
+    thread_attachments: Optional[List[Dict[str, Any]]] = None,
     client: Optional[Any] = None,
 ) -> str:
     """Classify ``message`` into one of ``VALID_MODES``.
@@ -327,7 +368,9 @@ async def classify(
     if client is None:
         client = _default_client()
 
-    user_prompt = _build_user_prompt(message, history, thread_has_attachments)
+    user_prompt = _build_user_prompt(
+        message, history, thread_has_attachments, thread_attachments
+    )
 
     try:
         resp = await client.chat(

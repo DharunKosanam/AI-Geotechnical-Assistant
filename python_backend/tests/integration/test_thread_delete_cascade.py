@@ -88,6 +88,11 @@ async def delete_env(monkeypatch):
     monkeypatch.setattr(threads_mod, "conversations_collection", conv)
     monkeypatch.setattr(threads_mod, "messages_collection", msgs)
     monkeypatch.setattr(threads_mod, "files_collection", files)
+    # HIGHLIGHTS cascade (threads.py delete_thread) runs unconditionally; the
+    # fixture predates it and left the REAL highlights_collection in place, so
+    # every delete test issued a delete_many against live Atlas (audit fix
+    # 2026-08-26). Empty fake: the cascade is a no-op, as asserted elsewhere.
+    monkeypatch.setattr(threads_mod, "highlights_collection", _FakeColl([]))
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

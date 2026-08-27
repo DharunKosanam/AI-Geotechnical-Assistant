@@ -79,8 +79,8 @@ def render_page_png(file_content: bytes, page_number: int, dpi: int) -> bytes:
         if doc is not None:
             try:
                 doc.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[VISION] Closing PDF document failed: {close_err}")
 
 
 def _vision_chat(png_bytes: bytes, prompt: str, model: Optional[str] = None) -> str:

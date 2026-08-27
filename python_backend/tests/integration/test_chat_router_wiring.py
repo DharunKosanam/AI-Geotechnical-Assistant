@@ -23,6 +23,7 @@ from app.core import config
 from app.core.rate_limit import limiter, rate_limit_identify
 from app.main import app
 from app.services.mode_handlers import ModeResult
+from app.services.rag_service import get_clean_title
 from models import User
 import app.routers.chat as chat_mod
 
@@ -65,6 +66,17 @@ class _FakeMessages:
     async def insert_one(self, doc):
         self.inserted.append(doc)
         return SimpleNamespace(inserted_id="msg_id")
+
+
+class _FakeConversations:
+    """No registered thread (find_one -> None): CHAT_SHARING_ENABLED's
+    membership gate then applies today's caller-scoped behaviour, which is
+    exactly what every dispatch test here asserts. Audit fix 2026-08-26: the
+    fixture predates the gate and left the REAL conversations_collection in
+    place, so each test silently read live Atlas (find_one on 't1')."""
+
+    async def find_one(self, *a, **k):
+        return None
 
 
 class _DictRedis:
@@ -119,6 +131,7 @@ async def chat_env(monkeypatch):
     fake_redis = _DictRedis()
     monkeypatch.setattr(chat_mod, "get_redis_client", lambda: fake_redis)
     monkeypatch.setattr(chat_mod, "messages_collection", _FakeMessages())
+    monkeypatch.setattr(chat_mod, "conversations_collection", _FakeConversations())
 
     # Pipeline pieces (spies)
     classify_mock = AsyncMock(return_value=chat_mod.KB_QUERY)
@@ -133,6 +146,17 @@ async def chat_env(monkeypatch):
             answer="I searched your uploaded document but couldn't find that. In general, ...",
             sources=[],
             no_high_confidence_sources=False,
+        )
+    )
+    # Honest KB fallback (PR #9, 2026-08-24): retrieval FOUND documents but no
+    # chunk cleared the reranker threshold -> handle_kb_fallback names them and
+    # answers without citations (no_high_confidence_sources True). The fixture
+    # predates it and left the real handler in place (audit fix 2026-08-26).
+    kb_fallback_mock = AsyncMock(
+        return_value=ModeResult(
+            answer="An honest answer naming the found documents.",
+            sources=[],
+            no_high_confidence_sources=True,
         )
     )
     # (has_attachments, document-set fingerprint) -- Phase 2 replaced the
@@ -151,6 +175,7 @@ async def chat_env(monkeypatch):
     monkeypatch.setattr(chat_mod, "generate_answer_with_groq", generate_mock)
     monkeypatch.setattr(chat_mod, "handle_general", general_mock)
     monkeypatch.setattr(chat_mod, "handle_thread_doc_fallback", thread_fallback_mock)
+    monkeypatch.setattr(chat_mod, "handle_kb_fallback", kb_fallback_mock)
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -162,6 +187,7 @@ async def chat_env(monkeypatch):
             generate=generate_mock,
             general=general_mock,
             thread_fallback=thread_fallback_mock,
+            kb_fallback=kb_fallback_mock,
             thread_inventory=thread_inventory_mock,
             thread_retrieve=thread_retrieve_mock,
             thread_sample=thread_sample_mock,
@@ -297,21 +323,27 @@ _LOW_CONF_CHUNK = {
 
 
 @pytest.mark.asyncio
-async def test_kb_all_low_confidence_falls_through_to_general(chat_env, monkeypatch):
+async def test_kb_all_low_confidence_uses_honest_kb_fallback(chat_env, monkeypatch):
     # Retrieval SUCCEEDED but every chunk is below the reranker threshold ->
-    # answer generally, no citations.
+    # documents WERE found, so the honest KB fallback names them and answers
+    # without citations (PR #9). The plain GENERAL handler is reserved for an
+    # EMPTY retrieval (next test).
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
     chat_env.classify.return_value = chat_mod.KB_QUERY
     chat_env.retrieve.return_value = [dict(_LOW_CONF_CHUNK)]
     resp = await _post(chat_env.client)
     assert resp.status_code == 200
     chat_env.retrieve.assert_awaited_once()
-    chat_env.general.assert_awaited_once()        # fell through to GENERAL
+    chat_env.kb_fallback.assert_awaited_once()    # honest fallback, names the doc
+    assert chat_env.kb_fallback.await_args.kwargs["found_titles"] == [
+        get_clean_title(_LOW_CONF_CHUNK["filename"])["title"]
+    ]
+    chat_env.general.assert_not_awaited()         # not the "no documents" wording
     chat_env.generate.assert_not_awaited()        # KB generation skipped
     body = resp.json()
-    assert body["answer"] == "A general answer."
+    assert body["answer"] == "An honest answer naming the found documents."
     assert body["sources"] == []
-    assert body["no_high_confidence_sources"] is False
+    assert body["no_high_confidence_sources"] is True
 
 
 @pytest.mark.asyncio
@@ -434,15 +466,17 @@ async def test_mixed_sources_unchanged_even_if_answer_cites_nothing(chat_env, mo
 
 
 @pytest.mark.asyncio
-async def test_mixed_no_high_confidence_falls_through_to_general(chat_env, monkeypatch):
-    # MIXED with nothing above the reranker threshold -> GENERAL (no citations),
-    # same retrieval-confidence fallback as KB_QUERY.
+async def test_mixed_no_high_confidence_uses_honest_kb_fallback(chat_env, monkeypatch):
+    # MIXED with nothing above the reranker threshold -> the same honest KB
+    # fallback as KB_QUERY (documents found, none confident): no citations,
+    # no MIXED generation.
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
     chat_env.classify.return_value = chat_mod.MIXED
     chat_env.retrieve.return_value = [dict(_LOW_CONF_CHUNK)]
     resp = await _post(chat_env.client)
     assert resp.status_code == 200
-    chat_env.general.assert_awaited_once()
+    chat_env.kb_fallback.assert_awaited_once()
+    chat_env.general.assert_not_awaited()
     chat_env.generate.assert_not_awaited()
     assert resp.json()["sources"] == []
 
@@ -515,16 +549,18 @@ async def test_thread_doc_empty_retrieval_uses_thread_aware_fallback(chat_env, m
 
 
 @pytest.mark.asyncio
-async def test_kb_fallback_still_uses_plain_general(chat_env, monkeypatch):
-    # KB_QUERY / MIXED fallthrough must still use the plain GENERAL handler, not
-    # the thread-aware one (there is no uploaded document to acknowledge).
+async def test_kb_fallback_never_uses_thread_aware_handler(chat_env, monkeypatch):
+    # KB_QUERY / MIXED fallthrough must never use the THREAD-aware handler
+    # (there is no uploaded document to acknowledge): documents found -> the
+    # honest KB fallback; nothing found -> plain GENERAL (previous tests).
     monkeypatch.setattr(config, "ROUTER_ENABLED", True)
     chat_env.classify.return_value = chat_mod.KB_QUERY
     chat_env.retrieve.return_value = [dict(_LOW_CONF_CHUNK)]
     resp = await _post(chat_env.client)
     assert resp.status_code == 200
-    chat_env.general.assert_awaited_once()
+    chat_env.kb_fallback.assert_awaited_once()
     chat_env.thread_fallback.assert_not_awaited()
+    chat_env.general.assert_not_awaited()
     assert resp.json()["sources"] == []
 
 

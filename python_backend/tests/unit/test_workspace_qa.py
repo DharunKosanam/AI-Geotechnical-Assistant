@@ -90,7 +90,7 @@ async def test_answer_question_uses_scoped_system_prompt(monkeypatch):
     assert "strictly about THIS CPT sounding result" in msgs[0]["content"]
     assert "is layer 3 a concern?" in msgs[1]["content"]
     assert "Clays: clay to silty clay" in msgs[1]["content"]
-    assert client.captured["think"] is False
+    assert client.captured["think"] is True
 
 
 @pytest.mark.asyncio

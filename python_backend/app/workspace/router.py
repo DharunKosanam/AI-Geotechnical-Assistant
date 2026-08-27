@@ -22,6 +22,7 @@ import re
 from typing import Any, Optional
 
 from app.core import config
+from app.core.llm_output import extract_last_json_object, strip_unpaired_think
 from app.workspace.calculators import registry
 from app.workspace.calculators.base import Calculator
 
@@ -54,14 +55,17 @@ def _parse_calculator_id(raw: str) -> Optional[str]:
     JSON object, and validates the id against the registry. Any parse failure,
     non-dict payload, null, or unknown id -> None.
     """
-    text = _strip_think_tags(raw or "").strip()
+    # think=False on qwen3 leaks reasoning terminated by a bare </think> (the
+    # opening tag is prefilled by the chat template): drop it first.
+    text = _strip_think_tags(strip_unpaired_think(raw or "")).strip()
     # Drop ```json ... ``` fences if present.
     text = re.sub(r"^```(?:json)?", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
-    # Isolate the first {...} block so trailing prose does not break json.loads.
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        text = match.group(0)
+    # Isolate the LAST balanced {...} block (the answer object is the last
+    # thing the model writes; surviving prose may contain braces).
+    block = extract_last_json_object(text)
+    if block is not None:
+        text = block
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, TypeError, ValueError):

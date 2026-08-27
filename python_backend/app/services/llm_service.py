@@ -61,16 +61,26 @@ def get_llm():
         # Imported lazily so a Groq-only deployment doesn't need the package.
         from llama_index.llms.ollama import Ollama
 
-        # thinking=False disables qwen3.5's chain-of-thought. The wrapper sends
-        # this as the ollama API's top-level `think` flag on every request,
-        # which collapses 100s+ responses to <1s. (NOT additional_kwargs -- that
-        # goes into model `options`, not the think flag; and a Modelfile
-        # PARAMETER does not work on this Ollama version.)
+        # thinking=True is REQUIRED for qwen3 (not merely tolerated). Qwen3's
+        # chat template prefills the opening <think> tag on the prompt side, so
+        # with think=False the model still reasons -- but emits that reasoning
+        # as plain text into message.content, terminated by a bare closing
+        # </think> with no opening tag for the scrubber to pair it with, and the
+        # chain-of-thought leaks to the user. With think=True Ollama parses the
+        # reasoning into a separate message.thinking field and message.content
+        # arrives clean (verified 2026-08-24 on qwen3:30b-a3b: content='PONG',
+        # thinking populated; in streaming mode reasoning chunks carry
+        # content="" with the text in `thinking`). The wrapper sends this as
+        # the ollama API's top-level `think` flag on every request. (NOT
+        # additional_kwargs -- that goes into model `options`, not the think
+        # flag; and a Modelfile PARAMETER does not work on this Ollama version.)
+        # Every raw ollama.AsyncClient.chat() call site in the backend passes
+        # think=True for the same reason.
         return Ollama(
             model=OLLAMA_MODEL,
             base_url=OLLAMA_BASE_URL,
             request_timeout=120.0,
-            thinking=False,
+            thinking=True,
         )
 
     groq_api_key = os.getenv("GROQ_API_KEY")
@@ -190,6 +200,11 @@ TokenEmitter = Callable[[str], Awaitable[None]]
 # emitting anything, so the retry is still possible — you cannot un-send a token.
 SHORT_ANSWER_THRESHOLD = 20
 
+# A stray, unpaired thinking tag (opening or closing). The paired form is
+# removed first by _clean_llm_answer; this catches whatever is left. Nothing
+# else in angle brackets is touched (see _clean_llm_answer).
+_THINK_TAG_RE = re.compile(r'</?think>', re.IGNORECASE)
+
 
 def _clean_llm_answer(raw_answer: str, *, allow_raw_fallback: bool = True) -> str:
     """Scrub <think> blocks and stray tags, then normalise whitespace.
@@ -208,9 +223,15 @@ def _clean_llm_answer(raw_answer: str, *, allow_raw_fallback: bool = True) -> st
     # them (qwen3 on Groq, and all Ollama output since it serves qwen3.5).
     # Llama 4 Scout and other non-thinking Groq models never produce these
     # tags, so the scrub is skipped to avoid eating legitimate <> content.
+    #
+    # Only the think tags themselves are removed. This used to be a generic
+    # ``<[^>]+>`` tag strip, which treated a bare comparison operator as the
+    # start of an HTML tag and deleted everything up to the NEXT ">" anywhere
+    # later in the answer -- "$D_{50} < 0.5$ mm ... phi > 38" lost the whole
+    # span between "<" and ">". Geotechnical answers are full of "<" and ">".
     if _active_model_emits_thinking_tags():
         cleaned_answer = re.sub(r'<think>.*?</think>', '', raw_answer, flags=re.DOTALL | re.IGNORECASE)
-        cleaned_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
+        cleaned_answer = _THINK_TAG_RE.sub('', cleaned_answer)
     else:
         cleaned_answer = raw_answer
 
@@ -245,8 +266,12 @@ def _stable_raw_prefix(raw: str) -> str:
          closing tag arrives, so nothing from the opener onward may be emitted.
          This is the tag suppressor: without it the user watches the model's
          chain-of-thought get typed out and then disappear.
-      2. A half-received tag (``<``, ``<b``, ``<bo``...). It might close into a
-         tag that gets stripped.
+      2. A half-received THINK tag (``<``, ``<t``, ``</thin``...). It might
+         complete into ``<think>``/``</think>``, which gets stripped. Only a
+         trailing ``<`` that is still a prefix of one of those two tags is
+         held; a bare comparison ``<`` (``a < b``) is settled text and is
+         emitted immediately -- the old rule held at EVERY ``<`` until some
+         later ``>`` arrived, which is where the mid-answer stall came from.
       3. Trailing whitespace. Per-line ``strip()`` and the 3+ newline collapse
          both operate on a run that is not finished until a non-space arrives.
 
@@ -260,8 +285,12 @@ def _stable_raw_prefix(raw: str) -> str:
         raw = raw[:open_idx]
 
     lt_idx = raw.rfind("<")
-    if lt_idx != -1 and raw.find(">", lt_idx) == -1:
-        raw = raw[:lt_idx]
+    if lt_idx != -1:
+        tail = raw[lt_idx:].lower()
+        if len(tail) < len("</think>") and (
+            "<think>".startswith(tail) or "</think>".startswith(tail)
+        ):
+            raw = raw[:lt_idx]
 
     return raw.rstrip()
 
@@ -284,7 +313,7 @@ async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
             stream = await client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
-                think=False,
+                think=True,
                 options=_ollama_options(),
                 stream=True,
             )
@@ -342,7 +371,7 @@ async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
             resp = await retry_client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
-                think=False,
+                think=True,
                 options=_ollama_options(),
             )
             raw_answer = resp["message"]["content"] or ""
@@ -464,7 +493,7 @@ async def generate_answer_with_groq(
                 resp = await client.chat(
                     model=OLLAMA_MODEL,
                     messages=[{"role": "user", "content": full_prompt}],
-                    think=False,
+                    think=True,
                     options=_ollama_options(),
                 )
                 return resp["message"]["content"] or ""
@@ -703,7 +732,7 @@ async def rewrite_query_with_history(
             resp = await client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": rewrite_prompt}],
-                think=False,
+                think=True,
                 options=_ollama_options(),
             )
             rewritten = (resp["message"]["content"] or "").strip()

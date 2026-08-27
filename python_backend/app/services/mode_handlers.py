@@ -84,7 +84,10 @@ async def handle_thread_doc_fallback(
         system_prompt=THREAD_DOC_FALLBACK_PROMPT,
         emit=emit,
     )
-    return ModeResult(answer=answer, sources=[], no_high_confidence_sources=False)
+    # This IS the "documents retrieved, none confident" case the field exists
+    # to flag: the thread's document was searched and nothing cleared the
+    # reranker threshold, so the answer is ungrounded. Surface that.
+    return ModeResult(answer=answer, sources=[], no_high_confidence_sources=True)
 
 
 async def handle_kb_fallback(
@@ -113,6 +116,11 @@ async def handle_kb_fallback(
         system_prompt=kb_fallback_prompt(found_titles),
         emit=emit,
     )
-    # no_high_confidence_sources stays False to match what this path returned
-    # via handle_general before — only the WORDING changes, not the payload.
-    return ModeResult(answer=answer, sources=[], no_high_confidence_sources=False)
+    # Documents WERE found and none cleared the reranker threshold -- exactly
+    # the situation no_high_confidence_sources was defined for (models.py).
+    # It used to stay False here (parity with the plain-GENERAL fallback this
+    # path replaced), which made the field False on every router path and the
+    # ungrounded-answer case invisible to the client. handle_general stays
+    # False: "no confident sources" is meaningless for a path that never
+    # retrieved.
+    return ModeResult(answer=answer, sources=[], no_high_confidence_sources=True)

@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.core import config
+from app.core.llm_output import extract_last_json_object, strip_unpaired_think
 
 logger = logging.getLogger(__name__)
 
@@ -980,11 +981,15 @@ _EXTRACT_SYSTEM_PROMPT = (
 
 
 def _strip_fences(raw: str) -> str:
-    text = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL | re.IGNORECASE).strip()
+    # think=False on qwen3 leaks reasoning terminated by a bare </think> (the
+    # opening tag is prefilled by the chat template): drop it first, then any
+    # paired block, then fences, then take the LAST balanced {...} object.
+    text = strip_unpaired_think(raw or "")
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
     text = re.sub(r"^```(?:json)?", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    return match.group(0) if match else text
+    block = extract_last_json_object(text)
+    return block if block is not None else text
 
 
 def parse_feasibility_extraction(

@@ -940,6 +940,12 @@ const Chat = ({
           if (sources.length > 0 && started) {
             attachSourcesToLastMessage(sources);
           }
+          // Ungrounded answer (documents found, none confident): mark the
+          // streamed turn so the body can show the grounding note. Same
+          // "no streamed text, no annotation" rule as the sources panel.
+          if (payload.no_high_confidence_sources === true && started) {
+            markLastMessageUngrounded();
+          }
         } else if (name === "error") {
           const detail = payload.detail || "The assistant failed to answer.";
           if (started) appendToLastMessage(`\n\n[Error: ${detail}]`);
@@ -1312,7 +1318,7 @@ const Chat = ({
       console.log("✅ Answer extracted:", answer.substring(0, 100) + "...");
       console.log("📚 Sources:", sources);
 
-      appendMessage("assistant", answer, sources);
+      appendMessage("assistant", answer, sources, data.no_high_confidence_sources === true);
       setInputDisabled(false);
       await hydrateMessageIds(actualThreadId);
 
@@ -1677,11 +1683,32 @@ const Chat = ({
     });
   };
 
-  const appendMessage = (role: "user" | "assistant" | "code", text: string, sources?: any[]) => {
+  const appendMessage = (
+    role: "user" | "assistant" | "code",
+    text: string,
+    sources?: any[],
+    noHighConfidenceSources?: boolean,
+  ) => {
     setMessages((prevMessages) => {
-      const newMessages = [...prevMessages, { role, text, sources }];
+      const newMessages = [
+        ...prevMessages,
+        noHighConfidenceSources
+          ? { role, text, sources, noHighConfidenceSources: true }
+          : { role, text, sources },
+      ];
       lastMessageCountRef.current = newMessages.length;
       return newMessages;
+    });
+  };
+
+  // Flag the answer that just finished streaming as ungrounded (backend
+  // no_high_confidence_sources). Assistant messages only, like sources.
+  const markLastMessageUngrounded = () => {
+    setMessages((prevMessages) => {
+      if (prevMessages.length === 0) return prevMessages;
+      const last = prevMessages[prevMessages.length - 1];
+      if (last.role !== "assistant") return prevMessages;
+      return [...prevMessages.slice(0, -1), { ...last, noHighConfidenceSources: true }];
     });
   };
 

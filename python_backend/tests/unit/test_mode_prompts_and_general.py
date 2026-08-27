@@ -200,7 +200,7 @@ async def test_handle_thread_doc_fallback_uses_fallback_prompt_and_no_sources(mo
     result = await mode_handlers.handle_thread_doc_fallback("what is the pile capacity?", history=None)
 
     assert result.sources == []                    # no citations
-    assert result.no_high_confidence_sources is False
+    assert result.no_high_confidence_sources is True  # documents searched, none confident -> ungrounded
     # driven with the THREAD_DOC-fallback prompt, no context, GENERAL assembly
     assert captured["system_prompt"] == prompt_config.THREAD_DOC_FALLBACK_PROMPT
     assert captured["context"] == ""
@@ -269,9 +269,61 @@ async def test_handle_kb_fallback_uses_honest_prompt_no_sources(monkeypatch):
     monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)
     result = await mode_handlers.handle_kb_fallback(
         "check the lab inventory file", found_titles=["Inventory"])
-    assert result.sources == [] and result.no_high_confidence_sources is False
+    assert result.sources == [] and result.no_high_confidence_sources is True  # found, none confident
     assert captured["mode"] == GENERAL and captured["context"] == ""
     assert '"Inventory"' in captured["system_prompt"]
     assert "NEVER say or imply that you have no access" in captured["system_prompt"]
     # And it is NOT the direct-GENERAL prompt.
     assert captured["system_prompt"] != prompt_config.GENERAL_PROMPT
+
+
+# --- Confidence fallbacks: flag the ungrounded answer -----------------------
+# Both fallbacks run only after retrieval FOUND documents and none cleared the
+# reranker threshold. That is exactly what no_high_confidence_sources exists to
+# report, so they must return True (handle_general stays False: it never
+# retrieved, so "no confident sources" is meaningless there).
+@pytest.mark.asyncio
+async def test_handle_kb_fallback_flags_no_high_confidence_sources(monkeypatch):
+    captured = {}
+
+    async def fake_generate(*, query, context, history, mode, system_prompt=None, emit=None):
+        captured.update(query=query, context=context, mode=mode, system_prompt=system_prompt)
+        return "Answered from general knowledge; the found reports did not cover it."
+
+    monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)
+
+    result = await mode_handlers.handle_kb_fallback(
+        "What was the settlement at BH-3?",
+        history=None,
+        found_titles=["Site Investigation Report 2019"],
+    )
+
+    assert result.no_high_confidence_sources is True
+    assert result.sources == []  # still no citations -- nothing was confident
+    assert result.answer.startswith("Answered from general knowledge")
+    assert captured["context"] == ""  # low-confidence chunks are never quoted
+    assert captured["mode"] == GENERAL
+    assert "Site Investigation Report 2019" in captured["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_handle_thread_doc_fallback_flags_no_high_confidence_sources(monkeypatch):
+    async def fake_generate(*, query, context, history, mode, system_prompt=None, emit=None):
+        return "The uploaded document does not appear to cover that."
+
+    monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)
+
+    result = await mode_handlers.handle_thread_doc_fallback("What is on page 9?")
+
+    assert result.no_high_confidence_sources is True
+    assert result.sources == []
+
+
+@pytest.mark.asyncio
+async def test_handle_general_stays_unflagged(monkeypatch):
+    async def fake_generate(*, query, context, history, mode, system_prompt=None, emit=None):
+        return "hi"
+
+    monkeypatch.setattr(mode_handlers, "generate_answer_with_groq", fake_generate)
+    result = await mode_handlers.handle_general("hello")
+    assert result.no_high_confidence_sources is False

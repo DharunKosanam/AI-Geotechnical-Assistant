@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional
 import ollama
 
 from app.core import config
+from app.core.llm_output import extract_last_json_object, strip_unpaired_think
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +113,15 @@ ROUTER_SYSTEM_PROMPT = (
     "and choose exactly ONE mode describing how the message should be answered. "
     'Return ONLY JSON of the form {"mode": "<MODE>"} and nothing else.\n\n'
     "Modes:\n"
-    "- KB_QUERY: asks about the lab's documents, indexed research papers, "
-    "project reports, or shared reference material. Answered from the document "
-    "knowledge base with citations.\n"
-    "- GENERAL: a general geotechnical or engineering question, a request to "
-    "explain a concept, help with writing or drafting, or ordinary "
-    "conversation. Answered from your own knowledge, no documents.\n"
+    "- KB_QUERY: a question within the lab's subject domain -- geotechnical "
+    "and civil engineering: soil properties, testing methods, design "
+    "parameters, standards, site and laboratory data -- or about the lab's "
+    "documents, indexed research papers, project reports, or shared reference "
+    "material, even when no specific document is named. Answered from the "
+    "document knowledge base with citations.\n"
+    "- GENERAL: greetings and ordinary conversation, questions about this "
+    "assistant itself, help with writing or drafting, or topics outside "
+    "engineering. Answered from your own knowledge, no documents.\n"
     "- MIXED: needs BOTH the knowledge base AND general knowledge (for example, "
     "comparing what a lab report says with standard engineering practice).\n"
     "- THREAD_DOC: about a document the user uploaded into THIS conversation. "
@@ -130,9 +134,12 @@ ROUTER_SYSTEM_PROMPT = (
     "3. A short follow-up or acknowledgement (\"go on\", \"more detail\", "
     "\"why?\", \"ok\") inherits the topic and intent of the prior turns in the "
     "history.\n"
-    "4. When torn between KB_QUERY and GENERAL, choose KB_QUERY only if the "
-    "message plausibly refers to specific documents, reports, or indexed "
-    "material; otherwise choose GENERAL."
+    "4. When torn between KB_QUERY and GENERAL, choose KB_QUERY if the topic "
+    "falls within geotechnical or civil engineering -- including soil "
+    "properties, testing methods, design parameters, and standards -- even "
+    "when no document is named. Choose GENERAL only for greetings, "
+    "conversation, questions about this assistant, writing help, or topics "
+    "outside engineering."
 )
 
 
@@ -169,7 +176,9 @@ def _system_prompt() -> str:
             "asks for specific facts, measurements, observations, readings or "
             "records that project documents COULD hold — even if it does not "
             "mention a document. Reserve GENERAL for clearly general concept "
-            "explanations, definitions, writing help and conversation."
+            "explanations, definitions, writing help and conversation. If you "
+            "are unsure whether the lab's documents would add anything beyond "
+            "textbook knowledge, output UNCERTAIN rather than GENERAL."
         )
     if config.INVENTORY_ENABLED:
         extras.append(
@@ -246,14 +255,18 @@ def _parse_mode(raw: str) -> Optional[str]:
     parse failure, non-dict payload, missing/non-string mode, or unknown mode
     returns None.
     """
-    text = _strip_think_tags(raw or "").strip()
+    # think=False on qwen3 leaks reasoning terminated by a bare </think> (the
+    # opening tag is prefilled by the chat template): drop it first, then the
+    # paired-tag guard, then fences.
+    text = _strip_think_tags(strip_unpaired_think(raw or "")).strip()
     # Drop ```json ... ``` fences if present.
     text = re.sub(r"^```(?:json)?", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
-    # Isolate the first {...} block so trailing prose does not break json.loads.
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        text = match.group(0)
+    # Isolate the LAST balanced {...} block: the answer object is the last
+    # thing the model writes, and any surviving prose may contain braces.
+    block = extract_last_json_object(text)
+    if block is not None:
+        text = block
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -408,12 +421,12 @@ SCOPE_SYSTEM_PROMPT = (
 def _parse_scope(raw: str) -> Optional[str]:
     """Extract a valid scope from the model output, else None. Same defensive
     parse as _parse_mode."""
-    text = _strip_think_tags(raw or "").strip()
+    text = _strip_think_tags(strip_unpaired_think(raw or "")).strip()
     text = re.sub(r"^```(?:json)?", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        text = match.group(0)
+    block = extract_last_json_object(text)
+    if block is not None:
+        text = block
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, TypeError, ValueError):

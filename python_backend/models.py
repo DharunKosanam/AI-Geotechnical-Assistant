@@ -121,9 +121,13 @@ class RAGChatResponse(BaseModel):
     no_high_confidence_sources: bool = Field(
         default=False,
         description=(
-            "True when every retrieved chunk scored below the reranker "
-            "threshold: 'sources' is empty and the answer is built only from "
-            "low-confidence context. Defaults False for cached/legacy responses."
+            "True when retrieval ran and found documents but every chunk "
+            "scored below the reranker threshold, so the answer was generated "
+            "WITHOUT document grounding: 'sources' is empty and the model "
+            "answered from its own knowledge (KB_QUERY/MIXED honest fallback, "
+            "THREAD_DOC fallback). False whenever confident sources were used, "
+            "and also False on paths that never retrieve (GENERAL, INVENTORY, "
+            "empty retrieval) or for cached/legacy responses."
         ),
     )
 

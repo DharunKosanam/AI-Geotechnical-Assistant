@@ -28,6 +28,10 @@ export type MessageProps = {
   annotations?: any[];
   /* Retrieval payload for this answer, exactly as the backend sent it. */
   sources?: any[];
+  /* Backend's no_high_confidence_sources: retrieval found documents but none
+     cleared the reranker threshold, so the answer was generated without
+     document grounding. Absent/false -> nothing extra is rendered. */
+  noHighConfidenceSources?: boolean;
   /* Server message id. Present only when HIGHLIGHTS_ENABLED and the message
      is persisted (never mid-stream) -- it is what makes a message highlightable. */
   id?: string;
@@ -206,6 +210,7 @@ type AssistantMessageProps = {
   text: string;
   annotations?: any[];
   sources?: any[];
+  noHighConfidenceSources?: boolean;
   isLast: boolean;
   canRetry: boolean;
   onRetry: () => void;
@@ -219,6 +224,7 @@ const AssistantMessage = ({
   text,
   annotations,
   sources,
+  noHighConfidenceSources,
   isLast,
   canRetry,
   onRetry,
@@ -308,6 +314,11 @@ const AssistantMessage = ({
       </div>
       {hl?.popover}
       {sources && sources.length > 0 && <SourcesPanel sources={sources} />}
+      {noHighConfidenceSources && !(sources && sources.length > 0) && (
+        <p className={s.groundingNote} role="note">
+          Answered without document grounding
+        </p>
+      )}
       <div className={s.turnActions}>
         <button type="button" className={s.actionBtn} onClick={handleCopy}>
           {copied ? <Check size={13} strokeWidth={1.5} /> : <Copy size={13} strokeWidth={1.5} />}
@@ -402,6 +413,7 @@ const MessageList = ({
                     text={msg.text}
                     annotations={msg.annotations}
                     sources={msg.sources}
+                    noHighConfidenceSources={msg.noHighConfidenceSources}
                     isLast={index === lastAssistantIndex && index === messages.length - 1}
                     canRetry={canRetry}
                     onRetry={onRetry}

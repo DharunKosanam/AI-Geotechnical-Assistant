@@ -115,6 +115,46 @@ async def create_thread_history(
 # capped at 40 chars; a typed name gets more room but stays sidebar-sane.
 THREAD_NAME_MAX_CHARS = 100
 
+# Output cap for the title LLM call. A 3-5 word title is ~5-12 tokens; 32
+# leaves ~3x headroom for a "Title:" prefix, quotes or a stray newline (all
+# stripped by the cleaner in generate_thread_title, which keeps only the first
+# line) while making a runaway answer impossible: at the measured ~25 tok/s
+# that is under 1.5 s of generation. Thinking is off on this call, so no
+# reasoning tokens compete for the budget.
+TITLE_NUM_PREDICT = 32
+
+
+def _title_llm():
+    """The LLM for the title call ONLY (bounded 2026-08-26).
+
+    ``get_llm()`` is shared with the answer path and, for Ollama, is built on
+    llama-index defaults: ``context_window=-1`` resolves through ``ollama show``
+    to the model's maximum (262144 for gemma4) and is sent as ``num_ctx``,
+    which reloads the runner at 262k ctx (partially offloaded, ~8 tok/s) and
+    flips it back to 12288 on the next chat turn; ``thinking=True`` then spends
+    400-770 reasoning tokens on a five-word title. Measured 72-79 s against a
+    30 s proxy timeout, so the title never landed. Here the same model, host
+    and request timeout are used with the app-wide num_ctx (no runner
+    flip-flop), thinking off, a small num_predict and the app-wide
+    temperature. Groq is returned untouched, as is anything that is not a
+    llama-index Ollama (the unit tests stand a double in for get_llm()).
+    """
+    llm = get_llm()
+    if config.LLM_PROVIDER != "ollama":
+        return llm
+    from llama_index.llms.ollama import Ollama  # lazy, as in get_llm()
+    if not isinstance(llm, Ollama):
+        return llm
+    return Ollama(
+        model=config.OLLAMA_MODEL,
+        base_url=config.OLLAMA_BASE_URL,
+        request_timeout=llm.request_timeout,
+        thinking=False,
+        context_window=config.OLLAMA_NUM_CTX,
+        temperature=config.OLLAMA_TEMPERATURE,
+        additional_kwargs={"num_predict": TITLE_NUM_PREDICT},
+    )
+
 
 @router.put("/history")
 async def update_thread(
@@ -354,8 +394,8 @@ async def generate_thread_title(
             f"provider={config.LLM_PROVIDER})"
         )
 
-        # Use the configured LLM to generate title with improved prompt
-        llm = get_llm()
+        # Use the configured LLM, bounded for a short title (see _title_llm)
+        llm = _title_llm()
         
         # Improved prompt: more specific, clearer instructions
         prompt = f"""Summarize this query into a concise, 3-5 word title. Do not use quotes.

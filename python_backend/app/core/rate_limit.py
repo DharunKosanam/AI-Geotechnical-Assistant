@@ -21,7 +21,22 @@ from app.dependencies.auth import get_current_user
 from models import User
 
 # Default key = client IP. /auth/login (no authenticated user yet) uses this.
-limiter = Limiter(key_func=get_remote_address, storage_uri=REDIS_URL)
+#
+# in_memory_fallback_enabled (audit F-03, 2026-08-26): without it a Redis
+# outage made slowapi raise ConnectionError on EVERY rate-limited route --
+# /auth/login, /chat, /chat/stream, /api/upload, the KB uploads and the
+# password-reset endpoints all returned 500, so nobody could log in. With the
+# flag, the first storage error flips slowapi to a process-local
+# MemoryStorage with the SAME per-route limits; it re-probes Redis on an
+# exponential schedule and switches back when it answers. While Redis is UP
+# nothing changes: _storage_dead stays False and the Redis-backed limiter is
+# used exactly as before (counters shared, restart-proof). Verified against a
+# refused and a black-holed Redis: the switch is immediate, no stall.
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=REDIS_URL,
+    in_memory_fallback_enabled=True,
+)
 
 
 def user_id_key(request: Request) -> str:

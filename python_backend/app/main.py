@@ -81,6 +81,17 @@ async def root():
 async def startup_event():
     """Ensure DB indexes (e.g. unique users.email) exist before serving."""
     await ensure_indexes()
+    # Inventory reminder digest ticker: started ONLY when both flags are on
+    # (single uvicorn worker — see inventory_reminders.py). Flag-off: no task,
+    # nothing scheduled, startup byte-identical to before.
+    from app.core import config as _config
+
+    if _config.INVENTORY_ENABLED and _config.INVENTORY_REMINDERS_ENABLED:
+        import asyncio
+
+        from app.services.inventory_reminders import reminders_loop
+
+        asyncio.create_task(reminders_loop())
 
 
 @app.on_event("shutdown")

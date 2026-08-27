@@ -12,11 +12,13 @@ import React, { useMemo, useState } from "react";
 import { InventoryActions } from "../actions";
 import s from "../inventory.module.css";
 import {
+  CallerIdentity,
   InvDB,
   SessionPrefill,
   bookingsAt,
   fmtDateTime,
   isStaleSeat,
+  ownsRowByKey,
   weekDays,
 } from "../lib";
 import { PlaxisModal } from "./modals";
@@ -30,11 +32,18 @@ export default function PlaxisPage({
   actions,
   prefill,
   isManager,
+  personalView = false,
+  identity = { email: "", names: [] },
 }: {
   db: InvDB;
   actions: InventoryActions;
   prefill: SessionPrefill;
   isManager: boolean;
+  /** INVENTORY_PERSONAL_VIEW: owner-only release; a manager releasing
+   * someone else's seat sees the on-behalf label ("Log out for {name}" —
+   * same treatment as the return modal). Off: exactly today's controls. */
+  personalView?: boolean;
+  identity?: CallerIdentity;
 }) {
   const [anchor, setAnchor] = useState(() => new Date());
   const [booking, setBooking] = useState(false);
@@ -126,7 +135,12 @@ export default function PlaxisPage({
                   .sort((a, b) => Number(isStaleSeat(b, now)) - Number(isStaleSeat(a, now)))
                   .map((p) => {
                     const stale = isStaleSeat(p, now);
-                    const mine = (p.user || "").toLowerCase() === prefill.name.toLowerCase();
+                    // Flag on: ownership is the stored owner KEY only (a
+                    // keyless legacy row shows Log out to managers alone).
+                    const mine = personalView
+                      ? ownsRowByKey(p, identity)
+                      : (p.user || "").toLowerCase() === prefill.name.toLowerCase();
+                    const onBehalf = personalView && !mine && isManager;
                     return (
                       <tr key={p.id}>
                         <td className={s.cellNum}>Seat {(p.seat ?? 0) + 1}</td>
@@ -140,7 +154,7 @@ export default function PlaxisPage({
                           {(mine || isManager) && (
                             <button type="button" className={`${s.btn} ${s.btnSm}`}
                               onClick={() => void actions.endPlaxis(p)}>
-                              Log out
+                              {onBehalf ? `Log out for ${p.user || "holder"}` : "Log out"}
                             </button>
                           )}
                         </td>

@@ -74,16 +74,48 @@ def _coerce_dates(doc: dict) -> dict:
     return out
 
 
+def _stamp_owner_keys(seed: Dict[str, List[dict]]) -> List[str]:
+    """res/plaxis owner key (``email`` — the same field inv_tx keys
+    ownership on), resolved through the variant's own users by EXACT
+    case-insensitive name. The rules mirror the backfill script: exactly one
+    roster match with a non-blank email sets the key; anything else (no
+    match, several matches, blank roster email) leaves it absent and is
+    reported — never guessed. Returns the report lines."""
+    notes: List[str] = []
+    by_name: Dict[str, List[dict]] = {}
+    for u in seed.get("users", []):
+        by_name.setdefault(str(u.get("name") or "").strip().lower(), []).append(u)
+    for section in ("res", "plaxis"):
+        for doc in seed.get(section, []):
+            if str(doc.get("email") or "").strip():
+                continue  # the seed file itself carries a key
+            name = str(doc.get("user") or "").strip()
+            matches = by_name.get(name.lower(), []) if name else []
+            email = str(matches[0].get("email") or "").strip() if len(matches) == 1 else ""
+            if len(matches) == 1 and email:
+                doc["email"] = email
+            else:
+                reason = ("no roster match" if not matches
+                          else "several roster matches" if len(matches) > 1
+                          else "roster row has no email")
+                notes.append(f"{section} {doc.get('id')}: owner key NOT set for "
+                             f"{name or '(blank name)'!r} — {reason}")
+    return notes
+
+
 def load_seed(demo: bool) -> Dict[str, List[dict]]:
     """Load + coerce the chosen variant. Raises on unparseable data — a bad
     seed file must fail loudly, never half-seed."""
     raw = json.loads(DATA_PATH.read_text(encoding="utf-8"))
     variant = raw[VARIANTS[demo]]
-    return {
+    seed = {
         section: [_coerce_dates(d) for d in variant.get(section, [])]
         for section in _COLLECTION_ATTRS
         if section in variant
     }
+    for note in _stamp_owner_keys(seed):
+        print(f"[INV_SEED] NOTE: {note}")
+    return seed
 
 
 def validate_seed(seed: Dict[str, List[dict]]) -> List[str]:

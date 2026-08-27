@@ -362,7 +362,11 @@ async def test_format_ctx_raise_never_leaks_into_chat_call(monkeypatch):
     fmt_call, chat_call = _FakeOllamaClient.recorded[0], _FakeOllamaClient.recorded[-1]
     assert fmt_call["options"]["num_ctx"] > config.OLLAMA_NUM_CTX
     assert chat_call["options"]["num_ctx"] == config.OLLAMA_NUM_CTX
-    assert chat_call["options"] == llm_service._ollama_options()
+    # Answer path carries its own (larger) output budget; the format engine
+    # and rewriter keep the default. See config.ANSWER_NUM_PREDICT.
+    assert chat_call["options"] == llm_service._ollama_options(
+        num_predict=config.ANSWER_NUM_PREDICT
+    )
     # The answer call's think flag follows OLLAMA_THINK_ANSWERS (default off
     # since 2026-08-26); see test_answer_think_flag.py for both settings.
     assert chat_call["think"] is config.OLLAMA_THINK_ANSWERS

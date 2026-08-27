@@ -20,6 +20,7 @@ from app.core.config import (
     OLLAMA_MODEL,
     OLLAMA_NUM_CTX,
     OLLAMA_NUM_PREDICT,
+    ANSWER_NUM_PREDICT,
     OLLAMA_REQUEST_TIMEOUT,
     OLLAMA_REWRITE_TIMEOUT,
     OLLAMA_TEMPERATURE,
@@ -131,18 +132,50 @@ def _think_for_answers() -> bool:
     return bool(config.OLLAMA_THINK_ANSWERS)
 
 
-def _ollama_options() -> dict:
+def _ollama_options(num_predict: Optional[int] = None) -> dict:
     """Generation options for the raw ollama.AsyncClient.chat calls.
 
     num_ctx is the critical one: the runtime default (4096) is smaller than a
     multi-turn RAG prompt (~7.3k tokens), which starves the output budget and
     truncates answers to a single word. See config.py for the full rationale.
+
+    ``num_predict`` defaults to OLLAMA_NUM_PREDICT (query rewrite); the answer
+    paths pass ANSWER_NUM_PREDICT because inline reasoning shares the budget.
     """
     return {
         "num_ctx": OLLAMA_NUM_CTX,
-        "num_predict": OLLAMA_NUM_PREDICT,
+        "num_predict": OLLAMA_NUM_PREDICT if num_predict is None else num_predict,
         "temperature": OLLAMA_TEMPERATURE,
     }
+
+
+# Openers qwen3 uses when its content is still reasoning rather than an answer.
+_REASONING_OPENER_RE = re.compile(
+    r"^\s*(we are given|we are comparing|we must|we need to|let me|okay|"
+    r"the user (?:is asking|asks|wants)|i need to|looking at the provided context)",
+    re.IGNORECASE,
+)
+
+
+def _warn_reasoning_dump(resp, raw: str, *, attempt: str, mode: str, streaming: bool) -> None:
+    """Visibility guard for the un-anchored reasoning dump.
+
+    When a generation ends on done_reason='length' and the content has NO
+    closing </think> yet opens like chain-of-thought, the budget died inside
+    the reasoning and the whole thing will reach the user as the "answer"
+    (the stripper needs the closing tag). ANSWER_NUM_PREDICT (6144) should make
+    this rare; log it so we know if it is not. No salvage attempted.
+    """
+    if _resp_field(resp, "done_reason") != "length":
+        return
+    if "</think>" in raw.lower() or not _REASONING_OPENER_RE.match(raw):
+        return
+    print(
+        "   [WARNING] reasoning dump: done_reason=length with no </think> and a "
+        f"reasoning opener (attempt={attempt} mode={mode} streaming={streaming} "
+        f"eval_count={_resp_field(resp, 'eval_count')} raw_chars={len(raw)} "
+        f"num_predict={ANSWER_NUM_PREDICT} head={raw.strip()[:80]!r})"
+    )
 
 
 def _build_answer_prompt(
@@ -433,7 +466,7 @@ async def _ollama_stream_and_clean(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
                 think=think,
-                options=_ollama_options(),
+                options=_ollama_options(num_predict=ANSWER_NUM_PREDICT),
                 stream=True,
             )
             async for part in stream:
@@ -486,6 +519,7 @@ async def _ollama_stream_and_clean(
 
     wall_s = time.monotonic() - started
     raw_answer = "".join(raw_parts)
+    _warn_reasoning_dump(last_part, raw_answer, attempt="initial", mode=mode, streaming=True)
 
     # Short-answer guard, same threshold and same retry as the non-streaming
     # path. Reachable only while the prefix buffer still holds everything back,
@@ -509,9 +543,10 @@ async def _ollama_stream_and_clean(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
                 think=_think_for_answers(),
-                options=_ollama_options(),
+                options=_ollama_options(num_predict=ANSWER_NUM_PREDICT),
             )
             raw_answer = resp["message"]["content"] or ""
+            _warn_reasoning_dump(resp, raw_answer, attempt="retry", mode=mode, streaming=False)
         finally:
             _GENERATIONS_IN_FLIGHT -= 1
             try:
@@ -644,12 +679,14 @@ async def generate_answer_with_groq(
                         model=OLLAMA_MODEL,
                         messages=[{"role": "user", "content": full_prompt}],
                         think=_think_for_answers(),
-                        options=_ollama_options(),
+                        options=_ollama_options(num_predict=ANSWER_NUM_PREDICT),
                     )
                 finally:
                     _GENERATIONS_IN_FLIGHT -= 1
                 wall_s = time.monotonic() - started
-                return (resp["message"]["content"] or ""), resp, wall_s, in_flight
+                raw = resp["message"]["content"] or ""
+                _warn_reasoning_dump(resp, raw, attempt="generate", mode=mode, streaming=False)
+                return raw, resp, wall_s, in_flight
 
             # `finally: close()` tears the underlying httpx connection down
             # DETERMINISTICALLY instead of leaving it to the garbage collector.

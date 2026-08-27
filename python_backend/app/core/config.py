@@ -50,6 +50,18 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 #                 grounded RAG); 0.3 matches the Groq answer LLM.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "12288"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
+# ANSWER-path output budget (initial, guard retry, streaming and non-streaming
+# in llm_service). Split from OLLAMA_NUM_PREDICT on 2026-08-27: with
+# OLLAMA_THINK_ANSWERS off, qwen3 still reasons INSIDE content before the
+# closing </think>, and that reasoning shares this budget with the answer.
+# At 2048 the 30-question eval on qwen3:30b-a3b returned 13 answers cut
+# mid-sentence (done_reason=length) and 4 that were nothing but reasoning --
+# the budget died before </think>, so the stripper had no anchor. 6144 mirrors
+# VISION_NUM_PREDICT, which fixed the identical failure on the vision path.
+# ~70 tok/s observed -> ~90s worst case, inside OLLAMA_REQUEST_TIMEOUT (180s)
+# for a single stream. The query rewriter and every classifier keep the
+# small OLLAMA_NUM_PREDICT budget.
+ANSWER_NUM_PREDICT = int(os.getenv("ANSWER_NUM_PREDICT", "6144"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
 
 # Thinking on the ANSWER path only -- the raw ollama.AsyncClient chat calls in

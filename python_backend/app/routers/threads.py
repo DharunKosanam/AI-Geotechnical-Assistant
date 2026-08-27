@@ -4,6 +4,7 @@ Thread management endpoints - MongoDB-based storage
 from fastapi import APIRouter, Depends, HTTPException, status
 from datetime import datetime
 from typing import Dict
+import time
 import uuid
 
 from models import (
@@ -69,8 +70,31 @@ async def list_threads(current_user: User = Depends(get_current_user)):
                 "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None,
                 "updatedAt": doc.get("updatedAt").isoformat() if doc.get("updatedAt") else None,
             }
+            if config.CHAT_SHARING_ENABLED:
+                # Flag-on extras only — the flag-off payload keys are pinned
+                # byte-identical by test_chat_sharing (members is stored data,
+                # never echoed flag-off).
+                thread_data["shared"] = False
+                thread_data["memberCount"] = len(doc.get("members") or [doc.get("userId")])
             threads.append(thread_data)
-        
+
+        if config.CHAT_SHARING_ENABLED:
+            # Lab shared = threads the caller JOINED: member, not owner. A
+            # second query, never a widening of the caller-scoped one above.
+            shared_cursor = conversations_collection.find(
+                {"members": current_user.id, "userId": {"$ne": current_user.id}}
+            ).sort("updatedAt", -1)
+            async for doc in shared_cursor:
+                threads.append({
+                    "threadId": doc.get("threadId"),
+                    "name": doc.get("name"),
+                    "isGroup": doc.get("isGroup", False),
+                    "createdAt": doc.get("createdAt").isoformat() if doc.get("createdAt") else None,
+                    "updatedAt": doc.get("updatedAt").isoformat() if doc.get("updatedAt") else None,
+                    "shared": True,
+                    "memberCount": len(doc.get("members") or []),
+                })
+
         print(f"[OK] Retrieved {len(threads)} threads from history")
         return {"threads": threads}
         
@@ -93,6 +117,11 @@ async def create_thread_history(
             "threadId": request.threadId,
             "name": request.name,
             "isGroup": request.isGroup,
+            # Membership (CHAT_SHARING_ENABLED): the owner is always a member.
+            # Written regardless of flag state so the data never drifts while
+            # the flag is off — the response and every flag-off read surface
+            # are unchanged (list_threads does not echo it flag-off).
+            "members": [current_user.id],
             "createdAt": datetime.now(),
             "updatedAt": datetime.now()
         }
@@ -113,6 +142,46 @@ async def create_thread_history(
 # Upper bound for a user-entered thread name. The auto-generated title is
 # capped at 40 chars; a typed name gets more room but stays sidebar-sane.
 THREAD_NAME_MAX_CHARS = 100
+
+# Output cap for the title LLM call. A 3-5 word title is ~5-12 tokens; 32
+# leaves ~3x headroom for a "Title:" prefix, quotes or a stray newline (all
+# stripped by the cleaner in generate_thread_title, which keeps only the first
+# line) while making a runaway answer impossible: at the measured ~25 tok/s
+# that is under 1.5 s of generation. Thinking is off on this call, so no
+# reasoning tokens compete for the budget.
+TITLE_NUM_PREDICT = 32
+
+
+def _title_llm():
+    """The LLM for the title call ONLY (bounded 2026-08-26).
+
+    ``get_llm()`` is shared with the answer path and, for Ollama, is built on
+    llama-index defaults: ``context_window=-1`` resolves through ``ollama show``
+    to the model's maximum (262144 for gemma4) and is sent as ``num_ctx``,
+    which reloads the runner at 262k ctx (partially offloaded, ~8 tok/s) and
+    flips it back to 12288 on the next chat turn; ``thinking=True`` then spends
+    400-770 reasoning tokens on a five-word title. Measured 72-79 s against a
+    30 s proxy timeout, so the title never landed. Here the same model, host
+    and request timeout are used with the app-wide num_ctx (no runner
+    flip-flop), thinking off, a small num_predict and the app-wide
+    temperature. Groq is returned untouched, as is anything that is not a
+    llama-index Ollama (the unit tests stand a double in for get_llm()).
+    """
+    llm = get_llm()
+    if config.LLM_PROVIDER != "ollama":
+        return llm
+    from llama_index.llms.ollama import Ollama  # lazy, as in get_llm()
+    if not isinstance(llm, Ollama):
+        return llm
+    return Ollama(
+        model=config.OLLAMA_MODEL,
+        base_url=config.OLLAMA_BASE_URL,
+        request_timeout=llm.request_timeout,
+        thinking=False,
+        context_window=config.OLLAMA_NUM_CTX,
+        temperature=config.OLLAMA_TEMPERATURE,
+        additional_kwargs={"num_predict": TITLE_NUM_PREDICT},
+    )
 
 
 @router.put("/history")
@@ -180,13 +249,28 @@ async def update_thread(
                     {"userId": current_user.id, "threadId": request.threadId}
                 )
                 if exists is not None:
+                    print(
+                        f"[TITLE] Conditional rename NOT applied for thread "
+                        f"{request.threadId}: current name {exists.get('name')!r} "
+                        f"!= expected placeholder {request.expectedCurrentName!r} (409)"
+                    )
                     raise HTTPException(
                         status_code=409,
                         detail="Thread name has changed; not overwriting.",
                     )
+            # Silent-failure guard (2026-08-26): a rename that matches nothing
+            # used to leave no trace at all.
+            print(
+                f"[WARNING] Thread update NOT applied for thread {request.threadId}: "
+                f"no matching thread for user {current_user.id} (404)"
+            )
             raise HTTPException(status_code=404, detail="Thread not found")
 
-        print(f"[OK] Updated thread: {request.threadId}")
+        what = (
+            f" name={update_fields['name']!r}" if "name" in update_fields else ""
+        ) + (f" isGroup={update_fields['isGroup']}" if "isGroup" in update_fields else "")
+        cond = " (conditional auto-title)" if request.expectedCurrentName is not None else ""
+        print(f"[OK] Updated thread: {request.threadId}{what}{cond}")
         return {"success": True, "message": "Thread updated successfully"}
 
     except HTTPException:
@@ -310,14 +394,36 @@ async def generate_thread_title(
     request: TitleGenerationRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a concise title for a thread using Groq"""
+    """Generate a concise title for a thread using the configured LLM.
+
+    Observability contract (2026-08-26, "title silence" incident): every
+    outcome prints exactly one terminal line -- ``[TITLE] Skipped`` (empty
+    text), ``[OK] Generated title`` or ``[ERROR] Error generating title``
+    with the exception type and message -- plus one ``[TITLE] Generating``
+    line on arrival. So a thread that keeps its timestamp placeholder with NO
+    ``[TITLE]``/``title`` line in the journal means the request never reached
+    this handler (the frontend skipped it, or it was rejected before the
+    handler ran, e.g. 401) -- not that generation failed quietly here.
+    """
+    started = time.monotonic()
     try:
         message_text = request.text
         if not message_text:
+            print(
+                f"[TITLE] Skipped for thread {thread_id}: empty message text "
+                f"(message={request.message!r}, content={request.content!r}) "
+                f"-- returning timestamp fallback"
+            )
             return {"title": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        
-        # Use Groq to generate title with improved prompt
-        llm = get_llm()
+
+        print(
+            f"[TITLE] Generating title for thread {thread_id} "
+            f"(user={current_user.id}, {len(message_text)} chars, "
+            f"provider={config.LLM_PROVIDER})"
+        )
+
+        # Use the configured LLM, bounded for a short title (see _title_llm)
+        llm = _title_llm()
         
         # Improved prompt: more specific, clearer instructions
         prompt = f"""Summarize this query into a concise, 3-5 word title. Do not use quotes.
@@ -334,7 +440,9 @@ User Query: {message_text[:200]}
 Title:"""
         
         response = await llm.acomplete(prompt)
-        title = response.text.strip()
+        elapsed = time.monotonic() - started
+        raw_text = response.text or ""
+        title = raw_text.strip()
         
         # Aggressive cleaning to remove any artifacts
         import re
@@ -365,17 +473,28 @@ Title:"""
         
         # Fallback if title is empty or too short after cleaning
         if not title or len(title) < 3:
+            print(
+                f"[TITLE] LLM output unusable after cleaning for thread {thread_id} "
+                f"(raw={raw_text[:120]!r}) -- using the first words of the message"
+            )
             # Use first few words of the message
             words = message_text[:80].split()[:5]
             title = ' '.join(words)
             if len(title) > 40:
                 title = title[:37] + "..."
         
-        print(f"[OK] Generated title for thread {thread_id}: {title}")
+        print(f"[OK] Generated title for thread {thread_id} in {elapsed:.1f}s: {title}")
         return {"title": title}
-        
+
     except Exception as error:
-        print(f"[ERROR] Error generating title: {error}")
+        # The caller gets a usable (timestamp) title either way, so the ONLY
+        # trace of a failure is this line -- it must say what went wrong.
+        elapsed = time.monotonic() - started
+        print(
+            f"[ERROR] Error generating title for thread {thread_id} after "
+            f"{elapsed:.1f}s: {type(error).__name__}: {error} "
+            f"-- returning timestamp fallback"
+        )
         fallback_title = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return {"title": fallback_title}
 
@@ -465,6 +584,99 @@ async def submit_tool_actions(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred, please try again."
         )
+
+
+# ---------------------------------------------------------------------------
+# Thread sharing (CHAT_SHARING_ENABLED, default off). A separate router,
+# included by main.py ONLY when the flag is on — flag-off these paths are
+# absent and the route table is byte-identical to today (the inventory
+# personal_router pattern). Decided semantics, not re-litigated here: an
+# owner shares explicitly (isGroup true) and a thread id alone grants
+# nothing; members read history and post but never rename/delete/remove
+# others; a member may remove themselves; the owner may remove anyone but
+# is never removed (owner ∈ members is an invariant); FILES ARE NEVER
+# SHARED — nothing here touches files or retrieval scoping.
+# ---------------------------------------------------------------------------
+sharing_router = APIRouter(prefix="/api/assistants/threads", tags=["threads"])
+
+
+@sharing_router.post("/{thread_id}/join")
+async def join_thread(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Join a SHARED thread by id. 404 unknown thread; 403 when the owner has
+    not shared it (isGroup false) — possessing an id grants nothing.
+    Idempotent: $addToSet, and joining twice (or the owner joining their own
+    thread) changes nothing. The $each also repairs a legacy row missing the
+    owner in members, keeping the owner-always-included invariant."""
+    conv = await conversations_collection.find_one({"threadId": thread_id})
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if not conv.get("isGroup"):
+        raise HTTPException(
+            status_code=403,
+            detail="This thread is not shared. Ask its owner to share it first.")
+    to_add = [current_user.id]
+    if conv.get("userId"):
+        to_add.append(conv["userId"])
+    await conversations_collection.update_one(
+        {"threadId": thread_id},
+        {"$addToSet": {"members": {"$each": to_add}}},
+    )
+    print(f"[SHARE] {current_user.id} joined thread {thread_id}")
+    return {"success": True, "threadId": thread_id, "name": conv.get("name")}
+
+
+@sharing_router.post("/{thread_id}/leave")
+async def leave_thread(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Remove SELF from a shared thread. The owner cannot leave their own
+    thread (delete it instead); a non-member leaving is an idempotent
+    no-op."""
+    conv = await conversations_collection.find_one({"threadId": thread_id})
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if conv.get("userId") == current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="The owner cannot leave their own thread.")
+    await conversations_collection.update_one(
+        {"threadId": thread_id},
+        {"$pull": {"members": current_user.id}},
+    )
+    print(f"[SHARE] {current_user.id} left thread {thread_id}")
+    return {"success": True, "threadId": thread_id}
+
+
+@sharing_router.delete("/{thread_id}/members/{member_id}")
+async def remove_thread_member(
+    thread_id: str,
+    member_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Owner-only member removal. The owner themselves can never be removed
+    (owner ∈ members is the invariant); removing a non-member is an
+    idempotent no-op."""
+    conv = await conversations_collection.find_one({"threadId": thread_id})
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if conv.get("userId") != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the thread owner can remove members.")
+    if member_id == conv.get("userId"):
+        raise HTTPException(
+            status_code=400,
+            detail="The owner cannot be removed from their own thread.")
+    await conversations_collection.update_one(
+        {"threadId": thread_id},
+        {"$pull": {"members": member_id}},
+    )
+    print(f"[SHARE] owner removed {member_id} from thread {thread_id}")
+    return {"success": True, "threadId": thread_id, "removed": member_id}
 
 
 # ---------------------------------------------------------------------------

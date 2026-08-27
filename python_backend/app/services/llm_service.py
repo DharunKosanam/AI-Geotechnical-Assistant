@@ -4,12 +4,14 @@ LLM service for managing Groq AI interactions
 import os
 import re
 import sys
+import time
 from typing import Awaitable, Callable, List, Dict, Optional
 import httpx
 import ollama
 from llama_index.llms.groq import Groq
 from dotenv import load_dotenv
 
+from app.core import config
 from app.core.config import (
     GROQ_MODEL,
     LLM_PROVIDER,
@@ -74,8 +76,9 @@ def get_llm():
         # the ollama API's top-level `think` flag on every request. (NOT
         # additional_kwargs -- that goes into model `options`, not the think
         # flag; and a Modelfile PARAMETER does not work on this Ollama version.)
-        # Every raw ollama.AsyncClient.chat() call site in the backend passes
-        # think=True for the same reason.
+        # The raw ollama.AsyncClient.chat() classifier call sites pass
+        # think=False; the ANSWER path follows OLLAMA_THINK_ANSWERS (default
+        # off since 2026-08-26 -- see _think_for_answers and config.py).
         return Ollama(
             model=OLLAMA_MODEL,
             base_url=OLLAMA_BASE_URL,
@@ -116,6 +119,15 @@ def _active_model_emits_thinking_tags() -> bool:
     if LLM_PROVIDER == "ollama":
         return True
     return _model_emits_thinking_tags(GROQ_MODEL)
+
+
+def _think_for_answers() -> bool:
+    """``think=`` for the answer-path chat calls (initial and guard retry,
+    streaming and non-streaming). Read from the config module at CALL time,
+    not import time, so OLLAMA_THINK_ANSWERS can be toggled per test / per
+    process without re-importing this module. Default off: see config.py.
+    """
+    return bool(config.OLLAMA_THINK_ANSWERS)
 
 
 def _ollama_options() -> dict:
@@ -199,6 +211,75 @@ TokenEmitter = Callable[[str], Awaitable[None]]
 # budget) and we retry once. Streaming holds this many characters back before
 # emitting anything, so the retry is still possible — you cannot un-send a token.
 SHORT_ANSWER_THRESHOLD = 20
+
+# Number of Ollama answer generations currently awaiting a response (streaming
+# and non-streaming, initial and guard retry). Read ONLY by the short-answer
+# guard diagnostics below, to answer "was the GPU serving something else at
+# the time?" after an empty generation. Single-process counter (uvicorn runs
+# one worker here); it is not a limiter and never blocks anything.
+_GENERATIONS_IN_FLIGHT = 0
+
+
+def _resp_field(resp, key):
+    """Read one field off an ollama ChatResponse / stream chunk (or a plain
+    dict, as the unit-test fakes use); None when absent or unreadable."""
+    if resp is None:
+        return None
+    try:
+        getter = getattr(resp, "get", None)
+        if callable(getter):
+            return getter(key)
+    except Exception:
+        pass
+    return getattr(resp, key, None)
+
+
+def _log_short_answer_diagnostics(
+    resp,
+    *,
+    attempt: str,
+    mode: str,
+    streaming: bool,
+    prompt: str,
+    wall_s: float,
+    in_flight: int,
+    thinking_chars: Optional[int] = None,
+) -> None:
+    """One ``[GUARD] diag:`` line explaining a short/empty raw answer.
+
+    Added 2026-08-26 after Ollama returned '' twice in a row (initial + retry)
+    for a KB_QUERY with 4 grounded sources, at 19:40:56, once, unreproducible
+    -- CAUSE UNKNOWN. This records what the response itself said (done_reason,
+    token counts, durations) plus the call's context so a second occurrence
+    is explicable. Failure path only: never printed for a healthy answer.
+
+    ``prompt_eval_count`` is the prompt tokens Ollama actually evaluated --
+    a KV-cached prefix is excluded, so it can be far below the prompt's true
+    token count; ``prompt_chars`` is the unconditional size. ``resp`` is the
+    final stream chunk (streaming) or the ChatResponse (non-streaming).
+    """
+    def _ms(ns):
+        return None if ns is None else round(ns / 1e6)
+
+    if thinking_chars is None:
+        message = _resp_field(resp, "message")
+        thinking_chars = len(_resp_field(message, "thinking") or "")
+    print(
+        "   [GUARD] diag: "
+        f"attempt={attempt} mode={mode} streaming={streaming} "
+        f"done={_resp_field(resp, 'done')!r} "
+        f"done_reason={_resp_field(resp, 'done_reason')!r} "
+        f"prompt_eval_count={_resp_field(resp, 'prompt_eval_count')} "
+        f"eval_count={_resp_field(resp, 'eval_count')} "
+        f"prompt_chars={len(prompt)} "
+        f"thinking_chars={thinking_chars} "
+        f"wall={wall_s:.2f}s "
+        f"total_duration_ms={_ms(_resp_field(resp, 'total_duration'))} "
+        f"load_duration_ms={_ms(_resp_field(resp, 'load_duration'))} "
+        f"prompt_eval_duration_ms={_ms(_resp_field(resp, 'prompt_eval_duration'))} "
+        f"eval_duration_ms={_ms(_resp_field(resp, 'eval_duration'))} "
+        f"in_flight={in_flight} model={OLLAMA_MODEL}"
+    )
 
 # A stray, unpaired thinking tag (opening or closing). The paired form is
 # removed first by _clean_llm_answer; this catches whatever is left. Nothing
@@ -295,30 +376,44 @@ def _stable_raw_prefix(raw: str) -> str:
     return raw.rstrip()
 
 
-async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
+async def _ollama_stream_and_clean(
+    full_prompt: str, emit: TokenEmitter, *, mode: str = "?"
+) -> str:
     """Generate with Ollama in streaming mode, emitting cleaned text as it settles.
 
     Returns the SAME final string the non-streaming path would return for the
     same raw output, and guarantees the concatenation of everything passed to
     ``emit`` equals that string — so what the user watched, what gets persisted
     and what gets cached are one and the same text.
+
+    ``mode`` is only echoed into the short-answer guard diagnostics.
     """
+    global _GENERATIONS_IN_FLIGHT
     client = ollama.AsyncClient(host=OLLAMA_BASE_URL, timeout=OLLAMA_REQUEST_TIMEOUT)
     raw_parts: List[str] = []
     emitted = ""
     timed_out = False
+    # Guard diagnostics only: the final chunk carries done_reason/eval counts.
+    last_part = None
+    thinking_chars = 0
+    started = time.monotonic()
+    _GENERATIONS_IN_FLIGHT += 1
+    in_flight = _GENERATIONS_IN_FLIGHT
 
     try:
         try:
             stream = await client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
-                think=True,
+                think=_think_for_answers(),
                 options=_ollama_options(),
                 stream=True,
             )
             async for part in stream:
-                piece = ((part.get("message") or {}).get("content")) or ""
+                last_part = part
+                message = part.get("message") or {}
+                thinking_chars += len(message.get("thinking") or "")
+                piece = message.get("content") or ""
                 if not piece:
                     continue
                 raw_parts.append(piece)
@@ -348,6 +443,7 @@ async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
                 f"after {len(emitted)} emitted chars"
             )
     finally:
+        _GENERATIONS_IN_FLIGHT -= 1
         # Deterministic teardown — on cancellation this is what drops the HTTP
         # connection and makes Ollama abandon the generation. See the
         # non-streaming path for the full rationale.
@@ -356,6 +452,7 @@ async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
         except Exception as close_err:
             print(f"   [WARNING] Closing Ollama client failed: {close_err}")
 
+    wall_s = time.monotonic() - started
     raw_answer = "".join(raw_parts)
 
     # Short-answer guard, same threshold and same retry as the non-streaming
@@ -366,16 +463,25 @@ async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
             f"   [GUARD] Suspiciously short raw answer "
             f"({len(raw_answer.strip())} chars): {raw_answer!r} — retrying once"
         )
+        _log_short_answer_diagnostics(
+            last_part, attempt="initial", mode=mode, streaming=True,
+            prompt=full_prompt, wall_s=wall_s, in_flight=in_flight,
+            thinking_chars=thinking_chars,
+        )
         retry_client = ollama.AsyncClient(host=OLLAMA_BASE_URL, timeout=OLLAMA_REQUEST_TIMEOUT)
+        retry_started = time.monotonic()
+        _GENERATIONS_IN_FLIGHT += 1
+        retry_in_flight = _GENERATIONS_IN_FLIGHT
         try:
             resp = await retry_client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": full_prompt}],
-                think=True,
+                think=_think_for_answers(),
                 options=_ollama_options(),
             )
             raw_answer = resp["message"]["content"] or ""
         finally:
+            _GENERATIONS_IN_FLIGHT -= 1
             try:
                 await retry_client.close()
             except Exception:
@@ -384,6 +490,11 @@ async def _ollama_stream_and_clean(full_prompt: str, emit: TokenEmitter) -> str:
             print(
                 f"   [GUARD] Still short after retry "
                 f"({len(raw_answer.strip())} chars): {raw_answer!r} — returning fallback"
+            )
+            _log_short_answer_diagnostics(
+                resp, attempt="retry", mode=mode, streaming=False,
+                prompt=full_prompt, wall_s=time.monotonic() - retry_started,
+                in_flight=retry_in_flight,
             )
             fallback = "I couldn't generate a complete answer — please try again."
             await emit(fallback)
@@ -475,7 +586,7 @@ async def generate_answer_with_groq(
         if LLM_PROVIDER == "ollama" and emit is not None:
             # Streaming path: same prompt, same model, same options, same
             # cleaning — delivered incrementally instead of all at once.
-            return await _ollama_stream_and_clean(full_prompt, emit)
+            return await _ollama_stream_and_clean(full_prompt, emit, mode=mode)
 
         if LLM_PROVIDER == "ollama":
             # Bypass llama-index for Ollama: its wrapper does NOT reliably forward
@@ -489,14 +600,24 @@ async def generate_answer_with_groq(
                 host=OLLAMA_BASE_URL, timeout=OLLAMA_REQUEST_TIMEOUT
             )
 
-            async def _ollama_generate() -> str:
-                resp = await client.chat(
-                    model=OLLAMA_MODEL,
-                    messages=[{"role": "user", "content": full_prompt}],
-                    think=True,
-                    options=_ollama_options(),
-                )
-                return resp["message"]["content"] or ""
+            async def _ollama_generate():
+                """One generate call. Returns (raw_text, response, wall_s,
+                in_flight) -- the last three feed the guard diagnostics only."""
+                global _GENERATIONS_IN_FLIGHT
+                _GENERATIONS_IN_FLIGHT += 1
+                in_flight = _GENERATIONS_IN_FLIGHT
+                started = time.monotonic()
+                try:
+                    resp = await client.chat(
+                        model=OLLAMA_MODEL,
+                        messages=[{"role": "user", "content": full_prompt}],
+                        think=_think_for_answers(),
+                        options=_ollama_options(),
+                    )
+                finally:
+                    _GENERATIONS_IN_FLIGHT -= 1
+                wall_s = time.monotonic() - started
+                return (resp["message"]["content"] or ""), resp, wall_s, in_flight
 
             # `finally: close()` tears the underlying httpx connection down
             # DETERMINISTICALLY instead of leaving it to the garbage collector.
@@ -506,7 +627,7 @@ async def generate_answer_with_groq(
             # Ollama — which is what makes Ollama abandon the generation instead
             # of running it to completion on a GPU nobody is waiting on.
             try:
-                raw_answer = await _ollama_generate()
+                raw_answer, resp, wall_s, in_flight = await _ollama_generate()
 
                 # Safety net: a healthy generation is hundreds-to-thousands of chars.
                 # A sub-20-char raw answer means the model halted almost immediately
@@ -519,11 +640,19 @@ async def generate_answer_with_groq(
                         f"   [GUARD] Suspiciously short raw answer "
                         f"({len(raw_answer.strip())} chars): {raw_answer!r} — retrying once"
                     )
-                    raw_answer = await _ollama_generate()
+                    _log_short_answer_diagnostics(
+                        resp, attempt="initial", mode=mode, streaming=False,
+                        prompt=full_prompt, wall_s=wall_s, in_flight=in_flight,
+                    )
+                    raw_answer, resp, wall_s, in_flight = await _ollama_generate()
                     if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
                         print(
                             f"   [GUARD] Still short after retry "
                             f"({len(raw_answer.strip())} chars): {raw_answer!r} — returning fallback"
+                        )
+                        _log_short_answer_diagnostics(
+                            resp, attempt="retry", mode=mode, streaming=False,
+                            prompt=full_prompt, wall_s=wall_s, in_flight=in_flight,
                         )
                         return "I couldn't generate a complete answer — please try again."
             finally:

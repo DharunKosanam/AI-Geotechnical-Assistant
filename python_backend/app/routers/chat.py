@@ -62,6 +62,37 @@ router = APIRouter(tags=["chat"])
 _thread_messages = {}
 
 
+async def _shared_thread_scope(thread_id, current_user: User):
+    """CHAT_SHARING_ENABLED membership gate + read-scope decision.
+
+    Returns the conversation doc when the caller may read the WHOLE thread
+    (owner or member of a registered thread), or None when today's
+    caller-scoped behavior applies — flag off, no thread id, or a thread
+    with no conversations row (never registered). Raises 403 when the
+    thread IS registered and the caller is neither owner nor member: a
+    non-member can neither read others' turns nor post into the thread.
+
+    Flag-off this touches NOTHING (no DB access) — the flag-off read and
+    write paths are byte-identical to before the feature. FILES ARE NEVER
+    SHARED: this widens message queries only; retrieval file scoping
+    (rag_service._thread_scope_filter and the user_upload filters) is not
+    referenced here and stays caller-scoped in every flag state.
+    """
+    if not config.CHAT_SHARING_ENABLED or not thread_id:
+        return None
+    conv = await conversations_collection.find_one({"threadId": thread_id})
+    if conv is None:
+        return None
+    if conv.get("userId") == current_user.id:
+        return conv
+    if current_user.id in (conv.get("members") or []):
+        return conv
+    raise HTTPException(
+        status_code=403,
+        detail="You are not a member of this thread. Join it first.",
+    )
+
+
 @router.get("/chat/{thread_id}/history")
 async def get_chat_history(thread_id: str, current_user: User = Depends(get_current_user)):
     """
@@ -70,12 +101,18 @@ async def get_chat_history(thread_id: str, current_user: User = Depends(get_curr
     """
     try:
         print(f"[HISTORY] Fetching chat history for thread: {thread_id}")
-        
+
+        # Membership scope (CHAT_SHARING_ENABLED): owner or member of a
+        # shared thread reads the FULL history (every participant's turns,
+        # createdAt order); everyone else — and every flag-off request —
+        # keeps today's caller-scoped query byte-for-byte.
+        shared_conv = await _shared_thread_scope(thread_id, current_user)
+        history_filter = {"threadId": thread_id, "userId": current_user.id}
+        if shared_conv is not None:
+            history_filter = {"threadId": thread_id}
+
         # Query MongoDB for messages in this thread
-        cursor = messages_collection.find({
-            "threadId": thread_id,
-            "userId": current_user.id
-        }).sort("createdAt", 1)  # Oldest first
+        cursor = messages_collection.find(history_filter).sort("createdAt", 1)  # Oldest first
         
         messages = []
         async for doc in cursor:
@@ -94,8 +131,19 @@ async def get_chat_history(thread_id: str, current_user: User = Depends(get_curr
             messages.append(message)
         
         print(f"[OK] Retrieved {len(messages)} messages for thread {thread_id}")
-        return {"messages": messages, "count": len(messages)}
-        
+        response = {"messages": messages, "count": len(messages)}
+        if shared_conv is not None:
+            # Flag-on extras for the frontend (poll only threads with >1
+            # member); never present flag-off — payload byte-identical.
+            response["shared"] = shared_conv.get("userId") != current_user.id
+            response["memberCount"] = len(shared_conv.get("members") or [])
+        return response
+
+    except HTTPException:
+        # The 403 for a non-member IS the contract (CHAT_SHARING_ENABLED) —
+        # it must not be flattened into the empty-list fallback below.
+        # Flag-off nothing in this handler raises HTTPException.
+        raise
     except Exception as error:
         print(f"[ERROR] Error fetching chat history: {error}")
         import traceback
@@ -480,6 +528,16 @@ async def _run_chat_turn(
     contract is unchanged; the SSE caller catches it and reports it as an event
     (it cannot change the status code once the stream has started).
     """
+    # Membership gate (CHAT_SHARING_ENABLED) — deliberately BEFORE the
+    # catch-all try below, which flattens every exception to 500: a
+    # non-member posting into a registered thread must get the 403 itself.
+    # Returns the conversation when the caller reads the WHOLE thread (owner
+    # or member); None = today's caller-scoped behavior, including every
+    # flag-off request (no DB access flag-off).
+    shared_conv = await _shared_thread_scope(
+        getattr(payload, "threadId", None) or getattr(payload, "thread_id", None),
+        current_user,
+    )
     try:
         print(f"[RECEIVED] Received query: {payload.query}")
 
@@ -527,10 +585,17 @@ async def _run_chat_turn(
         if thread_id:
             try:
                 # Pull the most recent 20 messages (newest first), then restore
-                # chronological order for the prompt.
+                # chronological order for the prompt. In a shared thread
+                # (owner or member, CHAT_SHARING_ENABLED) the context holds
+                # EVERY participant's turns — concurrent asks resolve in
+                # createdAt order; flag-off (or unregistered thread) the
+                # query is byte-identical to before the feature.
+                history_filter = {"threadId": thread_id, "userId": current_user.id}
+                if shared_conv is not None:
+                    history_filter = {"threadId": thread_id}
                 cursor = (
                     messages_collection
-                    .find({"threadId": thread_id, "userId": current_user.id})
+                    .find(history_filter)
                     .sort("createdAt", -1)
                     .limit(20)
                 )

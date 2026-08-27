@@ -42,6 +42,12 @@ app.add_middleware(
 # Include routers
 app.include_router(chat.router)
 app.include_router(threads.router)
+# Thread sharing (CHAT_SHARING_ENABLED): join/leave/member routes exist ONLY
+# when the flag is on — flag-off the route table is byte-identical to today.
+from app.core import config as _config  # noqa: E402
+
+if _config.CHAT_SHARING_ENABLED:
+    app.include_router(threads.sharing_router)
 app.include_router(files.router)
 app.include_router(auth.router)
 app.include_router(health.router)

@@ -111,6 +111,63 @@ const renderList = async () => {
   return { ...utils, ref, onThreadSelect };
 };
 
+describe("Mine / Lab shared split (CHAT_SHARING_ENABLED)", () => {
+  const renderWithFilter = async (filter: "mine" | "lab", expected: number) => {
+    const utils = render(
+      <ThreadList
+        currentThreadId={null as unknown as string}
+        onThreadSelect={vi.fn()}
+        filter={filter}
+      />,
+    );
+    await waitFor(() => expect(historyGets).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(utils.container.querySelectorAll('[class*="threadItem"]').length)
+        .toBe(expected),
+    );
+    return utils;
+  };
+
+  test("flag OFF (no shared field): byte-identical to today — mine shows all, lab shows own groups", async () => {
+    serverThreads = [
+      { threadId: "t1", name: "Plain", isGroup: false,
+        createdAt: "2026-08-01T10:00:00Z", updatedAt: "2026-08-01T10:00:00Z" },
+      { threadId: "t2", name: "Own group", isGroup: true,
+        createdAt: "2026-08-02T10:00:00Z", updatedAt: "2026-08-02T10:00:00Z" },
+    ];
+    let utils = await renderWithFilter("mine", 2);
+    cleanup();
+    historyGets = 0;
+    utils = await renderWithFilter("lab", 1);
+    expect(utils.container.textContent).toContain("Own group");
+  });
+
+  test("flag ON: mine = own threads only, lab = joined threads only", async () => {
+    serverThreads = [
+      { threadId: "t1", name: "Plain", isGroup: false,
+        createdAt: "2026-08-01T10:00:00Z", updatedAt: "2026-08-01T10:00:00Z",
+        shared: false, memberCount: 1 } as never,
+      { threadId: "t2", name: "Own group", isGroup: true,
+        createdAt: "2026-08-02T10:00:00Z", updatedAt: "2026-08-02T10:00:00Z",
+        shared: false, memberCount: 2 } as never,
+      { threadId: "t3", name: "Joined from lab", isGroup: true,
+        createdAt: "2026-08-03T10:00:00Z", updatedAt: "2026-08-03T10:00:00Z",
+        shared: true, memberCount: 2 } as never,
+    ];
+    // Mine: both OWN threads (the just-shared group stays visible), never
+    // the joined one.
+    let utils = await renderWithFilter("mine", 2);
+    expect(utils.container.textContent).toContain("Own group");
+    expect(utils.container.textContent).not.toContain("Joined from lab");
+    cleanup();
+    historyGets = 0;
+    // Lab shared: exactly the joined thread ({members: caller, userId: {$ne}}).
+    utils = await renderWithFilter("lab", 1);
+    expect(utils.container.textContent).toContain("Joined from lab");
+    expect(utils.container.textContent).not.toContain("Own group");
+  });
+});
+
 describe("ThreadList refresh contract", () => {
   test("mounts with one fetch and stays silent while idle (no timer)", async () => {
     await renderList();

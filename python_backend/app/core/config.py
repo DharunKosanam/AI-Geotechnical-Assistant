@@ -52,6 +52,24 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "12288"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "2048"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.3"))
 
+# Thinking on the ANSWER path only -- the raw ollama.AsyncClient chat calls in
+# llm_service (generate_answer_with_groq and _ollama_stream_and_clean, initial
+# and guard retry). Default OFF (2026-08-26): num_predict caps thinking AND
+# answer TOGETHER, and gemma4 routinely spends the whole 2048-token budget
+# reasoning about a hard question -> done_reason='length', eval_count=2048,
+# thinking ~6k chars, content='' -- twice, then the guard fallback. That is the
+# "empty answer" incident, reproduced with the guard diagnostics; it is
+# deterministic on hard questions, not transient. Classifiers are always
+# think=False; the title call is bounded separately (threads._title_llm).
+# Read at call time via the config module so tests can toggle it without a
+# re-import. Accepts 1/true/yes/on (case-insensitive).
+OLLAMA_THINK_ANSWERS = os.getenv("OLLAMA_THINK_ANSWERS", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # Ollama request timeouts (seconds) — passed to the ollama.AsyncClient
 # constructor (forwarded to the underlying httpx client) so a hung generation
 # fails cleanly instead of holding a worker forever. Sized against the observed
@@ -847,6 +865,28 @@ INVENTORY_REMINDER_HOUR = int(os.getenv("INVENTORY_REMINDER_HOUR", "8"))
 # and rendered control is byte-identical to today. Read at call time
 # (config.INVENTORY_PERSONAL_VIEW) so tests can toggle it without re-import.
 INVENTORY_PERSONAL_VIEW = os.getenv("INVENTORY_PERSONAL_VIEW", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# ---------------------------------------------------------------------------
+# Thread sharing (chat) feature flag
+# ---------------------------------------------------------------------------
+# ON: an owner-shared thread (isGroup true) can be JOINED by thread id; members
+# read the full message history and post; the sidebar gains a real "Lab
+# shared" server query ({members: caller, userId: {$ne: caller}}). FILES ARE
+# NEVER SHARED — retrieval file scoping is untouched in every flag state (a
+# member can never read another user's uploads through a shared thread; FIPPA
+# boundary, enforced at the retrieval query). Membership data (the
+# conversations.members array, owner always included) is written regardless
+# of flag state so it never drifts; every behavioural surface — join/leave/
+# member routes, widened history reads, membership authz — exists only when
+# ON. Default OFF: routes absent, queries and payloads byte-identical to
+# today. Read at call time (config.CHAT_SHARING_ENABLED) so tests can toggle
+# it without re-import.
+CHAT_SHARING_ENABLED = os.getenv("CHAT_SHARING_ENABLED", "false").strip().lower() in (
     "1",
     "true",
     "yes",

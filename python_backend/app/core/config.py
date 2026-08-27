@@ -680,10 +680,18 @@ VISION_DPI = int(os.getenv("VISION_DPI", "150"))
 # beyond the cap stay unindexed and are reported as such in the chip warning.
 VISION_MAX_PAGES_PER_DOC = int(os.getenv("VISION_MAX_PAGES_PER_DOC", "20"))
 
+# Output-token budget for ONE vision call. Dedicated (not OLLAMA_NUM_PREDICT):
+# qwen3-vl reasons before it transcribes and that reasoning shares this
+# budget, so on a dense chart/formula screenshot the answer path's 2048 was
+# exhausted by thinking alone -- done_reason=length, empty content, and the
+# upload failed as "nothing describable" (2026-08-27, fhwa_example1_tmax_error
+# .png). 6144 completed the same image with done_reason=stop in ~40s.
+VISION_NUM_PREDICT = int(os.getenv("VISION_NUM_PREDICT", "6144"))
+
 # Ceiling for a single per-page vision call (seconds). On expiry the PAGE is
 # recorded as failed and ingest moves on -- one slow page never fails the
-# document.
-VISION_TIMEOUT_SECONDS = float(os.getenv("VISION_TIMEOUT_SECONDS", "120"))
+# document. Sized for VISION_NUM_PREDICT at ~35 tok/s (6144 tokens ~ 175s).
+VISION_TIMEOUT_SECONDS = float(os.getenv("VISION_TIMEOUT_SECONDS", "240"))
 
 # Longest edge (pixels) for a DIRECTLY UPLOADED image sent to the vision model.
 # Larger photos are downscaled to this before the call -- never rejected for

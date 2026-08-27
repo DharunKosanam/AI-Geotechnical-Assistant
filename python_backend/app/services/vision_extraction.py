@@ -103,7 +103,8 @@ def _vision_chat(png_bytes: bytes, prompt: str, model: Optional[str] = None) -> 
         think=True,
         options={
             "num_ctx": config.OLLAMA_NUM_CTX,
-            "num_predict": config.OLLAMA_NUM_PREDICT,
+            # Vision-specific budget: reasoning shares it (see config.py).
+            "num_predict": config.VISION_NUM_PREDICT,
             # Transcription wants fidelity, not creativity.
             "temperature": 0.0,
         },

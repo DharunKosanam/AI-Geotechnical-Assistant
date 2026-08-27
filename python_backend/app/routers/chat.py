@@ -1802,6 +1802,16 @@ async def chat_formats_stream(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="threadId is required",
         )
+    # Membership gate (CHAT_SHARING_ENABLED) -- audit F-01, 2026-08-26. This
+    # route took any threadId unchecked and _run_format_turn persists the
+    # generated document under it, so a non-member could write into a thread
+    # they cannot read -- and, flag-on, the row surfaced in the owner's and
+    # every member's history. Same gate as the chat turn (_run_chat_turn),
+    # raised HERE, before the StreamingResponse starts, so a non-member gets
+    # a real 403 status (once the stream has begun an error can only be an
+    # event) and never touches the single-job slot below. Flag-off the helper
+    # is inert (no DB access), exactly as on the chat path.
+    await _shared_thread_scope(payload.threadId, current_user)
     if _format_job_active:
         raise _format_busy_response()
     # No await between the check above and this set: atomic on the event loop.

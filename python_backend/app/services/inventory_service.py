@@ -1038,7 +1038,8 @@ async def extract_feasibility_request(
     arithmetic."""
     import ollama
 
-    if client is None:
+    own_client = client is None
+    if own_client:
         client = ollama.AsyncClient(
             host=config.OLLAMA_BASE_URL, timeout=config.OLLAMA_REQUEST_TIMEOUT
         )
@@ -1066,6 +1067,15 @@ async def extract_feasibility_request(
     except Exception as exc:  # noqa: BLE001 - unreachable model -> snapshot-only answer
         logger.warning("inventory extraction FAILED (%s): %r", exc, message)
         return None
+    finally:
+        # Deterministic teardown (audit 2026-08-26): a locally built client was
+        # never closed. Only OUR client is closed -- a caller-supplied one
+        # (tests, shared clients) stays the caller's to manage.
+        if own_client:
+            try:
+                await client.close()
+            except Exception as close_err:
+                logger.warning("inventory extraction: closing Ollama client failed: %s", close_err)
     raw = (resp["message"]["content"] or "") if resp else ""
     parsed = parse_feasibility_extraction(raw, [str(i.get("id")) for i in items])
     logger.info("inventory extraction: %r -> %s", message, "ok" if parsed else "none")

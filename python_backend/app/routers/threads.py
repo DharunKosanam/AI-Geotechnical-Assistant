@@ -110,8 +110,33 @@ async def create_thread_history(
     request: CreateThreadHistoryRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Create a new thread entry in MongoDB history"""
+    """Create a new thread entry in MongoDB history.
+
+    Audit F-02 (2026-08-26): a second row for an existing threadId used to be
+    accepted. Two rows for one id let a stranger's row take the id over once
+    the owner deletes theirs (the membership gate's find_one then returns
+    the stranger's row, exposing the remaining members' orphaned turns).
+    Code guard: 409 when the id is already registered, by anyone. The unique
+    index on conversations.threadId (the race-proof half) is a live Atlas
+    write and is applied separately; see app/scripts/check_duplicate_threadids.py
+    for the read-only pre-check.
+    """
     try:
+        existing = await conversations_collection.find_one(
+            {"threadId": request.threadId}, {"userId": 1}
+        )
+        if existing is not None:
+            same_owner = existing.get("userId") == current_user.id
+            print(
+                f"[WARNING] Thread registration REJECTED for {request.threadId}: "
+                f"already registered by "
+                f"{'this user' if same_owner else 'another user'} (409)"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This thread id is already registered.",
+            )
+
         conversation_doc = {
             "userId": current_user.id,
             "threadId": request.threadId,
@@ -130,7 +155,11 @@ async def create_thread_history(
         print(f"[OK] Created thread history entry: {request.threadId}")
         
         return {"success": True, "message": "Thread created in history"}
-        
+
+    except HTTPException:
+        # The 409 is the contract; the blanket handler below must not
+        # flatten it into a 500 (same rule as update_thread).
+        raise
     except Exception as error:
         print(f"[ERROR] Error creating thread history: {error}")
         raise HTTPException(

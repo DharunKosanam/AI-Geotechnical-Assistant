@@ -194,8 +194,8 @@ def extract_pages_from_pdf(file_content: bytes) -> List[Tuple[int, str]]:
         if doc is not None:
             try:
                 doc.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[WARNING] Closing PDF document failed: {close_err}")
 
 
 def extract_text_from_pdf(file_content: bytes) -> str:
@@ -266,8 +266,8 @@ def _pdf_page_count(file_content: bytes) -> int:
         if doc is not None:
             try:
                 doc.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[WARNING] Closing PDF document failed: {close_err}")
 
 
 def _no_text_layer_error(filename: str, total_pages: int) -> "Exception":
@@ -386,8 +386,8 @@ def extract_pages_from_pdf_with_ocr(
         if doc is not None:
             try:
                 doc.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[WARNING] Closing PDF document failed: {close_err}")
 
     triples.sort(key=lambda t: t[0])
     if stats is not None:

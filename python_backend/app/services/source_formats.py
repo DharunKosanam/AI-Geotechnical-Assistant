@@ -245,8 +245,8 @@ async def _generate(
         finally:
             try:
                 await retry.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"[FORMATS] Closing Ollama retry client failed: {close_err}")
 
     final = _clean_llm_answer(raw_answer)
 

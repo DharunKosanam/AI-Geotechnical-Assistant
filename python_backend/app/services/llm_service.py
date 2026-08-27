@@ -229,8 +229,8 @@ def _resp_field(resp, key):
         getter = getattr(resp, "get", None)
         if callable(getter):
             return getter(key)
-    except Exception:
-        pass
+    except Exception as get_err:
+        print(f"   [WARNING] _resp_field: .get({key!r}) raised {type(get_err).__name__}: {get_err}; falling back to getattr")
     return getattr(resp, key, None)
 
 
@@ -484,8 +484,8 @@ async def _ollama_stream_and_clean(
             _GENERATIONS_IN_FLIGHT -= 1
             try:
                 await retry_client.close()
-            except Exception:
-                pass
+            except Exception as close_err:
+                print(f"   [WARNING] Closing Ollama retry client failed: {close_err}")
         if len(raw_answer.strip()) < SHORT_ANSWER_THRESHOLD:
             print(
                 f"   [GUARD] Still short after retry "
@@ -858,12 +858,21 @@ async def rewrite_query_with_history(
             client = ollama.AsyncClient(
                 host=OLLAMA_BASE_URL, timeout=OLLAMA_REWRITE_TIMEOUT
             )
-            resp = await client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": rewrite_prompt}],
-                think=True,
-                options=_ollama_options(),
-            )
+            try:
+                resp = await client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": rewrite_prompt}],
+                    think=True,
+                    options=_ollama_options(),
+                )
+            finally:
+                # Deterministic teardown (audit 2026-08-26): this client was
+                # never closed -- one leaked httpx connection pool per rewrite,
+                # left to the garbage collector. Same pattern as the answer path.
+                try:
+                    await client.close()
+                except Exception as close_err:
+                    print(f"[QUERY_REWRITE] Closing Ollama client failed: {close_err}")
             rewritten = (resp["message"]["content"] or "").strip()
         else:
             response = await rewriter.acomplete(rewrite_prompt)

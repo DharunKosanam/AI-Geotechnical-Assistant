@@ -86,6 +86,11 @@ async def test_interpret_requires_auth(async_client, enable_workspace):
 
 @pytest.mark.asyncio
 async def test_status_reports_flag(async_client, authed, monkeypatch):
+    # This test pins the PRE-instrument-parsers payload ({"enabled": ...}
+    # only). With INSTRUMENT_PARSERS_ENABLED on (the dev/prod .env) the status
+    # route legitimately adds instrument_parsers/instrument_extensions (see
+    # test_workspace_datasets for that contract), so pin that flag OFF here.
+    monkeypatch.setattr(config, "INSTRUMENT_PARSERS_ENABLED", False)
     monkeypatch.setattr(config, "WORKSPACE_ENABLED", True)
     assert (await async_client.get("/api/workspace/status")).json() == {"enabled": True}
 

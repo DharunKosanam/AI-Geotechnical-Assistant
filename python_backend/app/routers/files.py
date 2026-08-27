@@ -9,7 +9,7 @@ import io
 from bson import ObjectId
 from app.core import config
 from app.core.config import RATE_LIMIT_UPLOAD, RATE_LIMIT_UPLOAD_HOURLY
-from app.core.database import files_collection
+from app.core.database import conversations_collection, files_collection
 from app.core.rate_limit import limiter, rate_limit_identify, user_id_key
 from app.dependencies.auth import get_current_user
 from app.services.file_processing import (
@@ -424,6 +424,52 @@ async def process_file_ingestion(
         gc.collect()
 
 
+async def _require_thread_upload_access(thread_id: Optional[str], current_user: User) -> None:
+    """Audit F-01 (2026-08-26): ``threadId`` on /api/upload was accepted
+    unchecked, so any account could park documents under any thread id and
+    then generate a format document into that thread. A thread upload must
+    target a thread that is the caller's own or, with CHAT_SHARING_ENABLED,
+    one they have joined:
+
+      * no threadId            -> plain user_upload, nothing to check;
+      * no conversations row   -> 404 (an id is not a thread until POST
+                                  /api/assistants/threads/history registers
+                                  it; the frontend's ensureThread() awaits
+                                  that registration BEFORE the first upload);
+      * caller is the owner    -> allowed, in every flag state;
+      * flag on, caller in members -> allowed;
+      * anyone else            -> 403.
+
+    Runs BEFORE the ingest slot is reserved, the body is read or the parent
+    doc is inserted, so a rejected upload persists nothing. Reads only
+    userId/members from the row.
+    """
+    if not thread_id:
+        return
+    conv = await conversations_collection.find_one(
+        {"threadId": thread_id}, {"userId": 1, "members": 1}
+    )
+    if conv is None:
+        print(
+            f"[WARNING] Upload REJECTED: thread {thread_id} is not registered "
+            f"(user {current_user.id}) (404)"
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thread not found")
+    if conv.get("userId") == current_user.id:
+        return
+    if config.CHAT_SHARING_ENABLED and current_user.id in (conv.get("members") or []):
+        return
+    print(
+        f"[WARNING] Upload REJECTED: user {current_user.id} is not the owner"
+        f"{' or a member' if config.CHAT_SHARING_ENABLED else ''} of thread "
+        f"{thread_id} (403)"
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You do not have access to this thread.",
+    )
+
+
 @router.post("/upload")
 @limiter.limit(RATE_LIMIT_UPLOAD, key_func=user_id_key)
 @limiter.limit(RATE_LIMIT_UPLOAD_HOURLY, key_func=user_id_key)
@@ -455,6 +501,11 @@ async def upload_document(
     fields are ignored entirely, so the request validates and ingests exactly
     as any other upload — byte-identical to pre-diagram behavior.
     """
+    # Thread access gate (audit F-01) -- before the slot, the body and the
+    # parent doc: a threadId that is not the caller's own/joined thread is
+    # refused with nothing persisted. A blank threadId is a plain user_upload.
+    await _require_thread_upload_access(threadId or None, current_user)
+
     # Queue-depth cap (Phase 0.5): reject before buffering the file when the
     # ingest backlog is already full, so a burst can't exhaust memory/CPU.
     if not ingest_try_acquire():

@@ -4,6 +4,7 @@ Thread management endpoints - MongoDB-based storage
 from fastapi import APIRouter, Depends, HTTPException, status
 from datetime import datetime
 from typing import Dict
+import time
 import uuid
 
 from models import (
@@ -180,13 +181,28 @@ async def update_thread(
                     {"userId": current_user.id, "threadId": request.threadId}
                 )
                 if exists is not None:
+                    print(
+                        f"[TITLE] Conditional rename NOT applied for thread "
+                        f"{request.threadId}: current name {exists.get('name')!r} "
+                        f"!= expected placeholder {request.expectedCurrentName!r} (409)"
+                    )
                     raise HTTPException(
                         status_code=409,
                         detail="Thread name has changed; not overwriting.",
                     )
+            # Silent-failure guard (2026-08-26): a rename that matches nothing
+            # used to leave no trace at all.
+            print(
+                f"[WARNING] Thread update NOT applied for thread {request.threadId}: "
+                f"no matching thread for user {current_user.id} (404)"
+            )
             raise HTTPException(status_code=404, detail="Thread not found")
 
-        print(f"[OK] Updated thread: {request.threadId}")
+        what = (
+            f" name={update_fields['name']!r}" if "name" in update_fields else ""
+        ) + (f" isGroup={update_fields['isGroup']}" if "isGroup" in update_fields else "")
+        cond = " (conditional auto-title)" if request.expectedCurrentName is not None else ""
+        print(f"[OK] Updated thread: {request.threadId}{what}{cond}")
         return {"success": True, "message": "Thread updated successfully"}
 
     except HTTPException:
@@ -310,13 +326,35 @@ async def generate_thread_title(
     request: TitleGenerationRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a concise title for a thread using Groq"""
+    """Generate a concise title for a thread using the configured LLM.
+
+    Observability contract (2026-08-26, "title silence" incident): every
+    outcome prints exactly one terminal line -- ``[TITLE] Skipped`` (empty
+    text), ``[OK] Generated title`` or ``[ERROR] Error generating title``
+    with the exception type and message -- plus one ``[TITLE] Generating``
+    line on arrival. So a thread that keeps its timestamp placeholder with NO
+    ``[TITLE]``/``title`` line in the journal means the request never reached
+    this handler (the frontend skipped it, or it was rejected before the
+    handler ran, e.g. 401) -- not that generation failed quietly here.
+    """
+    started = time.monotonic()
     try:
         message_text = request.text
         if not message_text:
+            print(
+                f"[TITLE] Skipped for thread {thread_id}: empty message text "
+                f"(message={request.message!r}, content={request.content!r}) "
+                f"-- returning timestamp fallback"
+            )
             return {"title": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        
-        # Use Groq to generate title with improved prompt
+
+        print(
+            f"[TITLE] Generating title for thread {thread_id} "
+            f"(user={current_user.id}, {len(message_text)} chars, "
+            f"provider={config.LLM_PROVIDER})"
+        )
+
+        # Use the configured LLM to generate title with improved prompt
         llm = get_llm()
         
         # Improved prompt: more specific, clearer instructions
@@ -334,7 +372,9 @@ User Query: {message_text[:200]}
 Title:"""
         
         response = await llm.acomplete(prompt)
-        title = response.text.strip()
+        elapsed = time.monotonic() - started
+        raw_text = response.text or ""
+        title = raw_text.strip()
         
         # Aggressive cleaning to remove any artifacts
         import re
@@ -365,17 +405,28 @@ Title:"""
         
         # Fallback if title is empty or too short after cleaning
         if not title or len(title) < 3:
+            print(
+                f"[TITLE] LLM output unusable after cleaning for thread {thread_id} "
+                f"(raw={raw_text[:120]!r}) -- using the first words of the message"
+            )
             # Use first few words of the message
             words = message_text[:80].split()[:5]
             title = ' '.join(words)
             if len(title) > 40:
                 title = title[:37] + "..."
         
-        print(f"[OK] Generated title for thread {thread_id}: {title}")
+        print(f"[OK] Generated title for thread {thread_id} in {elapsed:.1f}s: {title}")
         return {"title": title}
-        
+
     except Exception as error:
-        print(f"[ERROR] Error generating title: {error}")
+        # The caller gets a usable (timestamp) title either way, so the ONLY
+        # trace of a failure is this line -- it must say what went wrong.
+        elapsed = time.monotonic() - started
+        print(
+            f"[ERROR] Error generating title for thread {thread_id} after "
+            f"{elapsed:.1f}s: {type(error).__name__}: {error} "
+            f"-- returning timestamp fallback"
+        )
         fallback_title = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return {"title": fallback_title}
 
